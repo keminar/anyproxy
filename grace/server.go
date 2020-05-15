@@ -208,6 +208,7 @@ func (srv *Server) shutdown(timeout int) {
 
 	srv.state = StateShuttingDown
 	// listen close就不能accept新的链接，已接收的链接不受影响
+	// 关闭已连接的是用tcpConn.Close(), 为了简单下面是用超时来等待处理
 	srv.ln.Close()
 	if timeout > 0 {
 		log.Println(syscall.Getpid(), fmt.Sprintf("Waiting %d second for connections to finish...", timeout))
