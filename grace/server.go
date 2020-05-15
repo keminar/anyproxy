@@ -19,6 +19,9 @@ type ConnHandler func(conn net.Conn) error
 //ErrReloadClose reload graceful
 var ErrReloadClose = errors.New("reload graceful")
 
+//TermTimeout 平滑重启主进程保持秒数
+var TermTimeout = 10
+
 // Server embedded http.Server
 type Server struct {
 	Addr         string
@@ -39,6 +42,7 @@ func (srv *Server) Serve() (err error) {
 	srv.state = StateRunning
 	defer func() { srv.state = StateTerminate }()
 
+	// 主动重启导致的错误为ErrReloadClose
 	if err = srv.serve(); err != nil && err != ErrReloadClose {
 		log.Println(syscall.Getpid(), "Server.Serve() error:", err)
 		return err
@@ -172,10 +176,11 @@ func (srv *Server) handleSignals() {
 			}
 		case syscall.SIGINT:
 			log.Println(pid, "Received SIGINT.")
-			srv.shutdown()
+			// ctrl+c无等待时间
+			srv.shutdown(0)
 		case syscall.SIGTERM:
 			log.Println(pid, "Received SIGTERM.")
-			srv.shutdown()
+			srv.shutdown(TermTimeout)
 		default:
 			log.Printf("Received %v: nothing i care about...\n", sig)
 		}
@@ -183,6 +188,7 @@ func (srv *Server) handleSignals() {
 	}
 }
 
+// 处理默认消息之外的钩子
 func (srv *Server) signalHooks(ppFlag int, sig os.Signal) {
 	if _, notSet := srv.SignalHooks[ppFlag][sig]; !notSet {
 		return
@@ -195,14 +201,20 @@ func (srv *Server) signalHooks(ppFlag int, sig os.Signal) {
 // shutdown closes the listener so that no new connections are accepted. it also
 // starts a goroutine that will serverTimeout (stop all running requests) the server
 // after DefaultTimeout.
-func (srv *Server) shutdown() {
+func (srv *Server) shutdown(timeout int) {
 	if srv.state != StateRunning {
 		return
 	}
 
 	srv.state = StateShuttingDown
-	log.Println(syscall.Getpid(), "Waiting for connections to finish...")
-	srv.terminalChan <- srv.ln.Close()
+	// listen close就不能accept新的链接，已接收的链接不受影响
+	srv.ln.Close()
+	if timeout > 0 {
+		log.Println(syscall.Getpid(), fmt.Sprintf("Waiting %d second for connections to finish...", timeout))
+		// 等一定时间让已接收的请求处理一下，如果还处理不完就强制关闭了
+		time.Sleep(time.Duration(timeout) * time.Second)
+	}
+	srv.terminalChan <- nil
 }
 
 func (srv *Server) fork() (err error) {
