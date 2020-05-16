@@ -16,26 +16,34 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 ```
 
 ## TCP stream
+
 ```
-+----------+      +------------+      +-------+
-| 个人电脑 | <==> |本地anyproxy| <==> |互联网 |
-+----------+      +------------+      +-------+
++----------+      +------------+      +------+
+| 个人电脑  | <==> |本地anyproxy| <==> |互联网 |
++----------+      +------------+      +------+
 
 # 或
-+----------+      +------------+      +------------+      +-------+
-| 个人电脑 | <==> |本地anyproxy| <==> |远程tunneld | <==> |互联网 |
-+----------+      +------------+      +------------+      +-------+
++----------+      +------------+      +------------+      +------+
+| 个人电脑  | <==> |本地anyproxy| <==> |远程tunneld | <==> |互联网 |
++----------+      +------------+      +------------+      +------+
 ```
+
+## 平滑重启
+
+```
+kill -HUP pid
+```
+
 ## 参考
 
-https://github.com/ryanchapman/go-any-proxy.git
+<https://github.com/ryanchapman/go-any-proxy.git>
 
-https://zhuanlan.zhihu.com/p/25510419
+<https://zhuanlan.zhihu.com/p/25510419>
 
-http://blog.fatedier.com/2018/11/21/service-mesh-traffic-hijack/
+<http://blog.fatedier.com/2018/11/21/service-mesh-traffic-hijack/>
 
-https://my.oschina.net/mingyuejingque/blog/754089
+<https://my.oschina.net/mingyuejingque/blog/754089>
 
-https://github.com/darkk/redsocks
+<https://github.com/darkk/redsocks>
 
-https://www.flysnow.org/2016/12/26/golang-socket5-proxy.html
+<https://www.flysnow.org/2016/12/26/golang-socket5-proxy.html>

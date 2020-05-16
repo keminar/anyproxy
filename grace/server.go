@@ -14,7 +14,7 @@ import (
 )
 
 //ConnHandler connection handler definition
-type ConnHandler func(conn net.Conn) error
+type ConnHandler func(conn *net.TCPConn) error
 
 //ErrReloadClose reload graceful
 var ErrReloadClose = errors.New("reload graceful")

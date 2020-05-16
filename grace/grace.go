@@ -14,6 +14,26 @@
 
 // Package grace use to hot reload
 // Description: http://grisha.org/blog/2014/06/03/graceful-restart-in-golang/
+
+// examples
+// package main
+// 
+// import (
+// 	"flag"
+// 	"net"
+// 
+// 	"github.com/keminar/anyproxy/grace"
+// )
+// 
+// var appHandler func(conn net.Conn) error
+// 
+// func main() {
+// 	flag.Parse()
+// 
+// 	server := grace.NewServer(":3000", appHandler)
+// 	server.ListenAndServe()
+// }
+
 package grace
 
 import (
