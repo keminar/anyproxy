@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
 )
 
@@ -143,11 +144,8 @@ func dail(dstIP string, dstPort uint16) (conn *net.TCPConn, err error) {
 
 // handshake 和server握手
 func handshake(dstName, dstIP string, dstPort uint16) (conn *net.TCPConn, err error) {
-	proxyIP := "127.0.0.1"
-	proxyPort := 3001
-	useProxy2 := true
-	if useProxy2 {
-		conn, err = dail(proxyIP, uint16(proxyPort))
+	if config.ProxyServer != "" && config.ProxyPort > 0 {
+		conn, err = dail(config.ProxyServer, config.ProxyPort)
 		if err != nil {
 			log.Println("dail err", err.Error())
 			return
