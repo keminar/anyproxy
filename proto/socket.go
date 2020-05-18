@@ -1,13 +1,19 @@
 package proto
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/keminar/anyproxy/crypto"
 )
 
 const SO_ORIGINAL_DST = 80
@@ -43,6 +49,7 @@ func GetOriginalDstAddr(tcpConn *net.TCPConn) (dstIP string, dstPort uint16, lef
 	return
 }
 
+// copyBuffer 传输数据
 func copyBuffer(dst io.Writer, src io.Reader, dstname string, srcname string) (data bytes.Buffer, written int64, err error) {
 
 	size := 32 * 1024
@@ -57,7 +64,7 @@ func copyBuffer(dst io.Writer, src io.Reader, dstname string, srcname string) (d
 	for {
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			fmt.Printf("receive from %s, data len :%d\n%s\n", srcname, nr, buf[0:nr])
+			log.Printf("receive from %s, data len :%d\n", srcname, nr)
 			data.Write(buf[0:nr])
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
@@ -90,6 +97,7 @@ func copyBuffer(dst io.Writer, src io.Reader, dstname string, srcname string) (d
 	return data, written, err
 }
 
+// transfer 交换数据
 func transfer(leftConn *net.TCPConn, rightConn *net.TCPConn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -98,30 +106,30 @@ func transfer(leftConn *net.TCPConn, rightConn *net.TCPConn) {
 		defer wg.Done()
 		data, _, err := copyBuffer(rightConn, leftConn, "server", "client")
 		if err != nil {
-			//panic(err)
-			fmt.Println(err.Error())
+			log.Println(err.Error())
 		}
-		fmt.Println("request", len(data.String()))
+		log.Println("request", len(data.String()))
 	}()
 	//取返回结果
 	go func() {
 		defer wg.Done()
 		data, _, err := copyBuffer(leftConn, rightConn, "client", "server")
 		if err != nil {
-			//panic(err)
-			fmt.Println(err.Error())
+			log.Println(err.Error())
 		}
-		fmt.Println("response", len(data.String()))
+		log.Println("response", len(data.String()))
 	}()
 	go func() {
 		wg.Wait()
 		leftConn.Close()
-		fmt.Println("connection close")
+		log.Println("connection close")
 	}()
 }
 
+// dail tcp连接
 func dail(dstIP string, dstPort uint16) (conn *net.TCPConn, err error) {
 	var addr *net.TCPAddr
+	log.Printf("accept and create a new connection to server %s:%d\n", dstIP, dstPort)
 	addr, err = net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", dstIP, dstPort))
 	if err != nil {
 		return
@@ -129,6 +137,49 @@ func dail(dstIP string, dstPort uint16) (conn *net.TCPConn, err error) {
 	conn, err = net.DialTCP("tcp4", nil, addr)
 	if err != nil {
 		return
+	}
+	return
+}
+
+// handshake 和server握手
+func handshake(dstName, dstIP string, dstPort uint16) (conn *net.TCPConn, err error) {
+	proxyIP := "127.0.0.1"
+	proxyPort := 3001
+	useProxy2 := true
+	if useProxy2 {
+		conn, err = dail(proxyIP, uint16(proxyPort))
+		if err != nil {
+			log.Println("dail err", err.Error())
+			return
+		}
+		if dstName == "" {
+			dstName = dstIP
+		}
+		x := []byte(fmt.Sprintf("%s:%d", dstName, dstPort))
+		log.Println("CONNECT ", string(x))
+		key := []byte(AesToken)
+		var x1 []byte
+		x1, err = crypto.EncryptAES(x, key)
+		if err != nil {
+			log.Println("encrypt err", err.Error())
+			return
+		}
+
+		// CONNECT实现的加密版
+		connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
+		fmt.Fprintf(conn, connectString)
+		var status string
+		status, err = bufio.NewReader(conn).ReadString('\n')
+		if err != nil {
+			log.Printf("PROXY ERR: Could not find response to CONNECT: err=%v", err)
+			return
+		}
+		// todo 检查是不是200返回
+		if strings.Contains(status, "200") == false {
+			log.Printf("PROXY ERR: Proxy response to CONNECT was: %s.\n", strconv.Quote(status))
+		}
+	} else {
+		conn, err = dail(dstIP, dstPort)
 	}
 	return
 }

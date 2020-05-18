@@ -2,16 +2,15 @@ package main
 
 import (
 	"flag"
-	"net"
 
 	"github.com/keminar/anyproxy/grace"
+	"github.com/keminar/anyproxy/proto"
 )
-
-var appHandler func(conn *net.TCPConn) error
 
 func main() {
 	flag.Parse()
 
-	server := grace.NewServer(":3001", appHandler)
+	c := proto.NewServer()
+	server := grace.NewServer(":3001", c.Handler)
 	server.ListenAndServe()
 }

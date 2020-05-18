@@ -35,6 +35,17 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 kill -HUP pid
 ```
 
+## todo
+* 根据CIDR做不同出口请求
+* 对域名支持加Host绑定并配置请求出口
+* 配置文件支持
+* 服务间通信增加token验证
+* 日志信息完善
+* DNS解析增加cache
+* 可以支持多个server，如果一个不可用用下一个
+* server多级转发
+* 加黑名单功能，不给请求
+
 ## 参考
 
 <https://github.com/ryanchapman/go-any-proxy.git>

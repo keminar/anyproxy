@@ -112,7 +112,7 @@ func (srv *Server) ListenAndServe() (err error) {
 		}
 	}
 
-	log.Println(os.Getpid(), fmt.Sprintf("Listening for connections on %v", srv.ln.Addr()))
+	log.Println(fmt.Sprintf("Listening for connections on %v, pid=%d", srv.ln.Addr(), os.Getpid()))
 
 	return srv.Serve()
 }
