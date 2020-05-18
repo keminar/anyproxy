@@ -72,7 +72,9 @@ func main() {
 		flag.Usage()
 		return
 	}
-
+	if !strings.Contains(gListenAddrPort, ":") {
+		gListenAddrPort = ":" + gListenAddrPort
+	}
 	c := proto.NewServer()
 	server := grace.NewServer(gListenAddrPort, c.Handler)
 	server.ListenAndServe()

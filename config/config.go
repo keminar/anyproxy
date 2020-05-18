@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"strconv"
 	"strings"
 )
@@ -22,6 +23,9 @@ func SetProxyServer(gProxyServerSpec string) {
 		if err == nil {
 			ProxyServer = tmp[0]
 			ProxyPort = uint16(portInt)
+			log.Printf("Proxy server is %s:%d\n", ProxyServer, ProxyPort)
+		} else {
+			log.Printf("Set proxy port err %s\n", err.Error())
 		}
 	}
 }
