@@ -1,6 +1,7 @@
 package grace
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -9,12 +10,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 //ConnHandler connection handler definition
-type ConnHandler func(conn *net.TCPConn) error
+type ConnHandler func(ctx context.Context, conn *net.TCPConn) error
 
 //ErrReloadClose reload graceful
 var ErrReloadClose = errors.New("reload graceful")
@@ -33,6 +35,9 @@ type Server struct {
 	state        uint8
 	Network      string
 	terminalChan chan error
+
+	mu         sync.Mutex
+	activeConn map[*conn]struct{}
 }
 
 // Serve accepts incoming connections on the Listener l,
@@ -53,12 +58,41 @@ func (srv *Server) Serve() (err error) {
 	return <-srv.terminalChan
 }
 
+// contextKey is a value for use with context.WithValue. It's used as
+// a pointer so it fits in an interface{} without allocation.
+type contextKey struct {
+	name string
+}
+
+func (k *contextKey) String() string { return "tcp context value " + k.name }
+
+var (
+	// ServerContextKey is a context key. It can be used in HTTP
+	// handlers with context.WithValue to access the server that
+	// started the handler. The associated value will be of
+	// type *Server.
+	ServerContextKey = &contextKey{"server"}
+
+	// LocalAddrContextKey is a context key. It can be used in
+	// HTTP handlers with context.WithValue to access the local
+	// address the connection arrived on.
+	// The associated value will be of type net.Addr.
+	LocalAddrContextKey = &contextKey{"local-addr"}
+
+	// TraceIDContextKey traceID
+	TraceIDContextKey = &contextKey{"traceID"}
+)
+
 func (srv *Server) serve() (err error) {
 	var tempDelay time.Duration
-	var tcpConn *net.TCPConn
 
+	baseCtx := context.Background() // base is always background, per Issue 16220
+
+	//srv, ok := ctx.Value(grace.ServerContextKey).(*grace.Server)
+	ctx := context.WithValue(baseCtx, ServerContextKey, srv)
 	for {
-		tcpConn, err = srv.ln.AcceptTCP()
+		var rw *net.TCPConn
+		rw, err = srv.ln.AcceptTCP()
 		if err != nil {
 			// 主动重启服务
 			if srv.state == StateShuttingDown && strings.Contains(err.Error(), "use of closed network connection") {
@@ -79,8 +113,72 @@ func (srv *Server) serve() (err error) {
 			}
 			return err
 		}
-		go srv.Handler(tcpConn)
+		tempDelay = 0
+		c := srv.newConn(rw)
+		c.setState(c.rwc, StateNew) // before Serve can return
+		go c.serve(ctx)
 	}
+}
+
+// closeIdleConns closes all idle connections and reports whether the
+// server is quiescent.
+func (srv *Server) closeIdleConns() bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	quiescent := true
+	for c := range srv.activeConn {
+		st, unixSec := c.getState()
+		// Issue 22682: treat StateNew connections as if
+		// they're idle if we haven't read the first request's
+		// header in over 5 seconds.
+		if st == StateNew && unixSec < time.Now().Unix()-5 {
+			st = StateIdle
+		}
+		if st != StateIdle || unixSec == 0 {
+			// Assume unixSec == 0 means it's a very new
+			// connection, without state set yet.
+			quiescent = false
+			continue
+		}
+		c.rwc.Close()
+		delete(srv.activeConn, c)
+	}
+	return quiescent
+}
+
+// GetConns 获取所有连接数
+func (srv *Server) GetConns() int {
+	return len(srv.activeConn)
+}
+
+// GetConnRange 输出全部连接
+func (srv *Server) GetConnRange(f func(ID uint, startTime int64, remoteAddr string)) {
+	for c := range srv.activeConn {
+		f(c.traceID, c.startTime, c.remoteAddr)
+	}
+}
+
+// 统计连接数
+func (srv *Server) trackConn(c *conn, add bool) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.activeConn == nil {
+		srv.activeConn = make(map[*conn]struct{})
+	}
+	if add {
+		srv.activeConn[c] = struct{}{}
+	} else {
+		delete(srv.activeConn, c)
+	}
+}
+
+func (srv *Server) newConn(rwc *net.TCPConn) *conn {
+	c := &conn{
+		server: srv,
+		rwc:    rwc,
+	}
+	return c
 }
 
 // ListenAndServe listens on the TCP network address srv.Addr and then calls Serve
@@ -210,11 +308,33 @@ func (srv *Server) shutdown(timeout int) {
 	// listen close就不能accept新的链接，已接收的链接不受影响
 	// 关闭已连接的是用tcpConn.Close(), 为了简单下面是用超时来等待处理
 	srv.ln.Close()
+
 	if timeout > 0 {
-		log.Println(syscall.Getpid(), fmt.Sprintf("Waiting %d second for connections to finish...", timeout))
+		log.Println(syscall.Getpid(), fmt.Sprintf("Waiting max %d second for connections to finish...", timeout))
 		// 等一定时间让已接收的请求处理一下，如果还处理不完就强制关闭了
-		time.Sleep(time.Duration(timeout) * time.Second)
+		after := time.After(time.Duration(timeout) * time.Second)
+
+		var shutdownPollInterval = 500 * time.Millisecond
+		ticker := time.NewTicker(shutdownPollInterval)
+		defer ticker.Stop()
+		for {
+			srv.closeIdleConns()
+			if len(srv.activeConn) == 0 {
+				break
+			}
+			force := false
+			select {
+			case <-after:
+				// 这里加break没用，只会跳一层select ，所以加一个变量
+				force = true
+			case <-ticker.C:
+			}
+			if force {
+				break
+			}
+		}
 	}
+
 	srv.terminalChan <- nil
 }
 

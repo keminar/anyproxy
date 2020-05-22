@@ -8,16 +8,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/grace"
+	"github.com/keminar/anyproxy/logging"
 	"github.com/keminar/anyproxy/proto"
 )
 
-const VERSION = "0.1"
+const VERSION = "0.2"
 
 var (
 	gListenAddrPort  string
 	gProxyServerSpec string
 	gHelp            bool
+	gDebug           int
 )
 
 func init() {
@@ -54,6 +57,7 @@ func init() {
 	}
 	flag.StringVar(&gListenAddrPort, "l", ":3001", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
+	flag.IntVar(&gDebug, "d", 0, "debug mode")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
 
 }
@@ -75,7 +79,8 @@ func main() {
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort
 	}
-	c := proto.NewServer()
-	server := grace.NewServer(gListenAddrPort, c.Handler)
+	config.SetDebugLevel(gDebug)
+	logging.SetDefaultLogger("./logs/", "tunneld", true, 3)
+	server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
 	server.ListenAndServe()
 }

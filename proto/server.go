@@ -1,49 +1,36 @@
 package proto
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net"
 )
 
-// Server 服务端
-type Server struct {
-	req *Request
-}
+// ServerHandler 服务端处理
+func ServerHandler(ctx context.Context, tcpConn *net.TCPConn) error {
+	req := NewRequest(ctx, tcpConn)
 
-// NewServer 服务端初始化
-func NewServer() *Server {
-	c := &Server{}
-	return c
-}
+	// test if the underlying fd is nil
+	remoteAddr := tcpConn.RemoteAddr()
+	if remoteAddr == nil {
+		log.Println(TraceID(req.ID), "ClientHandler(): oops, clientConn.fd is nil!")
+		return errors.New("clientConn.fd is nil")
+	}
 
-// Handler 服务端处理
-func (that *Server) Handler(tcpConn *net.TCPConn) error {
-	that.req = NewRequest(tcpConn)
-	_, err := that.req.ReadRequest("server")
-	if err != nil {
+	ok, err := req.ReadRequest("server")
+	if err != nil && ok == false {
+		log.Println("req err", err.Error())
 		return err
 	}
-	// server 只支持通过client或是server连接，后续还要加安全密钥检查
-	if that.req.Method != "CONNECT" {
+
+	// server 只支持通过client/server和server连接，后续还要加安全密钥检查
+	if req.Proto != "http" {
+		return errors.New("Not http method")
+	}
+	stream, ok := req.Stream.(*httpStream)
+	if !ok || stream.Method != "CONNECT" {
 		return errors.New("Not CONNECT method")
 	}
-	log.Println(that.req.IsHTTP, that.req.Method, that.req.RequestURI)
-	log.Println(that.req.URL.Scheme, that.req.URL.Host, that.req.URL.Port(), that.req.Header)
-
-	//建立隧道
-	_, err = tcpConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
-	if err != nil {
-		log.Println("write err", err.Error())
-		return err
-	}
-
-	log.Println("PROXY=>", that.req.DstIP, that.req.DstPort)
-	rightConn, err := dail(that.req.DstIP, that.req.DstPort)
-	if err != nil {
-		log.Println("dail err", err.Error())
-		return err
-	}
-	transfer(tcpConn, rightConn)
-	return nil
+	return req.Stream.response()
 }

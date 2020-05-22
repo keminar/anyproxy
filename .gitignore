@@ -3,3 +3,5 @@
 go.sum
 anyproxy
 tunnel/tunneld
+logs/
+tunnel/logs/
