@@ -76,6 +76,7 @@ func main() {
 		flag.Usage()
 		return
 	}
+
 	// 支持只输入端口的形式
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort

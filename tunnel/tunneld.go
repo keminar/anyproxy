@@ -76,11 +76,16 @@ func main() {
 		flag.Usage()
 		return
 	}
+
+	// 支持只输入端口的形式
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort
 	}
 	config.SetDebugLevel(gDebug)
 	logging.SetDefaultLogger("./logs/", "tunneld", true, 3)
+	// 设置代理
+	config.SetProxyServer(gProxyServerSpec)
+
 	server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
 	server.ListenAndServe()
 }
