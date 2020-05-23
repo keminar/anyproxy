@@ -51,7 +51,7 @@ sudo -u anyproxy ./tunneld
 sudo -u anyproxy ./anyproxy -p '127.0.0.1:3001'
 ```
 
-注：对于windows系统可以选择在虚拟机中启动或是win10的WSL中启动
+注：因为用到了系统函数，并不能跨平台。对于windows系统用户可以选择在虚拟机中启动或是win10的WSL中启动
 
 
 ## 平滑重启
