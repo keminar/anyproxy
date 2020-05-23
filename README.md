@@ -4,20 +4,25 @@ anyproxy 是一个tcp转发服务，部署在客户机，可以直接将请求�
 
 tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出或是转到下一个tunneld
 
-anyproxy 到 tunneld 的转发过程可以支持双向加密
+anyproxy 到 tunneld 的转发过程可以支持简单双向加密更安全
 
-## 代理
+anyproxy 可以代替charles进行手机抓包进行开发测试
+
+## 代理设置
 
 * 防火墙全局代理
 
 ```
-# uid为1000的tcp请求不转发,并用uid 1000启动anyproxy
-sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner 1000 -j RETURN
+#添加一个不可以登录的用户
+sudo useradd -M -s /sbin/nologin anyproxy
+# uid为anyproxy的tcp请求不转发,并用anyproxy用户启动anyproxy程序
+sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner anyproxy -j RETURN
 # 其它用户的tcp请求转发到本地3000端口
 sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 ```
 
-* 浏览器 [Chrome代理设置](https://zhidao.baidu.com/question/204679423955769445.html)
+* 浏览器 [Chrome设置](https://zhidao.baidu.com/question/204679423955769445.html)
+* 手机 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
 
 ## 服务部署
 
@@ -36,6 +41,20 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 | Computer | <==> | anyproxy | <==> | tunneld | <==> | tunneld | <==> | Internet |
 +----------+      +----------+      +---------+      +---------+      +----------+
 ```
+
+## 启动
+
+```
+# 示例1. 以anyproxy用户启动
+sudo -u anyproxy ./anyproxy
+
+# 示例2. 启动tunneld
+sudo -u anyproxy ./tunneld
+
+# 示例3. 启动anyproxy并将请求转给tunneld
+sudo -u anyproxy ./anyproxy -p '127.0.0.1:3001'
+```
+
 
 ## 平滑重启
 
@@ -57,6 +76,7 @@ kill -HUP pid
 * 请求Body内容体记录
 * 服务间通信http请求完全加密（header+body)
 * HTTPS的SNI的支持?
+* 支持转发到socket5服务
 
 ## 参考
 

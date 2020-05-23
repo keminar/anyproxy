@@ -1,5 +1,6 @@
 .history
 .vscode
+go.mod
 go.sum
 anyproxy
 tunneld
