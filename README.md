@@ -22,7 +22,7 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 ```
 
 * 浏览器 [Chrome设置](https://zhidao.baidu.com/question/204679423955769445.html)
-* 手机 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
+* 手机端 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
 
 ## 服务部署
 
@@ -42,7 +42,7 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 +----------+      +----------+      +---------+      +---------+      +----------+
 ```
 
-## 启动
+## 本机启动
 
 ```
 # 示例1. 以anyproxy用户启动
@@ -63,7 +63,17 @@ sudo -u anyproxy ./anyproxy -p '127.0.0.1:3001'
 kill -HUP pid
 ```
 
-## todo
+## 使用Docker
+
+```
+# 构建
+docker build -t anyproxy:latest .
+# 运行
+docker run anyproxy:latest
+```
+
+## Todo
+
 * 根据CIDR做不同出口请求
 * 对域名支持加Host绑定并配置请求出口
 * 配置文件支持
