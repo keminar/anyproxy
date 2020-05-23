@@ -2,6 +2,7 @@
 .vscode
 go.sum
 anyproxy
+tunneld
 tunnel/tunneld
 logs/
 tunnel/logs/

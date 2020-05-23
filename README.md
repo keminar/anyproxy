@@ -6,7 +6,9 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 
 anyproxy 到 tunneld 的转发过程可以支持双向加密
 
-## 防火墙
+## 代理
+
+* 防火墙全局代理
 
 ```
 # uid为1000的tcp请求不转发,并用uid 1000启动anyproxy
@@ -15,7 +17,9 @@ sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner 1000 -j RETURN
 sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 ```
 
-## TCP stream
+* 浏览器 [Chrome代理设置](https://zhidao.baidu.com/question/204679423955769445.html)
+
+## 服务部署
 
 ```
 +----------+      +----------+      +----------+
@@ -26,6 +30,11 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 +----------+      +----------+      +---------+      +----------+
 | Computer | <==> | anyproxy | <==> | tunneld | <==> | Internet |
 +----------+      +----------+      +---------+      +----------+
+
+# or
++----------+      +----------+      +---------+      +---------+      +----------+
+| Computer | <==> | anyproxy | <==> | tunneld | <==> | tunneld | <==> | Internet |
++----------+      +----------+      +---------+      +---------+      +----------+
 ```
 
 ## 平滑重启
