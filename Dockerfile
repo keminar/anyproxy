@@ -18,8 +18,9 @@ COPY --from=builder /go/bin/tunneld /go/bin/tunneld
 
 # 避免使用container的用户root
 RUN adduser -u 1000 -D appuser
-USER appuser
+RUN mkdir logs/ && chown appuser logs/
 
+USER appuser
 # 不用ENTRYPOINT的原因是docker run不方便覆盖 
 # 具体参考 https://blog.csdn.net/u010900754/article/details/78526443
 CMD [ "/go/bin/anyproxy" ]
