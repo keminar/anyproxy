@@ -1,12 +1,8 @@
 # Any Proxy
 
-anyproxy 是一个tcp转发服务，部署在客户机，可以直接将请求发出，也可以将流转到tunneld
+anyproxy 是一个tcp转发客户端，可以让不支持通过代理服务器工作的网络程序能通过HTTPS或SOCKS代理。它既可以代替Proxifier做socks5客户端， 又可以代替charles进行手机http抓包帮助程序员开发测试软件。它部署在Linux客户机，可以直接将请求发出，也可以将tcp流转到tunneld。
 
-tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出或是转到下一个tunneld
-
-anyproxy 到 tunneld 的转发过程可以支持简单双向加密更安全
-
-anyproxy 可以代替charles进行手机抓包进行开发测试
+tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。anyproxy 到 tunneld 的转发过程可以支持简单双向加密更安全
 
 ## 代理设置
 
