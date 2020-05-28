@@ -85,6 +85,7 @@ docker run anyproxy:latest
 * 服务间通信http请求完全加密（header+body)
 * HTTPS的SNI的支持?
 * 支持转发到socket5服务
+* TCP 增加更多协议解析支持，如rtmp，ftp等
 
 ## 参考
 

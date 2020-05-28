@@ -1,18 +1,19 @@
 package proto
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
-	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/keminar/anyproxy/crypto"
+	"github.com/keminar/anyproxy/proto/http"
+	"github.com/keminar/anyproxy/proto/text"
 )
 
 // badRequestError is a literal string (used by in the server in HTML,
@@ -31,6 +32,7 @@ type httpStream struct {
 	Host       string      //域名含端口
 	Header     http.Header //http请求头部
 	FirstLine  string      //第一行字串
+	BodyBuf    []byte
 }
 
 func newHTTPStream(req *Request) *httpStream {
@@ -42,13 +44,19 @@ func newHTTPStream(req *Request) *httpStream {
 
 // 检查是不是HTTP请求
 func (that *httpStream) validHead() bool {
+	if that.req.reader.Buffered() < 8 {
+		return false
+	}
+	tmpBuf, err := that.req.reader.Peek(8)
+	if err != nil {
+		return false
+	}
 	// 解析方法名
-	tmpStr := string(that.req.FirstBuf)
-	s1 := strings.Index(tmpStr, " ")
+	s1 := bytes.IndexByte(tmpBuf, ' ')
 	if s1 < 0 {
 		return false
 	}
-	that.Method = strings.ToUpper(tmpStr[:s1])
+	that.Method = strings.ToUpper(string(tmpBuf[:s1]))
 
 	allMethods := []string{"CONNECT", "OPTIONS", "DELETE", "TRACE", "POST", "HEAD", "GET", "PUT"}
 	for _, one := range allMethods {
@@ -60,13 +68,12 @@ func (that *httpStream) validHead() bool {
 }
 
 func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
-	// 下面是http的内容了，用*bufio.Reader比较好按行取内容
-	tp := textproto.NewReader(that.req.reader)
+	// 下面是http的内容了，用封装的reader比较好按行取内容
+	tp := text.NewReader(that.req.reader)
 	// First line: GET /index.html HTTP/1.0
-	if that.FirstLine, err = tp.ReadLine(); err != nil {
+	if that.FirstLine, err = tp.ReadLine(true); err != nil {
 		return false, err
 	}
-	that.FirstLine = string(that.req.FirstBuf) + that.FirstLine
 
 	var ok bool
 	that.RequestURI, that.Proto, ok = parseRequestLine(that.FirstLine)
@@ -102,15 +109,15 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 
 	// 读取http的头部信息
 	// Subsequent lines: Key: value.
-	mimeHeader, err := tp.ReadMIMEHeader()
+	that.Header, err = tp.ReadHeader()
 	if err != nil {
 		return false, err
 	}
-	that.Header = http.Header(mimeHeader)
 	that.Host = that.URL.Host
 	if that.Host == "" {
 		that.Host = that.Header.Get("Host")
 	}
+	that.BodyBuf = that.req.reader.UnreadBuf()
 	that.getNameIPPort()
 	return true, nil
 }
@@ -183,6 +190,8 @@ func (that *httpStream) response() error {
 		tunnel.conn.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
 		that.Header.Write(tunnel.conn)
 		tunnel.conn.Write([]byte("\r\n"))
+		// 多读取的body部分
+		tunnel.conn.Write(that.BodyBuf)
 
 		tunnel.transfer(that.req.conn)
 	}

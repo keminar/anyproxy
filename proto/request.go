@@ -1,13 +1,12 @@
 package proto
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"net"
 
 	"github.com/keminar/anyproxy/grace"
+	"github.com/keminar/anyproxy/proto/tcp"
 )
 
 // AesToken 加密密钥
@@ -17,14 +16,13 @@ var AesToken = "hgfedcba87654321"
 type Request struct {
 	ID     uint
 	conn   *net.TCPConn
-	reader *bufio.Reader
+	reader *tcp.Reader
 	Proto  string //http
 
-	Stream   stream
-	FirstBuf []byte //前8个字节
-	DstName  string //目标域名
-	DstIP    string //目标ip
-	DstPort  uint16 //目标端口
+	Stream  stream
+	DstName string //目标域名
+	DstIP   string //目标ip
+	DstPort uint16 //目标端口
 }
 
 // NewRequest 请求类
@@ -34,32 +32,14 @@ func NewRequest(ctx context.Context, conn *net.TCPConn) *Request {
 	c := &Request{
 		ID:     traceID,
 		conn:   conn,
-		reader: bufio.NewReader(conn),
+		reader: tcp.NewReader(conn),
 	}
 	return c
 }
 
-func (that *Request) readHead() error {
-	// http.Method 不会超过7位,再多加一个空格
-	num := 8
-	tmp := make([]byte, num)
-	for {
-		// 这里一定要用*net.TCPConn来读
-		// 如用*bufio.Reader会多读导致后面转发取不到内容
-		nr, err := that.conn.Read(tmp[:])
-		if err == io.EOF {
-			return err
-		}
-		that.FirstBuf = append(that.FirstBuf, tmp[:nr]...)
-		if len(that.FirstBuf) >= num {
-			return nil
-		}
-	}
-}
-
 // ReadRequest 分析请求内容
 func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
-	err = that.readHead()
+	_, err = that.reader.Peek(1)
 	if err != nil {
 		return false, err
 	}

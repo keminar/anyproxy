@@ -104,8 +104,9 @@ func (that *tcpStream) response() error {
 		return err
 	}
 
-	// 将前8个字节补上
-	tunnel.conn.Write(that.req.FirstBuf)
+	// 将前面读的字节补上
+	tmpBuf := that.req.reader.UnreadBuf()
+	tunnel.conn.Write(tmpBuf)
 	tunnel.transfer(newTCPConn)
 	return nil
 }
