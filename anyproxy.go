@@ -12,6 +12,7 @@ import (
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/logging"
 	"github.com/keminar/anyproxy/proto"
+	"github.com/keminar/anyproxy/utils/daemon"
 )
 
 const VERSION = "0.2"
@@ -76,6 +77,9 @@ func main() {
 		flag.Usage()
 		return
 	}
+
+	// 是否后台运行
+	daemon.Daemonize()
 
 	// 支持只输入端口的形式
 	if !strings.Contains(gListenAddrPort, ":") {

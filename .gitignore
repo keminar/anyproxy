@@ -1,7 +1,5 @@
 .history
 .vscode
-go.mod
-go.sum
 anyproxy
 tunneld
 tunnel/tunneld
