@@ -33,6 +33,8 @@ func init() {
 		fmt.Fprintf(os.Stdout, "  -l=ADDRPORT      Address and port to listen on (e.g., :3128 or 127.0.0.1:3128)\n")
 		fmt.Fprintf(os.Stdout, "Optional\n")
 		fmt.Fprintf(os.Stdout, "  -p=PROXIES       Address and ports of upstream proxy servers to use\n")
+		fmt.Fprintf(os.Stdout, "                   (e.g., 10.1.1.1:80 will use http proxy, socks5://10.2.2.2:3128 use socks5 proxy\n")
+		fmt.Fprintf(os.Stdout, "  -daemon          Run as a Unix daemon\n")
 		fmt.Fprintf(os.Stdout, "  -h               This usage message\n\n")
 
 		fmt.Fprintf(os.Stdout, "Before starting anyproxy, be sure to change the number of available file handles to at least 65535\n")
