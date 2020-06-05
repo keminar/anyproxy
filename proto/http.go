@@ -174,7 +174,7 @@ func (that *httpStream) response() error {
 		that.showIP("CONNECT")
 		err = tunnel.handshake(that.req.DstName, that.req.DstIP, that.req.DstPort)
 		if err != nil {
-			log.Println(TraceID(that.req.ID), "dail err", err.Error())
+			log.Println(TraceID(that.req.ID), "handshake err", err.Error())
 			return err
 		}
 		tunnel.transfer(that.req.conn)
@@ -182,7 +182,7 @@ func (that *httpStream) response() error {
 		that.showIP("HTTP")
 		err := tunnel.handshake(that.req.DstName, that.req.DstIP, that.req.DstPort)
 		if err != nil {
-			log.Println(TraceID(that.req.ID), "dail err", err.Error())
+			log.Println(TraceID(that.req.ID), "handshake err", err.Error())
 			return err
 		}
 

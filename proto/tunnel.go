@@ -12,6 +12,7 @@ import (
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
+	"golang.org/x/net/proxy"
 )
 
 const (
@@ -144,43 +145,80 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 // handshake 和server握手
 func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 	if config.ProxyServer != "" && config.ProxyPort > 0 {
-		err = s.dail(config.ProxyServer, config.ProxyPort)
-		if err != nil {
-			log.Println(TraceID(s.req.ID), "dail err", err.Error())
-			return
-		}
 		if dstName == "" {
 			dstName = dstIP
 		}
-		x := []byte(fmt.Sprintf("%s:%d", dstName, dstPort))
-		log.Println(TraceID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, string(x)))
-		key := []byte(AesToken)
-		var x1 []byte
-		x1, err = crypto.EncryptAES(x, key)
-		if err != nil {
-			log.Println(TraceID(s.req.ID), "encrypt err", err.Error())
-			return
-		}
+		target := fmt.Sprintf("%s:%d", dstName, dstPort)
+		log.Println(TraceID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, target))
 
-		// CONNECT实现的加密版
-		connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
-		fmt.Fprintf(s.conn, connectString)
-		var status string
-		status, err = bufio.NewReader(s.conn).ReadString('\n')
-		if err != nil {
-			log.Printf("%s PROXY ERR: Could not find response to CONNECT: err=%v", TraceID(s.req.ID), err)
+		switch config.ProxyScheme {
+		case "socks5":
+			err = s.socks5(target)
+		case "http":
+			err = s.httpConnect(target)
+		default:
+			log.Println(TraceID(s.req.ID), "proxy scheme", config.ProxyScheme, "is error")
+			err = fmt.Errorf("%s is error", config.ProxyScheme)
 			return
-		}
-		// 检查是不是200返回
-		if strings.Contains(status, "200") == false {
-			log.Printf("%s PROXY ERR: Proxy response to CONNECT was: %s.\n", TraceID(s.req.ID), strconv.Quote(status))
 		}
 	} else {
 		err = s.dail(dstIP, dstPort)
-		if err != nil {
-			return
-		}
+	}
+	if err != nil {
+		return
 	}
 	s.curState = stateNew
+	return
+}
+
+// socket5代理
+func (s *tunnel) socks5(target string) (err error) {
+	address := fmt.Sprintf("%s:%d", config.ProxyServer, config.ProxyPort)
+	var dialProxy proxy.Dialer
+	dialProxy, err = proxy.SOCKS5("tcp", address, nil, proxy.Direct)
+	if err != nil {
+		log.Println(TraceID(s.req.ID), "socket5 err", err.Error())
+		return
+	}
+
+	var conn net.Conn
+	conn, err = dialProxy.Dial("tcp", target)
+	if err != nil {
+		log.Println(TraceID(s.req.ID), "dail err", err.Error())
+		return
+	}
+	s.conn = conn.(*net.TCPConn)
+	return
+}
+
+// http代理
+func (s *tunnel) httpConnect(target string) (err error) {
+	err = s.dail(config.ProxyServer, config.ProxyPort)
+	if err != nil {
+		log.Println(TraceID(s.req.ID), "dail err", err.Error())
+		return
+	}
+	key := []byte(AesToken)
+	var x1 []byte
+	x1, err = crypto.EncryptAES([]byte(target), key)
+	if err != nil {
+		log.Println(TraceID(s.req.ID), "encrypt err", err.Error())
+		return
+	}
+
+	// CONNECT实现的加密
+	connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
+	fmt.Fprintf(s.conn, connectString)
+	var status string
+	status, err = bufio.NewReader(s.conn).ReadString('\n')
+	if err != nil {
+		log.Printf("%s PROXY ERR: Could not find response to CONNECT: err=%v", TraceID(s.req.ID), err)
+		return
+	}
+	// 检查是不是200返回
+	if strings.Contains(status, "200") == false {
+		log.Printf("%s PROXY ERR: Proxy response to CONNECT was: %s.\n", TraceID(s.req.ID), strconv.Quote(status))
+		err = fmt.Errorf("Proxy response was: %s", strconv.Quote(status))
+	}
 	return
 }

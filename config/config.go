@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+// ProxyScheme 协议
+var ProxyScheme string = "http"
+
 // ProxyServer 代理服务器
 var ProxyServer string
 
@@ -32,13 +35,21 @@ func SetProxyServer(gProxyServerSpec string) {
 	if gProxyServerSpec == "" {
 		return
 	}
-	tmp := strings.Split(gProxyServerSpec, ":")
+
+	// 先检查协议
+	tmp := strings.Split(gProxyServerSpec, "://")
+	if len(tmp) == 2 {
+		ProxyScheme = tmp[0]
+		gProxyServerSpec = tmp[1]
+	}
+	// 检查端口，和上面的顺序不能反
+	tmp = strings.Split(gProxyServerSpec, ":")
 	if len(tmp) == 2 {
 		portInt, err := strconv.Atoi(tmp[1])
 		if err == nil {
 			ProxyServer = tmp[0]
 			ProxyPort = uint16(portInt)
-			log.Printf("Proxy server is %s:%d\n", ProxyServer, ProxyPort)
+			log.Printf("Proxy server is %s://%s:%d\n", ProxyScheme, ProxyServer, ProxyPort)
 		} else {
 			log.Printf("Set proxy port err %s\n", err.Error())
 		}

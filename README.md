@@ -20,7 +20,7 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 * 浏览器 [Chrome设置](https://zhidao.baidu.com/question/204679423955769445.html)
 * 手机端 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
 
-## 服务部署
+## 跳转支持
 
 ```
 +----------+      +----------+      +----------+
@@ -33,8 +33,18 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 +----------+      +----------+      +---------+      +----------+
 
 # or
++----------+      +----------+      +---------+      +----------+
+| Computer | <==> | anyproxy | <==> | socks5  | <==> | Internet |
++----------+      +----------+      +---------+      +----------+
+
+# or
 +----------+      +----------+      +---------+      +---------+      +----------+
 | Computer | <==> | anyproxy | <==> | tunneld | <==> | tunneld | <==> | Internet |
++----------+      +----------+      +---------+      +---------+      +----------+
+
+# or
++----------+      +----------+      +---------+      +---------+      +----------+
+| Computer | <==> | anyproxy | <==> | tunneld | <==> | socks5  | <==> | Internet |
 +----------+      +----------+      +---------+      +---------+      +----------+
 ```
 
@@ -49,6 +59,9 @@ sudo -u anyproxy ./tunneld
 
 # 示例3. 启动anyproxy并将请求转给tunneld
 sudo -u anyproxy ./anyproxy -p '127.0.0.1:3001'
+
+# 示例4. 启动anyproxy并将请求转给socks5
+sudo -u anyproxy ./anyproxy -p 'socks5://127.0.0.1:10000'
 ```
 
 注：因为用到了系统函数，并不能跨平台。对于windows系统用户可以选择在虚拟机中启动或是win10的WSL中启动
