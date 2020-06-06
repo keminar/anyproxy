@@ -28,6 +28,6 @@ RUN adduser -u 1000 -D appuser
 RUN mkdir logs/ && chown appuser logs/
 
 USER appuser
-# 不用ENTRYPOINT的原因是docker run不方便覆盖 
-# 具体参考 https://blog.csdn.net/u010900754/article/details/78526443
-CMD [ "/go/bin/anyproxy" ]
+
+# CMD 和 ENTRYPOINT 区别用法参考 https://blog.csdn.net/u010900754/article/details/78526443
+ENTRYPOINT [ "/go/bin/anyproxy" ]

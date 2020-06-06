@@ -90,6 +90,8 @@ kill -HUP pid
 docker build -t anyproxy:latest .
 # 运行
 docker run anyproxy:latest
+# 开放端口并带参数运行
+docker run  -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 ```
 
 # 代理设置
