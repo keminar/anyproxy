@@ -105,8 +105,26 @@ sudo useradd -M -s /sbin/nologin anyproxy
 sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner anyproxy -j RETURN
 # 其它用户的tcp请求转发到本地3000端口
 sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
+
 ```
 
+> 如果删除全局代理
+```
+# 查看当前规则
+sudo iptables -t nat -L -n
+
+# 输出
+ ...以上省略
+ Chain OUTPUT (policy ACCEPT)
+ target     prot opt source               destination
+ RETURN     tcp  --  0.0.0.0/0            0.0.0.0/0            owner UID match 1004
+ REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            redir ports 3000
+ ...以下省略
+
+# 按顺序依次为OUTPUT的第一条规则，和第二条规则
+# 假如想删除net的OUTPUT的第2条规则
+sudo iptables -t nat -D OUTPUT 2
+```
 * 浏览器 [Chrome设置](https://zhidao.baidu.com/question/204679423955769445.html)
 * 手机端 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
 
