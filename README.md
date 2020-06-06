@@ -111,14 +111,14 @@ sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 > 如果删除全局代理
 ```
 # 查看当前规则
-sudo iptables -t nat -L -n
+sudo iptables -t nat -L -n  --line-number
 
 # 输出
  ...以上省略
  Chain OUTPUT (policy ACCEPT)
- target     prot opt source               destination
- RETURN     tcp  --  0.0.0.0/0            0.0.0.0/0            owner UID match 1004
- REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            redir ports 3000
+ num  target     prot opt source               destination
+ 1    RETURN     tcp  --  0.0.0.0/0            0.0.0.0/0            owner UID match 1004
+ 2    REDIRECT   tcp  --  0.0.0.0/0            0.0.0.0/0            redir ports 3000
  ...以下省略
 
 # 按顺序依次为OUTPUT的第一条规则，和第二条规则
