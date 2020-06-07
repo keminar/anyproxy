@@ -1,0 +1,12 @@
+# false 当前环境， true远程
+localDns: false
+
+# 域名
+hosts:
+  - www.baidu.com
+      # contain 包含,equal 完全相等, preg 正则
+      match: contain 
+      # local 当前环境, remote 远程, deny 禁止
+      target: local 
+      # false 当前环境， true远程
+      localDns: false
