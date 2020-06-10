@@ -102,7 +102,6 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 // leftConn 不用req.conn 有一定原因是leftConn可能会是newTCPConn
 func (s *tunnel) transfer(leftConn *net.TCPConn) {
 	log.Println(TraceID(s.req.ID), "transfer start")
-	var err error
 	s.curState = stateActive
 	done := make(chan int, 1)
 
@@ -112,6 +111,8 @@ func (s *tunnel) transfer(leftConn *net.TCPConn) {
 			done <- 1
 			close(done)
 		}()
+		//不能和外层共用err
+		var err error
 		s.readSize, err = s.copyBuffer(s.conn, leftConn, "server", "client")
 		if err != nil {
 			log.Println(TraceID(s.req.ID), "client->server", err.Error())
@@ -119,6 +120,7 @@ func (s *tunnel) transfer(leftConn *net.TCPConn) {
 		log.Println(TraceID(s.req.ID), "request body size", s.readSize)
 	}()
 
+	var err error
 	//取返回结果
 	s.writeSize, err = s.copyBuffer(leftConn, s.conn, "client", "server")
 	if err != nil {
