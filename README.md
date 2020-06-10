@@ -145,7 +145,7 @@ sudo iptables -t nat -D OUTPUT 2
 * DNS解析增加cache
 * 可以支持多个server，如果一个不可用用下一个
 * ~~server多级转发~~
-* 加域名黑名单功能，不给请求
+* ~~加域名黑名单功能，不给请求~~
 * 请求Body内容体记录, 涉及安全，可能不会实现
 * 服务间通信http请求完全加密（header+body)
 * HTTPS的SNI的支持?

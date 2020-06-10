@@ -12,10 +12,12 @@ import (
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/logging"
 	"github.com/keminar/anyproxy/proto"
+	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/daemon"
 )
 
-const VERSION = "0.2"
+//VERSION 版本
+const VERSION = "0.3"
 
 var (
 	gListenAddrPort  string
@@ -92,6 +94,7 @@ func main() {
 	// 设置代理
 	config.SetProxyServer(gProxyServerSpec)
 
+	conf.LoadAllConfig()
 	server := grace.NewServer(gListenAddrPort, proto.ClientHandler)
 	server.ListenAndServe()
 }

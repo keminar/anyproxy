@@ -12,6 +12,7 @@ import (
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
+	"github.com/keminar/anyproxy/utils/conf"
 	"golang.org/x/net/proxy"
 )
 
@@ -146,7 +147,28 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 
 // handshake 和server握手
 func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
-	if config.ProxyServer != "" && config.ProxyPort > 0 {
+	confTarget := "remote"
+	for _, h := range conf.RouterConfig.Hosts {
+		switch h.Match {
+		case "equal":
+			if h.Name == dstName || h.Name == dstIP {
+				confTarget = h.Target
+				break
+			}
+		case "contain":
+			if strings.Contains(dstName, h.Name) || strings.Contains(dstIP, h.Name) {
+				confTarget = h.Target
+				break
+			}
+		default:
+			//todo
+		}
+	}
+	if confTarget == "deny" {
+		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
+		return
+	}
+	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget == "remote" {
 		if dstName == "" {
 			dstName = dstIP
 		}

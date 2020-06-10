@@ -3,10 +3,24 @@ localDns: false
 
 # 域名
 hosts:
-  - www.baidu.com
-      # contain 包含,equal 完全相等, preg 正则
-      match: contain 
-      # local 当前环境, remote 远程, deny 禁止
-      target: local 
-      # false 当前环境， true远程
-      localDns: false
+  - name: www.baidu.com
+    # contain 包含,equal 完全相等, preg 正则
+    match: equal 
+    # local 当前环境, remote 远程, deny 禁止
+    target: local 
+    # false 当前环境， true远程
+    localDns: false
+  - name: github.com
+    # contain 包含,equal 完全相等, preg 正则
+    match: contain 
+    # local 当前环境, remote 远程, deny 禁止
+    target: remote 
+    # false 当前环境， true远程
+    localDns: false    
+  - name: google
+    # contain 包含,equal 完全相等, preg 正则
+    match: contain
+    # local 当前环境, remote 远程, deny 禁止
+    target: deny 
+    # false 当前环境， true远程
+    localDns: false    
