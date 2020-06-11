@@ -1,6 +1,6 @@
 # Any Proxy
 
-anyproxy 是一个tcp转发客户端，可以让不支持通过代理服务器工作的网络程序能通过HTTPS或SOCKS代理。可以代替Proxifier做socks5客户端， 可以代替charles进行手机http抓包(需定制)。它部署在Linux客户机，可以直接将收到的网络请求发出，也可以将tcp流转到tunneld或SOCKS代理。
+anyproxy 是一个tcp转发客户端，可以让不支持通过代理服务器工作的网络程序能通过HTTP或SOCKS代理。可以代替Proxifier做socks5客户端， 可以代替charles进行手机http抓包(需定制)。它部署在Linux客户机，可以直接将收到的网络请求发出，也可以将tcp流转到tunneld或SOCKS代理。
 
 [下载二进制包](http://cloudme.io/anyproxy)
 
@@ -137,9 +137,12 @@ sudo iptables -t nat -D OUTPUT 2
 # Todo
 
 > ~~划线~~ 部分为已实现功能
+* ~~可将请求转发到Tunnel服务~~
 * 根据CIDR做不同出口请求
-* 对域名支持加Host绑定并配置请求出口
-* 配置文件支持
+* 对域名支持加Host绑定
+* ~~对域名配置请求出口~~
+* 增加全局默认出口配置
+* ~~配置文件支持~~
 * 服务间通信增加token验证
 * 日志信息完善
 * DNS解析增加cache
@@ -151,6 +154,7 @@ sudo iptables -t nat -D OUTPUT 2
 * HTTPS的SNI的支持?
 * ~~支持转发到socket5服务~~
 * TCP 增加更多协议解析支持，如rtmp，ftp等
+* 与Tunnel的多账户认证，账户可设置有效期
 
 # 参考
 
