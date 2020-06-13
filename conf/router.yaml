@@ -1,26 +1,24 @@
-# false 当前环境， true远程
+# 使用的DNS服务器 true 当前环境， false远程, 仅当target使用remote有效
 localDns: false
-
+# 默认环境，local 当前环境, remote 远程, deny 禁止
+# auto根据dial选择，local dial失败则remote
+target: auto
 # 域名
 hosts:
-  - name: www.baidu.com
-    # contain 包含,equal 完全相等, preg 正则
-    match: equal 
-    # local 当前环境, remote 远程, deny 禁止
-    target: local 
-    # false 当前环境， true远程
-    localDns: false
   - name: github.com
     # contain 包含,equal 完全相等, preg 正则
-    match: contain 
-    # local 当前环境, remote 远程, deny 禁止
-    target: remote 
-    # false 当前环境， true远程
-    localDns: false    
-  - name: google
-    # contain 包含,equal 完全相等, preg 正则
     match: contain
-    # local 当前环境, remote 远程, deny 禁止
-    target: deny 
-    # false 当前环境， true远程
-    localDns: false    
+    # 参考全局target 
+    target: remote
+    # 参考全局localDns 
+    localDns: false
+  - name: gitlab.com
+    match: contain
+    target: auto
+    localDns: true
+  - name: www.baidu.com
+    match: equal
+    target: local
+  - name: google
+    match: contain
+    target: deny

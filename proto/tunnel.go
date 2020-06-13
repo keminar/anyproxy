@@ -147,17 +147,20 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 
 // handshake 和server握手
 func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
-	confTarget := "remote"
+	confTarget := conf.RouterConfig.Target
+	localDNS := conf.RouterConfig.LocalDNS
 	for _, h := range conf.RouterConfig.Hosts {
 		switch h.Match {
 		case "equal":
 			if h.Name == dstName || h.Name == dstIP {
 				confTarget = h.Target
+				localDNS = h.LocalDNS
 				break
 			}
 		case "contain":
 			if strings.Contains(dstName, h.Name) || strings.Contains(dstIP, h.Name) {
 				confTarget = h.Target
+				localDNS = h.LocalDNS
 				break
 			}
 		default:
@@ -168,11 +171,24 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
 		return
 	}
-	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget == "remote" {
-		if dstName == "" {
-			dstName = dstIP
+	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget != "local" {
+		if confTarget == "auto" {
+			//local dial成功则返回
+			err = s.dail(dstIP, dstPort)
+			if err == nil {
+				s.curState = stateNew
+				return
+			}
 		}
-		target := fmt.Sprintf("%s:%d", dstName, dstPort)
+		var target string
+		if localDNS == false {
+			if dstName == "" {
+				dstName = dstIP
+			}
+			target = fmt.Sprintf("%s:%d", dstName, dstPort)
+		} else {
+			target = fmt.Sprintf("%s:%d", dstIP, dstPort)
+		}
 		log.Println(TraceID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, target))
 
 		switch config.ProxyScheme {

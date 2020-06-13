@@ -13,13 +13,14 @@ import (
 type Host struct {
 	Name     string `yaml:"name"`
 	Match    string `yaml:"match"`    //contain 包含, equal 完全相等, preg 正则
-	Target   string `yaml:"target"`   //local 当前环境, remote 远程, deny 禁止
-	LocalDNS string `yaml:"localDns"` //false 当前环境， true远程
+	Target   string `yaml:"target"`   //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
+	LocalDNS bool   `yaml:"localDns"` //true 当前环境， false远程, 仅当target使用remote有效
 }
 
 // Router 配置文件模型
 type Router struct {
-	LocalDNS string `yaml:"localDns"` //false 当前环境， true远程
+	LocalDNS bool   `yaml:"localDns"` //默认的DNS服务器
+	Target   string `yaml:"target"`   //默认访问策略
 	Hosts    []Host
 }
 
