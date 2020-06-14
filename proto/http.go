@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/keminar/anyproxy/crypto"
 	"github.com/keminar/anyproxy/proto/http"
 	"github.com/keminar/anyproxy/proto/text"
+	"github.com/keminar/anyproxy/utils/trace"
 )
 
 // badRequestError is a literal string (used by in the server in HTML,
@@ -126,12 +126,9 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 func (that *httpStream) getNameIPPort() {
 	splitStr := strings.Split(that.Host, ":")
 	that.req.DstName = splitStr[0]
-	upIPs, _ := net.LookupIP(splitStr[0])
-	if len(upIPs) > 0 {
-		that.req.DstIP = upIPs[0].String()
-		c, _ := strconv.ParseUint(that.URL.Port(), 0, 16)
-		that.req.DstPort = uint16(c)
-	}
+
+	c, _ := strconv.ParseUint(that.URL.Port(), 0, 16)
+	that.req.DstPort = uint16(c)
 	if that.req.DstPort == 0 {
 		if that.URL.Scheme == "https" {
 			that.req.DstPort = 443
@@ -167,22 +164,22 @@ func (that *httpStream) response() error {
 	if that.Method == "CONNECT" {
 		_, err := that.req.conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 		if err != nil {
-			log.Println(TraceID(that.req.ID), "write err", err.Error())
+			log.Println(trace.ID(that.req.ID), "write err", err.Error())
 			return err
 		}
 
 		that.showIP("CONNECT")
-		err = tunnel.handshake(that.req.DstName, that.req.DstIP, that.req.DstPort)
+		err = tunnel.handshake(that.req.DstName, "", that.req.DstPort)
 		if err != nil {
-			log.Println(TraceID(that.req.ID), "handshake err", err.Error())
+			log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 			return err
 		}
 		tunnel.transfer(that.req.conn)
 	} else {
 		that.showIP("HTTP")
-		err := tunnel.handshake(that.req.DstName, that.req.DstIP, that.req.DstPort)
+		err := tunnel.handshake(that.req.DstName, "", that.req.DstPort)
 		if err != nil {
-			log.Println(TraceID(that.req.ID), "handshake err", err.Error())
+			log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 			return err
 		}
 
@@ -200,9 +197,9 @@ func (that *httpStream) response() error {
 
 func (that *httpStream) showIP(method string) {
 	if method == "CONNECT" {
-		log.Println(TraceID(that.req.ID), fmt.Sprintf("%s %s -> %s:%d", method, that.req.conn.RemoteAddr().String(), that.req.DstName, that.req.DstPort))
+		log.Println(trace.ID(that.req.ID), fmt.Sprintf("%s %s -> %s:%d", method, that.req.conn.RemoteAddr().String(), that.req.DstName, that.req.DstPort))
 	} else {
-		log.Println(TraceID(that.req.ID), fmt.Sprintf("%s %s -> %s", method, that.req.conn.RemoteAddr().String(), that.Request()))
+		log.Println(trace.ID(that.req.ID), fmt.Sprintf("%s %s -> %s", method, that.req.conn.RemoteAddr().String(), that.Request()))
 	}
 }
 

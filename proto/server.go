@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log"
 	"net"
+
+	"github.com/keminar/anyproxy/utils/trace"
 )
 
 // ServerHandler 服务端处理
@@ -14,7 +16,7 @@ func ServerHandler(ctx context.Context, tcpConn *net.TCPConn) error {
 	// test if the underlying fd is nil
 	remoteAddr := tcpConn.RemoteAddr()
 	if remoteAddr == nil {
-		log.Println(TraceID(req.ID), "ClientHandler(): oops, clientConn.fd is nil!")
+		log.Println(trace.ID(req.ID), "ClientHandler(): oops, clientConn.fd is nil!")
 		return errors.New("clientConn.fd is nil")
 	}
 

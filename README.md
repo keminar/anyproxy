@@ -141,11 +141,12 @@ sudo iptables -t nat -D OUTPUT 2
 * 根据CIDR做不同出口请求
 * 对域名支持加Host绑定
 * ~~对域名配置请求出口~~
-* 增加全局默认出口配置
+* ~~增加全局默认出口配置~~
 * ~~配置文件支持~~
 * 服务间通信增加token验证
 * 日志信息完善
-* DNS解析增加cache
+* ~~DNS解析增加cache~~
+* ~~自动路由模式下可设置检测时间和cache~~
 * 可以支持多个server，如果一个不可用用下一个
 * ~~server多级转发~~
 * ~~加域名黑名单功能，不给请求~~
@@ -156,7 +157,7 @@ sudo iptables -t nat -D OUTPUT 2
 * TCP 增加更多协议解析支持，如rtmp，ftp等
 * 与Tunnel的多账户认证，账户可设置有效期
 
-# 参考
+# 感谢
 
 <https://github.com/ryanchapman/go-any-proxy.git>
 

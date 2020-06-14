@@ -11,11 +11,11 @@ hosts:
     # 参考全局target 
     target: remote
     # 参考全局localDns 
-    localDns: false
-  - name: gitlab.com
+    localDns: true
+  - name: golang.org
     match: contain
     target: auto
-    localDns: true
+    localDns: false
   - name: www.baidu.com
     match: equal
     target: local

@@ -9,10 +9,13 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
+	"github.com/keminar/anyproxy/utils/cache"
 	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/trace"
 	"golang.org/x/net/proxy"
 )
 
@@ -55,12 +58,12 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 	for {
 		i++
 		if config.DebugLevel == config.LevelDebug {
-			log.Printf("%s receive from %s, n=%d\n", TraceID(s.req.ID), srcname, i)
+			log.Printf("%s receive from %s, n=%d\n", trace.ID(s.req.ID), srcname, i)
 		}
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			if config.DebugLevel == config.LevelDebug {
-				log.Printf("%s receive from %s, n=%d, data len: %d\n", TraceID(s.req.ID), srcname, i, nr)
+				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
@@ -80,7 +83,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 			if er != io.EOF {
 				err = er
 			} else {
-				log.Println(TraceID(s.req.ID), srcname, "read", er.Error())
+				log.Println(trace.ID(s.req.ID), srcname, "read", er.Error())
 			}
 
 			if srcname == "client" {
@@ -102,7 +105,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 // transfer 交换数据
 // leftConn 不用req.conn 有一定原因是leftConn可能会是newTCPConn
 func (s *tunnel) transfer(leftConn *net.TCPConn) {
-	log.Println(TraceID(s.req.ID), "transfer start")
+	log.Println(trace.ID(s.req.ID), "transfer start")
 	s.curState = stateActive
 	done := make(chan int, 1)
 
@@ -116,26 +119,26 @@ func (s *tunnel) transfer(leftConn *net.TCPConn) {
 		var err error
 		s.readSize, err = s.copyBuffer(s.conn, leftConn, "server", "client")
 		if err != nil {
-			log.Println(TraceID(s.req.ID), "client->server", err.Error())
+			log.Println(trace.ID(s.req.ID), "client->server", err.Error())
 		}
-		log.Println(TraceID(s.req.ID), "request body size", s.readSize)
+		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
 	}()
 
 	var err error
 	//取返回结果
 	s.writeSize, err = s.copyBuffer(leftConn, s.conn, "client", "server")
 	if err != nil {
-		log.Println(TraceID(s.req.ID), "server->client", err.Error())
+		log.Println(trace.ID(s.req.ID), "server->client", err.Error())
 	}
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	log.Println(TraceID(s.req.ID), "transfer finished, response size", s.writeSize)
+	log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
 }
 
 // dail tcp连接
 func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
-	log.Printf("%s accept and create a new connection to server %s:%d\n", TraceID(s.req.ID), dstIP, dstPort)
+	log.Printf("%s accept and create a new connection to server %s:%d\n", trace.ID(s.req.ID), dstIP, dstPort)
 	var addr *net.TCPAddr
 	addr, err = net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", dstIP, dstPort))
 	if err != nil {
@@ -145,41 +148,73 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 	return
 }
 
-// handshake 和server握手
-func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
-	confTarget := conf.RouterConfig.Target
-	localDNS := conf.RouterConfig.LocalDNS
+// DNS解析
+func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
+	state := cache.StateNone
+	if dstName != "" {
+		dstIP, state = cache.ResolveLookup.Lookup(s.req.ID, dstName)
+		if dstIP == "" {
+			upIPs, _ := net.LookupIP(dstName)
+			if len(upIPs) > 0 {
+				dstIP = upIPs[0].String()
+				cache.ResolveLookup.Store(dstName, dstIP, cache.StateNew, time.Duration(10)*time.Minute)
+				return dstIP, cache.StateNew
+			}
+		}
+	}
+	return dstIP, state
+}
+
+// 查询配置
+func (s *tunnel) findHost(dstName, dstIP string) conf.Host {
 	for _, h := range conf.RouterConfig.Hosts {
 		switch h.Match {
 		case "equal":
 			if h.Name == dstName || h.Name == dstIP {
-				confTarget = h.Target
-				localDNS = h.LocalDNS
-				break
+				return h
 			}
 		case "contain":
 			if strings.Contains(dstName, h.Name) || strings.Contains(dstIP, h.Name) {
-				confTarget = h.Target
-				localDNS = h.LocalDNS
-				break
+				return h
 			}
 		default:
 			//todo
 		}
 	}
+	return conf.Host{}
+}
+
+// handshake 和server握手
+func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
+	var state cache.DialState
+	dstIP, state = s.lookup(dstName, dstIP)
+
+	var confTarget string
+	var localDNS bool
+	host := s.findHost(dstName, dstIP)
+	if host.Name != "" {
+		confTarget = host.Target
+		localDNS = host.LocalDNS
+	} else {
+		confTarget = conf.RouterConfig.Target
+		localDNS = conf.RouterConfig.LocalDNS
+	}
+
 	if confTarget == "deny" {
 		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
 		return
 	}
 	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget != "local" {
-		if confTarget == "auto" {
+		if confTarget == "auto" && state != cache.StateFail {
 			//local dial成功则返回
 			err = s.dail(dstIP, dstPort)
 			if err == nil {
 				s.curState = stateNew
 				return
 			}
+			cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
 		}
+		// remote 请求
 		var target string
 		if localDNS == false {
 			if dstName == "" {
@@ -189,7 +224,7 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 		} else {
 			target = fmt.Sprintf("%s:%d", dstIP, dstPort)
 		}
-		log.Println(TraceID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, target))
+		log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, target))
 
 		switch config.ProxyScheme {
 		case "socks5":
@@ -197,7 +232,7 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 		case "http":
 			err = s.httpConnect(target)
 		default:
-			log.Println(TraceID(s.req.ID), "proxy scheme", config.ProxyScheme, "is error")
+			log.Println(trace.ID(s.req.ID), "proxy scheme", config.ProxyScheme, "is error")
 			err = fmt.Errorf("%s is error", config.ProxyScheme)
 			return
 		}
@@ -217,14 +252,14 @@ func (s *tunnel) socks5(target string) (err error) {
 	var dialProxy proxy.Dialer
 	dialProxy, err = proxy.SOCKS5("tcp", address, nil, proxy.Direct)
 	if err != nil {
-		log.Println(TraceID(s.req.ID), "socket5 err", err.Error())
+		log.Println(trace.ID(s.req.ID), "socket5 err", err.Error())
 		return
 	}
 
 	var conn net.Conn
 	conn, err = dialProxy.Dial("tcp", target)
 	if err != nil {
-		log.Println(TraceID(s.req.ID), "dail err", err.Error())
+		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
 	s.conn = conn.(*net.TCPConn)
@@ -235,14 +270,14 @@ func (s *tunnel) socks5(target string) (err error) {
 func (s *tunnel) httpConnect(target string) (err error) {
 	err = s.dail(config.ProxyServer, config.ProxyPort)
 	if err != nil {
-		log.Println(TraceID(s.req.ID), "dail err", err.Error())
+		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
 	key := []byte(AesToken)
 	var x1 []byte
 	x1, err = crypto.EncryptAES([]byte(target), key)
 	if err != nil {
-		log.Println(TraceID(s.req.ID), "encrypt err", err.Error())
+		log.Println(trace.ID(s.req.ID), "encrypt err", err.Error())
 		return
 	}
 
@@ -252,12 +287,12 @@ func (s *tunnel) httpConnect(target string) (err error) {
 	var status string
 	status, err = bufio.NewReader(s.conn).ReadString('\n')
 	if err != nil {
-		log.Printf("%s PROXY ERR: Could not find response to CONNECT: err=%v", TraceID(s.req.ID), err)
+		log.Printf("%s PROXY ERR: Could not find response to CONNECT: err=%v", trace.ID(s.req.ID), err)
 		return
 	}
 	// 检查是不是200返回
 	if strings.Contains(status, "200") == false {
-		log.Printf("%s PROXY ERR: Proxy response to CONNECT was: %s.\n", TraceID(s.req.ID), strconv.Quote(status))
+		log.Printf("%s PROXY ERR: Proxy response to CONNECT was: %s.\n", trace.ID(s.req.ID), strconv.Quote(status))
 		err = fmt.Errorf("Proxy response was: %s", strconv.Quote(status))
 	}
 	return

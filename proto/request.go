@@ -2,7 +2,6 @@ package proto
 
 import (
 	"context"
-	"fmt"
 	"net"
 
 	"github.com/keminar/anyproxy/grace"
@@ -62,9 +61,4 @@ func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 	}
 	that.Stream = s
 	return s.readRequest(from)
-}
-
-// TraceID 日志ID
-func TraceID(id uint) string {
-	return fmt.Sprintf("ID #%d,", id)
 }

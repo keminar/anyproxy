@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"syscall"
+
+	"github.com/keminar/anyproxy/utils/trace"
 )
 
 const SO_ORIGINAL_DST = 80
@@ -92,7 +94,7 @@ func (that *tcpStream) response() error {
 	that.req.DstIP, that.req.DstPort, newTCPConn, err = GetOriginalDstAddr(that.req.conn)
 	defer newTCPConn.Close()
 	if err != nil {
-		log.Println(TraceID(that.req.ID), "GetOriginalDstAddr err", err.Error())
+		log.Println(trace.ID(that.req.ID), "GetOriginalDstAddr err", err.Error())
 		return err
 	}
 
@@ -100,7 +102,7 @@ func (that *tcpStream) response() error {
 	tunnel := newTunnel(that.req)
 	err = tunnel.handshake("", that.req.DstIP, uint16(that.req.DstPort))
 	if err != nil {
-		log.Println(TraceID(that.req.ID), "dail err", err.Error())
+		log.Println(trace.ID(that.req.ID), "dail err", err.Error())
 		return err
 	}
 
@@ -112,5 +114,5 @@ func (that *tcpStream) response() error {
 }
 
 func (that *tcpStream) showIP(method string) {
-	log.Println(TraceID(that.req.ID), fmt.Sprintf("%s %s -> %s:%d", method, that.req.conn.RemoteAddr().String(), that.req.DstIP, that.req.DstPort))
+	log.Println(trace.ID(that.req.ID), fmt.Sprintf("%s %s -> %s:%d", method, that.req.conn.RemoteAddr().String(), that.req.DstIP, that.req.DstPort))
 }
