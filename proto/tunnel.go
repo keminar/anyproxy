@@ -187,22 +187,32 @@ func (s *tunnel) findHost(dstName, dstIP string) conf.Host {
 // handshake 和server握手
 func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 	var state cache.DialState
-	dstIP, state = s.lookup(dstName, dstIP)
-
 	var confTarget string
 	var localDNS bool
-	host := s.findHost(dstName, dstIP)
-	if host.Name != "" {
-		confTarget = host.Target
-		localDNS = host.LocalDNS
-	} else {
-		confTarget = conf.RouterConfig.Target
-		localDNS = conf.RouterConfig.LocalDNS
-	}
+	if dstName != "" {
+		// http请求
+		dstIP, state = s.lookup(dstName, dstIP)
 
-	if confTarget == "deny" {
-		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
-		return
+		host := s.findHost(dstName, dstIP)
+		if host.Name != "" {
+			confTarget = host.Target
+			localDNS = host.LocalDNS
+		} else {
+			confTarget = conf.RouterConfig.Target
+			localDNS = conf.RouterConfig.LocalDNS
+		}
+
+		if confTarget == "deny" {
+			err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
+			return
+		}
+	} else {
+		// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
+		// todo 改成可配置
+		if dstIP == "180.97.235.30" { //golang.org
+			dstIP = "216.239.37.1"
+		}
+		confTarget = "remote"
 	}
 	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget != "local" {
 		if confTarget == "auto" && state != cache.StateFail {
