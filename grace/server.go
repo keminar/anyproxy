@@ -154,6 +154,8 @@ func (srv *Server) GetConns() int {
 
 // GetConnRange 输出全部连接
 func (srv *Server) GetConnRange(f func(ID uint, startTime int64, remoteAddr string)) {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
 	for c := range srv.activeConn {
 		f(c.traceID, c.startTime, c.remoteAddr)
 	}
