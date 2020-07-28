@@ -2,6 +2,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	"github.com/keminar/anyproxy/config"
@@ -36,19 +39,36 @@ func main() {
 		return
 	}
 
+	config.SetDebugLevel(gDebug)
+	conf.LoadAllConfig()
+	// 检查配置是否存在
+	if conf.RouterConfig == nil {
+		os.Exit(2)
+	}
+
+	cmdName := "tunneld"
+	logDir := "./logs/"
+	envRunMode := fmt.Sprintf("%s_run_mode", cmdName)
+	fd := logging.ErrlogFd(logDir, cmdName)
 	// 是否后台运行
-	daemon.Daemonize()
+	daemon.Daemonize(envRunMode, fd)
 
 	// 支持只输入端口的形式
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort
 	}
-	config.SetDebugLevel(gDebug)
-	logging.SetDefaultLogger("./logs/", "tunneld", true, 3)
+
+	var writer io.Writer
+	// 前台执行，daemon运行根据环境变量识别
+	if daemon.IsForeground(envRunMode) {
+		// 同时输出到日志和标准输出
+		writer = io.Writer(os.Stdout)
+	}
+
+	logging.SetDefaultLogger(logDir, cmdName, true, 3, writer)
 	// 设置代理
 	config.SetProxyServer(gProxyServerSpec)
 
-	conf.LoadAllConfig()
 	server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
 	server.ListenAndServe()
 }

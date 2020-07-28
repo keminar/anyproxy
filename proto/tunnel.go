@@ -3,6 +3,7 @@ package proto
 import (
 	"bufio"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -139,12 +140,12 @@ func (s *tunnel) transfer(leftConn *net.TCPConn) {
 // dail tcp连接
 func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 	log.Printf("%s accept and create a new connection to server %s:%d\n", trace.ID(s.req.ID), dstIP, dstPort)
-	var addr *net.TCPAddr
-	addr, err = net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%d", dstIP, dstPort))
+	connTimeout := time.Duration(5) * time.Second
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dstIP, dstPort), connTimeout) // 3s timeout
 	if err != nil {
 		return
 	}
-	s.conn, err = net.DialTCP("tcp4", nil, addr)
+	s.conn = conn.(*net.TCPConn)
 	return
 }
 
@@ -190,30 +191,28 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 	var confTarget string
 	var localDNS bool
 	if dstName != "" {
-		// http请求
+		// http请求,dns解析
 		dstIP, state = s.lookup(dstName, dstIP)
-
-		host := s.findHost(dstName, dstIP)
-		if host.Name != "" {
-			confTarget = host.Target
-			localDNS = host.LocalDNS
-		} else {
-			confTarget = conf.RouterConfig.Target
-			localDNS = conf.RouterConfig.LocalDNS
-		}
-
-		if confTarget == "deny" {
-			err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
-			return
-		}
-	} else {
-		// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
-		// todo 改成可配置
-		if dstIP == "180.97.235.30" { //golang.org
-			dstIP = "216.239.37.1"
-		}
-		confTarget = "remote"
 	}
+	host := s.findHost(dstName, dstIP)
+	if host.Name != "" {
+		confTarget = host.Target
+		localDNS = host.LocalDNS
+	} else {
+		confTarget = conf.RouterConfig.Target
+		localDNS = conf.RouterConfig.LocalDNS
+	}
+	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
+	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
+	if host.IP != "" {
+		dstIP = host.IP
+	}
+
+	if confTarget == "deny" {
+		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
+		return
+	}
+
 	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget != "local" {
 		if confTarget == "auto" && state != cache.StateFail {
 			//local dial成功则返回
@@ -234,6 +233,10 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 		} else {
 			target = fmt.Sprintf("%s:%d", dstIP, dstPort)
 		}
+		if target[0] == ':' {
+			err = errors.New("target host is empty")
+			return
+		}
 		log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, target))
 
 		switch config.ProxyScheme {
@@ -247,7 +250,11 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 			return
 		}
 	} else {
-		err = s.dail(dstIP, dstPort)
+		if dstIP == "" {
+			err = errors.New("dstIP is empty")
+		} else {
+			err = s.dail(dstIP, dstPort)
+		}
 	}
 	if err != nil {
 		return
