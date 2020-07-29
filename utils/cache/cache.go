@@ -49,6 +49,8 @@ func newResolveLookupCache() *resolveLookupCache {
 
 // Lookup 查找
 func (c *resolveLookupCache) Lookup(logID uint, host string) (string, DialState) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	hit := c.ips[host]
 	if hit != nil {
 		if hit.expires.After(time.Now()) {

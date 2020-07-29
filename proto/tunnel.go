@@ -169,7 +169,8 @@ func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
 // 查询配置
 func (s *tunnel) findHost(dstName, dstIP string) conf.Host {
 	for _, h := range conf.RouterConfig.Hosts {
-		switch h.Match {
+		confMatch := getString(h.Match, conf.RouterConfig.Match, "equal")
+		switch confMatch {
 		case "equal":
 			if h.Name == dstName || h.Name == dstIP {
 				return h
@@ -185,23 +186,28 @@ func (s *tunnel) findHost(dstName, dstIP string) conf.Host {
 	return conf.Host{}
 }
 
+// 取值，如为空取默认
+func getString(val string, def string, def2 string) string {
+	if val == "" {
+		if def == "" {
+			return def2
+		}
+		return def
+	}
+	return val
+}
+
 // handshake 和server握手
 func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 	var state cache.DialState
-	var confTarget string
-	var localDNS bool
 	if dstName != "" {
 		// http请求,dns解析
 		dstIP, state = s.lookup(dstName, dstIP)
 	}
 	host := s.findHost(dstName, dstIP)
-	if host.Name != "" {
-		confTarget = host.Target
-		localDNS = host.LocalDNS
-	} else {
-		confTarget = conf.RouterConfig.Target
-		localDNS = conf.RouterConfig.LocalDNS
-	}
+	confTarget := getString(host.Target, conf.RouterConfig.Target, "auto")
+	confDNS := getString(host.DNS, conf.RouterConfig.DNS, "local")
+
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
 	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
 	if host.IP != "" {
@@ -225,7 +231,7 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 		}
 		// remote 请求
 		var target string
-		if localDNS == false {
+		if confDNS == "remote" {
 			if dstName == "" {
 				dstName = dstIP
 			}

@@ -1,8 +1,10 @@
-# 使用的DNS服务器 true 当前环境， false远程, 仅当target使用remote有效
-localDns: false
+# 使用的DNS服务器 local 当前环境， remote远程, 仅当target使用remote有效
+dns: local
 # 默认环境，local 当前环境, remote 远程, deny 禁止
 # auto根据dial选择，local dial失败则remote
 target: auto
+# 默认域名比对方案
+match: equal
 # 域名
 hosts:
   - name: github.com
@@ -11,11 +13,11 @@ hosts:
     # 参考全局target 
     target: remote
     # 参考全局localDns 
-    localDns: true
+    dns: local
   - name: golang.org
     match: contain
     target: auto
-    localDns: false
+    dns: remote
   - name: www.baidu.com
     match: equal
     target: local
