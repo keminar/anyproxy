@@ -9,8 +9,9 @@ import (
 )
 
 //VERSION 版本
-const VERSION = "0.3"
+const VERSION = "0.5"
 
+// Usage 帮助
 func Usage() {
 	fmt.Fprintf(os.Stdout, "%s\n\n", versionString())
 	fmt.Fprintf(os.Stdout, "usage: %s -l listenaddress -p proxies \n", os.Args[0])
@@ -24,13 +25,15 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  -h               This usage message\n\n")
 
 	fmt.Fprintf(os.Stdout, "Before starting anyproxy, be sure to change the number of available file handles to at least 65535\n")
-	fmt.Fprintf(os.Stdout, "with \"ulimit -n 65535\"\n")
+	fmt.Fprintf(os.Stdout, "with \"ulimit -n 65535\"\n") //重要
 	fmt.Fprintf(os.Stdout, "Some other tunables that enable higher performance:\n")
 	fmt.Fprintf(os.Stdout, "  net.core.netdev_max_backlog = 2048\n")
 	fmt.Fprintf(os.Stdout, "  net.core.somaxconn = 1024\n")
 	fmt.Fprintf(os.Stdout, "  net.core.rmem_default = 8388608\n")
 	fmt.Fprintf(os.Stdout, "  net.core.rmem_max = 16777216\n")
 	fmt.Fprintf(os.Stdout, "  net.core.wmem_max = 16777216\n")
+	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_tw_reuse = 1 \n")    //重要 ，//sysctl -w net.ipv4.tcp_tw_reuse=1
+	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_fin_timeout = 30\n") //重要， //sysctl -w net.ipv4.tcp_fin_timeout=30
 	fmt.Fprintf(os.Stdout, "  net.ipv4.ip_local_port_range = 2000 65000\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_window_scaling = 1\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_max_syn_backlog = 3240000\n")
@@ -41,6 +44,7 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_syncookies = 1\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_wmem = 4096 65536 16777216\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_congestion_control = cubic\n\n")
+
 	fmt.Fprintf(os.Stdout, "Report bugs to <linuxphp@126.com>.\n")
 	fmt.Fprintf(os.Stdout, "Thanks to https://github.com/ryanchapman/go-any-proxy.git\n")
 }
