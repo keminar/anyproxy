@@ -1,7 +1,10 @@
 .history
 .vscode
 anyproxy
+anyproxy.netgo
 tunneld
+tunneld.netgo
 tunnel/tunneld
+tunnel/tunneld.netgo
 logs/
 tunnel/logs/
