@@ -24,7 +24,7 @@ hosts:
   - name: google
     match: contain
     target: deny
-# anyproxy 和 tunnel通信密钥
-#token: anyproxy
+# anyproxy 和 tunnel通信密钥, 必须16位长度
+#token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
 #allowIP:

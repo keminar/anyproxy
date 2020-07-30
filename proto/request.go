@@ -10,8 +10,8 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 )
 
-// AesToken 加密密钥
-var AesToken = "anyproxy"
+// AesToken 加密密钥, 必须16位长度
+var AesToken = "anyproxyproxyany"
 
 // Request 请求类
 type Request struct {
