@@ -4,12 +4,14 @@ import (
 	"context"
 	"net"
 
+	"github.com/keminar/anyproxy/utils/conf"
+
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/proto/tcp"
 )
 
 // AesToken 加密密钥
-var AesToken = "hgfedcba87654321"
+var AesToken = "anyproxy"
 
 // Request 请求类
 type Request struct {
@@ -61,4 +63,12 @@ func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 	}
 	that.Stream = s
 	return s.readRequest(from)
+}
+
+// 加密Token
+func getToken() string {
+	if conf.RouterConfig.Token == "" {
+		return AesToken
+	}
+	return conf.RouterConfig.Token
 }

@@ -89,6 +89,10 @@ func (that *tcpStream) readRequest(from string) (canProxy bool, err error) {
 }
 
 func (that *tcpStream) response() error {
+	tunnel := newTunnel(that.req)
+	if ip, ok := tunnel.isAllowed(); !ok {
+		return errors.New(ip + " is not allowed")
+	}
 	var err error
 	var newTCPConn *net.TCPConn
 	that.req.DstIP, that.req.DstPort, newTCPConn, err = GetOriginalDstAddr(that.req.conn)
@@ -99,7 +103,6 @@ func (that *tcpStream) response() error {
 	}
 
 	that.showIP("TCP")
-	tunnel := newTunnel(that.req)
 	err = tunnel.handshake("", that.req.DstIP, uint16(that.req.DstPort))
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "dail err", err.Error())

@@ -296,7 +296,7 @@ func (s *tunnel) httpConnect(target string) (err error) {
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
-	key := []byte(AesToken)
+	key := []byte(getToken())
 	var x1 []byte
 	x1, err = crypto.EncryptAES([]byte(target), key)
 	if err != nil {
@@ -319,4 +319,19 @@ func (s *tunnel) httpConnect(target string) (err error) {
 		err = fmt.Errorf("Proxy response was: %s", strconv.Quote(status))
 	}
 	return
+}
+
+// IP限制
+func (s *tunnel) isAllowed() (string, bool) {
+	if len(conf.RouterConfig.AllowIP) == 0 {
+		return "", true
+	}
+	ip := s.req.conn.RemoteAddr().String()
+	ipSplit := strings.Split(ip, ":")
+	for _, p := range conf.RouterConfig.AllowIP {
+		if ipSplit[0] == p {
+			return "", true
+		}
+	}
+	return ipSplit[0], false
 }

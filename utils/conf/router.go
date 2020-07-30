@@ -20,10 +20,12 @@ type Host struct {
 
 // Router 配置文件模型
 type Router struct {
-	DNS    string `yaml:"dns"`    //默认的DNS服务器
-	Target string `yaml:"target"` //默认访问策略
-	Match  string `yaml:"match"`  //默认域名比对
-	Hosts  []Host
+	Token   string   `yaml:"token"`   //加密值
+	DNS     string   `yaml:"dns"`     //默认的DNS服务器
+	Target  string   `yaml:"target"`  //默认访问策略
+	Match   string   `yaml:"match"`   //默认域名比对
+	Hosts   []Host   `yaml:"host"`    //域名列表
+	AllowIP []string `yaml:"allowIP"` //可以访问的客户端IP
 }
 
 // LoadRouterConfig 加载配置

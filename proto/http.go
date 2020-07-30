@@ -84,7 +84,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 
 	rawurl := that.RequestURI
 	if that.Method == "CONNECT" && from == "server" {
-		key := []byte(AesToken)
+		key := []byte(getToken())
 		x1, err := base64.StdEncoding.DecodeString(that.RequestURI)
 		if err != nil {
 			return false, err
@@ -146,8 +146,8 @@ func (that *httpStream) Request() string {
 	return that.RequestURI
 }
 
-// BadRequest 400响应
-func (that *httpStream) BadRequest(err error) {
+// badRequest 400响应
+func (that *httpStream) badRequest(err error) {
 
 	const errorHeaders = "\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n"
 
@@ -161,6 +161,11 @@ func (that *httpStream) BadRequest(err error) {
 
 func (that *httpStream) response() error {
 	tunnel := newTunnel(that.req)
+	if ip, ok := tunnel.isAllowed(); !ok {
+		err := errors.New(ip + " is not allowed")
+		that.badRequest(err)
+		return err
+	}
 	if that.Method == "CONNECT" {
 		_, err := that.req.conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 		if err != nil {

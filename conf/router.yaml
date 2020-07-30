@@ -7,7 +7,7 @@ target: auto
 match: equal
 # 域名
 hosts:
-  - name: github.com
+  - name: github
     # contain 包含,equal 完全相等, preg 正则
     match: contain
     # 参考全局target 
@@ -24,3 +24,7 @@ hosts:
   - name: google
     match: contain
     target: deny
+# anyproxy 和 tunnel通信密钥
+#token: anyproxy
+# 可访问的客户端IP，为空不限制
+#allowIP:

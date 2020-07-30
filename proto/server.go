@@ -19,6 +19,7 @@ func ServerHandler(ctx context.Context, tcpConn *net.TCPConn) error {
 		log.Println(trace.ID(req.ID), "ClientHandler(): oops, clientConn.fd is nil!")
 		return errors.New("clientConn.fd is nil")
 	}
+	log.Println(trace.ID(req.ID), "remoteAddr:"+remoteAddr.String())
 
 	ok, err := req.ReadRequest("server")
 	if err != nil && ok == false {
