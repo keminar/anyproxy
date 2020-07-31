@@ -54,7 +54,7 @@ func (c *resolveLookupCache) Lookup(logID uint, host string) (string, DialState)
 	hit := c.ips[host]
 	if hit != nil {
 		if hit.expires.After(time.Now()) {
-			log.Println(trace.ID(logID), "lookup(): CACHE_HIT")
+			log.Println(trace.ID(logID), "lookup(): CACHE_HIT", hit.state)
 			return hit.ipv4, hit.state
 		}
 		log.Println(trace.ID(logID), "lookup(): CACHE_EXPIRED")

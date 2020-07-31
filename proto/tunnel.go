@@ -220,14 +220,20 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 	}
 
 	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget != "local" {
-		if confTarget == "auto" && state != cache.StateFail {
-			//local dial成功则返回
-			err = s.dail(dstIP, dstPort)
-			if err == nil {
-				s.curState = stateNew
-				return
+		if confTarget == "auto" {
+			if state != cache.StateFail {
+				//local dial成功则返回
+				err = s.dail(dstIP, dstPort)
+				if err == nil {
+					s.curState = stateNew
+					return
+				}
+				cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
 			}
-			cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
+			//fail的auto 等于用remote访问，但ip在remote访问可能也是不通的，强制用远程dns
+			//如果又想远程，又想用本地dns请配置中单独指定
+			//有一种情况是ip能dail通，auto模式就是会用local，但是transfer时接不到数据包，这种也要配置中单独指定remote
+			confDNS = "remote"
 		}
 		// remote 请求
 		var target string
