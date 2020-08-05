@@ -126,6 +126,14 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 func (that *httpStream) getNameIPPort() {
 	splitStr := strings.Split(that.Host, ":")
 	that.req.DstName = splitStr[0]
+	if len(splitStr) == 2 {
+		// 优先Host中的端口
+		c, _ := strconv.ParseUint(splitStr[1], 0, 16)
+		that.req.DstPort = uint16(c)
+		if that.req.DstPort > 0 {
+			return
+		}
+	}
 
 	c, _ := strconv.ParseUint(that.URL.Port(), 0, 16)
 	that.req.DstPort = uint16(c)
