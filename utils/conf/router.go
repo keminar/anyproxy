@@ -18,8 +18,14 @@ type Host struct {
 	IP     string `yaml:"ip"`     //本地解析ip
 }
 
+// Log 日志
+type Log struct {
+	Dir string `yaml:"dir"`
+}
+
 // Router 配置文件模型
 type Router struct {
+	Log     Log      `yaml:"log"`
 	Token   string   `yaml:"token"`   //加密值
 	DNS     string   `yaml:"dns"`     //默认的DNS服务器
 	Target  string   `yaml:"target"`  //默认访问策略

@@ -48,6 +48,9 @@ func main() {
 
 	cmdName := "tunneld"
 	logDir := "./logs/"
+	if conf.RouterConfig.Log.Dir != "" {
+		logDir = conf.RouterConfig.Log.Dir
+	}
 	envRunMode := fmt.Sprintf("%s_run_mode", cmdName)
 	fd := logging.ErrlogFd(logDir, cmdName)
 	// 是否后台运行
