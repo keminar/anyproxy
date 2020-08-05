@@ -4,6 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strings"
 
@@ -72,6 +75,16 @@ func main() {
 	// 设置代理
 	config.SetProxyServer(gProxyServerSpec)
 
+	// 临时用gDebug==5001后面增加自己配置
+	if gDebug == 5001 {
+		go func() {
+			//浏览器访问: http://:5001/debug/pprof/
+			log.Println("Starting pprof debug server ...")
+			// 这里不要使用log.Fatal会在平滑重启时导致进程退出
+			// 因为http server现在没办法加入平滑重启，第一次重启会报端口冲突，可以通过重启两次来启动到pprof
+			log.Println(http.ListenAndServe(":5001", nil))
+		}()
+	}
 	server := grace.NewServer(gListenAddrPort, proto.ClientHandler)
 	server.ListenAndServe()
 }

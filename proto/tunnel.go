@@ -46,14 +46,8 @@ func newTunnel(req *Request) *tunnel {
 
 // copyBuffer 传输数据
 func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcname string) (written int64, err error) {
-	size := 32 * 1024
-	if l, ok := src.(*io.LimitedReader); ok && int64(size) > l.N {
-		if l.N < 1 {
-			size = 1
-		} else {
-			size = int(l.N)
-		}
-	}
+	//如果设置过大会耗内存高，4k比较合理
+	size := 4 * 1024
 	buf := make([]byte, size)
 	i := 0
 	for {
