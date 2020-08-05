@@ -36,9 +36,13 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 
 # 使用案例
 > 案例1:解决Docker pull官方镜像的问题
+
+`使用iptables将本用户下tcp流转到anyproxy，再进行docker pull操作`
+
 ![解决Docker pull问题](examples/docker_pull.png)
 
 > 案例2: 解决相同域名访问网站不同测试环境的问题
+
 `本地通过内网 anyproxy 代理上网，遇到测试服务器域名则跳到外网tunneld转发，网站的nginx根据来源IP进行转发到特定测试环境（有几个环境就需要有几个tunneld服务且IP要不同)`
 
 # 源码编译
