@@ -1,6 +1,6 @@
 # Any Proxy
 
-anyproxy 是一个tcp转发客户端，可以让不支持通过代理服务器工作的网络程序能通过HTTP或SOCKS代理。可以代替Proxifier做socks5客户端， 可以代替charles进行手机http抓包(需定制)。它部署在Linux客户机，可以直接将收到的网络请求发出，也可以将tcp流转到tunneld或SOCKS代理。
+anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将tcp流转到tunneld或SOCKS代理, 达到让不支持设置代理的网络程序通过HTTP或SOCKS代理运行的目的。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。
 
 [下载二进制包](http://cloudme.io/anyproxy)
 
@@ -35,8 +35,11 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 ```
 
 # 使用案例
-> 解决Docker pull官方镜像的问题
+> 案例1:解决Docker pull官方镜像的问题
 ![解决Docker pull问题](examples/docker_pull.png)
+
+> 案例2: 解决相同域名访问网站不同测试环境的问题
+`本地通过内网 anyproxy 代理上网，遇到测试服务器域名则跳到外网tunneld转发，网站的nginx根据来源IP进行转发到特定测试环境（有几个环境就需要有几个tunneld服务且IP要不同)`
 
 # 源码编译
 
