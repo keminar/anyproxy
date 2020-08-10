@@ -5,6 +5,7 @@ dns: local
 # 默认环境，local 当前环境, remote 远程, deny 禁止
 # auto根据dial选择，local dial失败则remote
 target: auto
+tcpTarget: remote
 # 默认域名比对方案
 match: equal
 # 域名

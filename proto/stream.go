@@ -103,7 +103,7 @@ func (that *tcpStream) response() error {
 	}
 
 	that.showIP("TCP")
-	err = tunnel.handshake("", that.req.DstIP, uint16(that.req.DstPort))
+	err = tunnel.handshake(protoTCP, "", that.req.DstIP, uint16(that.req.DstPort))
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "dail err", err.Error())
 		return err

@@ -26,6 +26,9 @@ const (
 	stateClosed
 )
 
+const protoTCP = "tcp"
+const protoHTTP = "http"
+
 // 转发实体
 type tunnel struct {
 	req      *Request
@@ -192,14 +195,19 @@ func getString(val string, def string, def2 string) string {
 }
 
 // handshake 和server握手
-func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
+func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) (err error) {
 	var state cache.DialState
 	if dstName != "" {
 		// http请求,dns解析
 		dstIP, state = s.lookup(dstName, dstIP)
 	}
 	host := s.findHost(dstName, dstIP)
-	confTarget := getString(host.Target, conf.RouterConfig.Target, "auto")
+	var confTarget string
+	if proto == protoTCP {
+		confTarget = getString(host.Target, conf.RouterConfig.TCPTarget, "auto")
+	} else {
+		confTarget = getString(host.Target, conf.RouterConfig.Target, "auto")
+	}
 	confDNS := getString(host.DNS, conf.RouterConfig.DNS, "local")
 
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
@@ -217,6 +225,7 @@ func (s *tunnel) handshake(dstName, dstIP string, dstPort uint16) (err error) {
 		if confTarget == "auto" {
 			if state != cache.StateFail {
 				//local dial成功则返回
+				//auto 只能优化ip ping 不通的情况，能dail通访问不了的需要手动remote
 				err = s.dail(dstIP, dstPort)
 				if err == nil {
 					s.curState = stateNew
