@@ -24,6 +24,7 @@ const (
 	stateNew int = iota
 	stateActive
 	stateClosed
+	stateSwitch
 )
 
 const protoTCP = "tcp"
@@ -37,6 +38,8 @@ type tunnel struct {
 
 	readSize  int64
 	writeSize int64
+
+	clientUnRead int
 }
 
 // newTunnel 实例
@@ -60,8 +63,25 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 		}
 		nr, er := src.Read(buf)
 		if nr > 0 {
+			// 如果为HTTP/1.1的Keep-alive情况下
+			if srcname == "client" && s.clientUnRead >= 0 {
+				// 之前已读完，说明要建新链接
+				if s.clientUnRead == 0 {
+					// 关闭与旧的服务器的连接
+					s.conn.CloseWrite()
+					// 状态变成已转移，不能为关闭，会导致下面逻辑的Client也被关闭
+					s.curState = stateSwitch
+
+					//todo 如果域名不同跳出交换数据
+					fmt.Println(string(buf[0:nr]))
+					break
+				}
+				// 未读完
+				s.clientUnRead -= nr
+			}
 			if config.DebugLevel == config.LevelDebug {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
+				//fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
@@ -102,9 +122,10 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 
 // transfer 交换数据
 // leftConn 不用req.conn 有一定原因是leftConn可能会是newTCPConn
-func (s *tunnel) transfer(leftConn *net.TCPConn) {
+func (s *tunnel) transfer(leftConn *net.TCPConn, clientUnRead int) {
 	log.Println(trace.ID(s.req.ID), "transfer start")
 	s.curState = stateActive
+	s.clientUnRead = clientUnRead
 	done := make(chan int, 1)
 
 	//发送请求

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
 	"github.com/keminar/anyproxy/proto/http"
 	"github.com/keminar/anyproxy/proto/text"
@@ -117,8 +118,18 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	if that.Host == "" {
 		that.Host = that.Header.Get("Host")
 	}
+	//that.Header.Set("Connection", "Close")
 	that.BodyBuf = that.req.reader.UnreadBuf()
 	that.getNameIPPort()
+
+	//debug
+	if config.DebugLevel == config.LevelDebug {
+		fmt.Println(trace.ID(that.req.ID), that.FirstLine)
+		for k, v := range that.Header {
+			fmt.Println(trace.ID(that.req.ID), k, "=", v)
+		}
+		fmt.Println(trace.ID(that.req.ID), string(that.BodyBuf))
+	}
 	return true, nil
 }
 
@@ -187,7 +198,7 @@ func (that *httpStream) response() error {
 			log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 			return err
 		}
-		tunnel.transfer(that.req.conn)
+		tunnel.transfer(that.req.conn, -1)
 	} else {
 		that.showIP("HTTP")
 		err := tunnel.handshake(protoHTTP, that.req.DstName, "", that.req.DstPort)
@@ -203,7 +214,17 @@ func (that *httpStream) response() error {
 		// 多读取的body部分
 		tunnel.conn.Write(that.BodyBuf)
 
-		tunnel.transfer(that.req.conn)
+		clientUnRead := -1
+		if that.Proto == "HTTP/1.1" {
+			clientUnRead = 0
+			if contentLen, ok := that.Header["Content-Length"]; ok {
+				if bodyLen, err := strconv.Atoi(contentLen[0]); err == nil {
+					fmt.Println(bodyLen, len(that.BodyBuf))
+					clientUnRead = bodyLen - len(that.BodyBuf)
+				}
+			}
+		}
+		tunnel.transfer(that.req.conn, clientUnRead)
 	}
 	return nil
 }

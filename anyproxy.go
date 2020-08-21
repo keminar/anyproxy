@@ -30,7 +30,7 @@ func init() {
 	flag.Usage = help.Usage
 	flag.StringVar(&gListenAddrPort, "l", ":3000", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
-	flag.IntVar(&gDebug, "d", 0, "debug mode")
+	flag.IntVar(&gDebug, "d", 0, "debug mode (0, 1, 2)")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
 
 }

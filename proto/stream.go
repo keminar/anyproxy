@@ -112,7 +112,7 @@ func (that *tcpStream) response() error {
 	// 将前面读的字节补上
 	tmpBuf := that.req.reader.UnreadBuf()
 	tunnel.conn.Write(tmpBuf)
-	tunnel.transfer(newTCPConn)
+	tunnel.transfer(newTCPConn, -1)
 	return nil
 }
 
