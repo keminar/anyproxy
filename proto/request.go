@@ -16,6 +16,7 @@ var AesToken = "anyproxyproxyany"
 // Request 请求类
 type Request struct {
 	ID     uint
+	ctx    context.Context
 	conn   *net.TCPConn
 	reader *tcp.Reader
 	Proto  string //http
@@ -34,6 +35,18 @@ func NewRequest(ctx context.Context, conn *net.TCPConn) *Request {
 		ID:     traceID,
 		conn:   conn,
 		reader: tcp.NewReader(conn),
+	}
+	return c
+}
+
+// NewRequest 请求类
+func NewRequestWithBuf(ctx context.Context, conn *net.TCPConn, buf []byte) *Request {
+	// 取traceID
+	traceID, _ := ctx.Value(grace.TraceIDContextKey).(uint)
+	c := &Request{
+		ID:     traceID,
+		conn:   conn,
+		reader: tcp.NewReaderWithBuf(conn, buf),
 	}
 	return c
 }

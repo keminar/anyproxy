@@ -35,6 +35,13 @@ func NewReader(rd io.Reader) *Reader {
 	return NewReaderSize(rd, defaultBufSize)
 }
 
+func NewReaderWithBuf(rd io.Reader, buf []byte) *Reader {
+	r := NewReaderSize(rd, defaultBufSize)
+	r.buf = buf
+	r.w = len(buf)
+	return r
+}
+
 // NewReaderSize returns a new Reader whose buffer has at least the specified
 // size. If the argument io.Reader is already a Reader with large enough
 // size, it returns the underlying Reader.

@@ -218,9 +218,9 @@ func (that *httpStream) response() error {
 		if that.Proto == "HTTP/1.1" {
 			clientUnRead = 0
 			if contentLen, ok := that.Header["Content-Length"]; ok {
-				if bodyLen, err := strconv.Atoi(contentLen[0]); err == nil {
+				if bodyLen, err := parseContentLength(contentLen[0]); err == nil {
 					fmt.Println(bodyLen, len(that.BodyBuf))
-					clientUnRead = bodyLen - len(that.BodyBuf)
+					clientUnRead = int(bodyLen) - len(that.BodyBuf)
 				}
 			}
 		}
@@ -246,4 +246,18 @@ func parseRequestLine(line string) (requestURI, proto string, ok bool) {
 	}
 	s2 += s1 + 1
 	return line[s1+1 : s2], line[s2+1:], true
+}
+
+// parseContentLength trims whitespace from s and returns -1 if no value
+// is set, or the value if it's >= 0.
+func parseContentLength(cl string) (int64, error) {
+	cl = strings.TrimSpace(cl)
+	if cl == "" {
+		return -1, nil
+	}
+	n, err := strconv.ParseInt(cl, 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("bad Content-Length %s", cl)
+	}
+	return n, nil
 }

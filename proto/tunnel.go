@@ -24,7 +24,7 @@ const (
 	stateNew int = iota
 	stateActive
 	stateClosed
-	stateSwitch
+	stateIdle
 )
 
 const protoTCP = "tcp"
@@ -40,6 +40,8 @@ type tunnel struct {
 	writeSize int64
 
 	clientUnRead int
+
+	buf []byte
 }
 
 // newTunnel 实例
@@ -67,13 +69,16 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 			if srcname == "client" && s.clientUnRead >= 0 {
 				// 之前已读完，说明要建新链接
 				if s.clientUnRead == 0 {
-					// 关闭与旧的服务器的连接
+					// 关闭与旧的服务器的连接的写
 					s.conn.CloseWrite()
-					// 状态变成已转移，不能为关闭，会导致下面逻辑的Client也被关闭
-					s.curState = stateSwitch
+					// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
+					s.curState = stateIdle
 
 					//todo 如果域名不同跳出交换数据
 					fmt.Println(string(buf[0:nr]))
+
+					s.buf = make([]byte, nr)
+					copy(s.buf, buf[0:nr])
 					break
 				}
 				// 未读完
@@ -81,7 +86,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 			}
 			if config.DebugLevel == config.LevelDebug {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
-				//fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
+				fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
@@ -102,17 +107,23 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 				err = er
 			} else {
 				log.Println(trace.ID(s.req.ID), srcname, "read", er.Error())
+				if srcname == "server" {
+					// keep-alive 复用连接时写，后端收到结束后响应EOF
+					if s.curState == stateIdle {
+						log.Println(trace.ID(s.req.ID), srcname, "test")
+						//可以开始复用了
+						KeepHandler(s.req.ctx, s.req.conn, s.buf)
+					} else if s.curState != stateClosed {
+						// 如果非客户端导致的服务端关闭，则关闭客户端读
+						dst.(*net.TCPConn).CloseRead()
+					}
+				}
 			}
 
 			if srcname == "client" {
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
 				s.conn.CloseWrite()
 				s.curState = stateClosed
-			} else {
-				// 如果非客户端导致的服务端关闭，则关闭客户端读
-				if s.curState != stateClosed {
-					dst.(*net.TCPConn).CloseRead()
-				}
 			}
 			break
 		}
