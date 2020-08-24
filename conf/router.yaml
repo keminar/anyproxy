@@ -27,6 +27,8 @@ hosts:
   - name: google
     match: contain
     target: deny
+  - name: dev.example.com
+    ip: 127.0.0.1
 # anyproxy 和 tunnel通信密钥, 必须16位长度
 #token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制

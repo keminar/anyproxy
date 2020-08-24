@@ -32,6 +32,7 @@ func NewRequest(ctx context.Context, conn *net.TCPConn) *Request {
 	// 取traceID
 	traceID, _ := ctx.Value(grace.TraceIDContextKey).(uint)
 	c := &Request{
+		ctx:    ctx,
 		ID:     traceID,
 		conn:   conn,
 		reader: tcp.NewReader(conn),
@@ -39,11 +40,12 @@ func NewRequest(ctx context.Context, conn *net.TCPConn) *Request {
 	return c
 }
 
-// NewRequest 请求类
+// NewRequestWithBuf 请求类，前带buf内容
 func NewRequestWithBuf(ctx context.Context, conn *net.TCPConn, buf []byte) *Request {
 	// 取traceID
 	traceID, _ := ctx.Value(grace.TraceIDContextKey).(uint)
 	c := &Request{
+		ctx:    ctx,
 		ID:     traceID,
 		conn:   conn,
 		reader: tcp.NewReaderWithBuf(conn, buf),

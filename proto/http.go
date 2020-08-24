@@ -25,15 +25,16 @@ type badRequestError string
 func (e badRequestError) Error() string { return "Bad Request: " + string(e) }
 
 type httpStream struct {
-	req        *Request
-	Method     string      // http请求方法
-	RequestURI string      //读求原值，非解密值
-	URL        *url.URL    //http请求地址信息
-	Proto      string      //形如 http/1.0 或 http/1.1
-	Host       string      //域名含端口
-	Header     http.Header //http请求头部
-	FirstLine  string      //第一行字串
-	BodyBuf    []byte
+	req          *Request
+	Method       string      // http请求方法
+	RequestURI   string      //读求原值，非解密值
+	URL          *url.URL    //http请求地址信息
+	Proto        string      //形如 http/1.0 或 http/1.1
+	Host         string      //域名含端口
+	Header       http.Header //http请求头部
+	FirstLine    string      //第一行字串
+	BodyBuf      []byte
+	clientUnRead int
 }
 
 func newHTTPStream(req *Request) *httpStream {
@@ -119,7 +120,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 		that.Host = that.Header.Get("Host")
 	}
 	//that.Header.Set("Connection", "Close")
-	that.BodyBuf = that.req.reader.UnreadBuf()
+	that.readBody()
 	that.getNameIPPort()
 
 	//debug
@@ -131,6 +132,27 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 		fmt.Println(trace.ID(that.req.ID), string(that.BodyBuf))
 	}
 	return true, nil
+}
+
+func (that *httpStream) readBody() {
+	that.clientUnRead = -1
+	if that.Proto == "HTTP/1.1" {
+		//todo chunk的暂没处理支持, 按tcp处理
+		if _, ok := that.Header["Transfer-Encoding"]; !ok {
+			if contentLen, ok := that.Header["Content-Length"]; ok {
+				if bodyLen, err := parseContentLength(contentLen[0]); err == nil {
+					that.BodyBuf = that.req.reader.UnreadBuf(int(bodyLen))
+					that.clientUnRead = int(bodyLen) - len(that.BodyBuf)
+					return
+				}
+			}
+			//默认没有body，不需要读了，返回
+			that.clientUnRead = 0
+			return
+		}
+	}
+	that.BodyBuf = that.req.reader.UnreadBuf(-1)
+	return
 }
 
 // getNameIPPort 分析请求目标
@@ -198,7 +220,7 @@ func (that *httpStream) response() error {
 			log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 			return err
 		}
-		tunnel.transfer(that.req.conn, -1)
+		tunnel.transfer(-1)
 	} else {
 		that.showIP("HTTP")
 		err := tunnel.handshake(protoHTTP, that.req.DstName, "", that.req.DstPort)
@@ -213,18 +235,7 @@ func (that *httpStream) response() error {
 		tunnel.conn.Write([]byte("\r\n"))
 		// 多读取的body部分
 		tunnel.conn.Write(that.BodyBuf)
-
-		clientUnRead := -1
-		if that.Proto == "HTTP/1.1" {
-			clientUnRead = 0
-			if contentLen, ok := that.Header["Content-Length"]; ok {
-				if bodyLen, err := parseContentLength(contentLen[0]); err == nil {
-					fmt.Println(bodyLen, len(that.BodyBuf))
-					clientUnRead = int(bodyLen) - len(that.BodyBuf)
-				}
-			}
-		}
-		tunnel.transfer(that.req.conn, clientUnRead)
+		tunnel.transfer(that.clientUnRead)
 	}
 	return nil
 }

@@ -35,9 +35,10 @@ func NewReader(rd io.Reader) *Reader {
 	return NewReaderSize(rd, defaultBufSize)
 }
 
+// NewReaderWithBuf 带有前置buf内容的Reader实例
 func NewReaderWithBuf(rd io.Reader, buf []byte) *Reader {
-	r := NewReaderSize(rd, defaultBufSize)
-	r.buf = buf
+	r := new(Reader)
+	r.reset(buf, rd)
 	r.w = len(buf)
 	return r
 }
@@ -274,9 +275,17 @@ func (b *Reader) Peek(n int) ([]byte, error) {
 }
 
 // UnreadBuf 获取已读到buf但未从buf读走的内容
-func (b *Reader) UnreadBuf() (data []byte) {
-	data = b.buf[b.r:b.w]
-	b.r = b.w
+func (b *Reader) UnreadBuf(max int) (data []byte) {
+	if max == 0 {
+		return
+	}
+	if max > 0 && b.Buffered() > max {
+		data = b.buf[b.r:(b.r + max)]
+		b.r = b.r + max
+	} else { // max = -1
+		data = b.buf[b.r:b.w]
+		b.r = b.w
+	}
 	if i := len(data) - 1; i >= 0 {
 		b.lastByte = int(data[i])
 	}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"syscall"
 
+	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/trace"
 )
 
@@ -110,9 +111,13 @@ func (that *tcpStream) response() error {
 	}
 
 	// 将前面读的字节补上
-	tmpBuf := that.req.reader.UnreadBuf()
+	tmpBuf := that.req.reader.UnreadBuf(-1)
 	tunnel.conn.Write(tmpBuf)
-	tunnel.transfer(newTCPConn, -1)
+	// 切换为新连接
+	reader := tcp.NewReader(newTCPConn)
+	that.req.reader = reader
+	that.req.conn = newTCPConn
+	tunnel.transfer(-1)
 	return nil
 }
 

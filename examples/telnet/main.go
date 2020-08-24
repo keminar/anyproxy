@@ -20,7 +20,7 @@ func HelloHandler(w http.ResponseWriter, r *http.Request) {
 
 func SleepHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println(time.Now().Unix(), r.Host+r.URL.RequestURI())
-	time.Sleep(time.Duration(30) * time.Second)
+	time.Sleep(time.Duration(20) * time.Second)
 	fmt.Fprintf(w, "Sleep! %s%s\n", r.Host, r.URL.RequestURI())
 	fmt.Println(time.Now().Unix(), "sleep end")
 }

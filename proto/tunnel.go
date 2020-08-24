@@ -14,6 +14,7 @@ import (
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
+	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/cache"
 	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -33,7 +34,7 @@ const protoHTTP = "http"
 // 转发实体
 type tunnel struct {
 	req      *Request
-	conn     *net.TCPConn
+	conn     *net.TCPConn //后端服务
 	curState int
 
 	readSize  int64
@@ -53,14 +54,14 @@ func newTunnel(req *Request) *tunnel {
 }
 
 // copyBuffer 传输数据
-func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcname string) (written int64, err error) {
+func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (written int64, err error) {
 	//如果设置过大会耗内存高，4k比较合理
 	size := 4 * 1024
 	buf := make([]byte, size)
 	i := 0
 	for {
 		i++
-		if config.DebugLevel == config.LevelDebug {
+		if config.DebugLevel >= config.LevelDebug {
 			log.Printf("%s receive from %s, n=%d\n", trace.ID(s.req.ID), srcname, i)
 		}
 		nr, er := src.Read(buf)
@@ -74,9 +75,8 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 					// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
 					s.curState = stateIdle
 
-					//todo 如果域名不同跳出交换数据
-					fmt.Println(string(buf[0:nr]))
-
+					//todo 如果域名不同跳出交换数据, 因为这个逻辑会出现N次，应该在http.go实现
+					//fmt.Println(string(buf[0:nr]))
 					s.buf = make([]byte, nr)
 					copy(s.buf, buf[0:nr])
 					break
@@ -84,7 +84,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 				// 未读完
 				s.clientUnRead -= nr
 			}
-			if config.DebugLevel == config.LevelDebug {
+			if config.DebugLevel >= config.LevelDebug {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
 				fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
 			}
@@ -106,13 +106,13 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 			if er != io.EOF {
 				err = er
 			} else {
-				log.Println(trace.ID(s.req.ID), srcname, "read", er.Error())
+				s.logCopyErr(srcname+" read", er)
 				if srcname == "server" {
-					// keep-alive 复用连接时写，后端收到结束后响应EOF
+					// 技巧：keep-alive 复用连接时写，后端收到CloseWrite后响应EOF，当收到EOF时说明body都收完了。
 					if s.curState == stateIdle {
-						log.Println(trace.ID(s.req.ID), srcname, "test")
-						//可以开始复用了
+						//可以开始复用了, 带上之前读过的缓存
 						KeepHandler(s.req.ctx, s.req.conn, s.buf)
+						break
 					} else if s.curState != stateClosed {
 						// 如果非客户端导致的服务端关闭，则关闭客户端读
 						dst.(*net.TCPConn).CloseRead()
@@ -132,9 +132,10 @@ func (s *tunnel) copyBuffer(dst io.Writer, src io.Reader, dstname string, srcnam
 }
 
 // transfer 交换数据
-// leftConn 不用req.conn 有一定原因是leftConn可能会是newTCPConn
-func (s *tunnel) transfer(leftConn *net.TCPConn, clientUnRead int) {
-	log.Println(trace.ID(s.req.ID), "transfer start")
+func (s *tunnel) transfer(clientUnRead int) {
+	if config.DebugLevel >= config.LevelLong {
+		log.Println(trace.ID(s.req.ID), "transfer start")
+	}
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
 	done := make(chan int, 1)
@@ -147,28 +148,37 @@ func (s *tunnel) transfer(leftConn *net.TCPConn, clientUnRead int) {
 		}()
 		//不能和外层共用err
 		var err error
-		s.readSize, err = s.copyBuffer(s.conn, leftConn, "server", "client")
-		if err != nil {
-			log.Println(trace.ID(s.req.ID), "client->server", err.Error())
-		}
+		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "client")
+		s.logCopyErr("client->server", err)
 		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
 	}()
 
 	var err error
 	//取返回结果
-	s.writeSize, err = s.copyBuffer(leftConn, s.conn, "client", "server")
-	if err != nil {
-		log.Println(trace.ID(s.req.ID), "server->client", err.Error())
-	}
+	s.writeSize, err = s.copyBuffer(s.req.conn, tcp.NewReader(s.conn), "server")
+	s.logCopyErr("server->client", err)
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
 	log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
 }
 
+func (s *tunnel) logCopyErr(name string, err error) {
+	if err == nil {
+		return
+	}
+	if config.DebugLevel >= config.LevelLong {
+		log.Println(trace.ID(s.req.ID), name, err.Error())
+	} else if err != io.EOF {
+		log.Println(trace.ID(s.req.ID), name, err.Error())
+	}
+}
+
 // dail tcp连接
 func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
-	log.Printf("%s accept and create a new connection to server %s:%d\n", trace.ID(s.req.ID), dstIP, dstPort)
+	if config.DebugLevel >= config.LevelLong {
+		log.Printf("%s create a new connection to server %s:%d\n", trace.ID(s.req.ID), dstIP, dstPort)
+	}
 	connTimeout := time.Duration(5) * time.Second
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dstIP, dstPort), connTimeout) // 3s timeout
 	if err != nil {

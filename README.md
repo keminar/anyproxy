@@ -146,12 +146,12 @@ sudo iptables -t nat -D OUTPUT 2
 > ~~划线~~ 部分为已实现功能
 * ~~可将请求转发到Tunnel服务~~
 * 根据CIDR做不同出口请求
-* 对域名支持加Host绑定
+* ~~对域名支持加Host绑定~~
 * ~~对域名配置请求出口~~
 * ~~增加全局默认出口配置~~
 * ~~配置文件支持~~
-* 服务间通信增加token验证
-* 日志信息完善
+* ~~服务间通信增加token验证可配~~
+* ~~日志信息完善~~
 * ~~DNS解析增加cache~~
 * ~~自动路由模式下可设置检测时间和cache~~
 * 可以支持多个server，如果一个不可用用下一个
@@ -163,6 +163,8 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~支持转发到socket5服务~~
 * TCP 增加更多协议解析支持，如rtmp，ftp等
 * 与Tunnel的多账户认证，账户可设置有效期
+* ~~支持HTTP/1.1 keep-alive 一外链接多次请求不同域名~~
+* HTTP/1.1 keep-alive后端也能复用tcp
 
 # 感谢
 
