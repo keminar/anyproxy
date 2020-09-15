@@ -137,21 +137,29 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 func (that *httpStream) readBody() {
 	that.clientUnRead = -1
 	if that.Proto == "HTTP/1.1" {
-		//todo chunk的暂没处理支持, 按tcp处理
-		if _, ok := that.Header["Transfer-Encoding"]; !ok {
-			if contentLen, ok := that.Header["Content-Length"]; ok {
-				if bodyLen, err := parseContentLength(contentLen[0]); err == nil {
-					that.BodyBuf = that.req.reader.UnreadBuf(int(bodyLen))
-					that.clientUnRead = int(bodyLen) - len(that.BodyBuf)
-					return
-				}
-			}
-			//默认没有body，不需要读了，返回
-			that.clientUnRead = 0
+		//websocket 按tcp处理
+		if test, ok := that.Header["Connection"]; ok && test[0] == "Upgrade" {
 			return
 		}
+		//todo chunk的暂没处理支持, 按tcp处理
+		if _, ok := that.Header["Transfer-Encoding"]; ok {
+			return
+		}
+		if contentLen, ok := that.Header["Content-Length"]; ok {
+			if bodyLen, err := parseContentLength(contentLen[0]); err == nil {
+				that.BodyBuf = that.req.reader.UnreadBuf(int(bodyLen))
+				that.clientUnRead = int(bodyLen) - len(that.BodyBuf)
+				return
+			}
+		}
+		//默认没有body，不需要读了，返回
+		that.clientUnRead = 0
+		return
+	} else if that.Proto == "HTTP/1.0" {
+		that.BodyBuf = that.req.reader.UnreadBuf(-1)
+		return
 	}
-	that.BodyBuf = that.req.reader.UnreadBuf(-1)
+	// http/2.0 按tcp处理
 	return
 }
 
