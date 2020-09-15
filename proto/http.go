@@ -137,12 +137,14 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 func (that *httpStream) readBody() {
 	that.clientUnRead = -1
 	if that.Proto == "HTTP/1.1" {
-		//websocket 按tcp处理
+		//websocket 按长连接处理
 		if test, ok := that.Header["Connection"]; ok && test[0] == "Upgrade" {
+			that.BodyBuf = that.req.reader.UnreadBuf(-1)
 			return
 		}
-		//todo chunk的暂没处理支持, 按tcp处理
+		//todo chunk的暂没处理支持, 按长连接处理
 		if _, ok := that.Header["Transfer-Encoding"]; ok {
+			that.BodyBuf = that.req.reader.UnreadBuf(-1)
 			return
 		}
 		// 主要处理IE复用链接请求不同域名的问题
@@ -156,11 +158,9 @@ func (that *httpStream) readBody() {
 		//默认没有body，不需要读了，返回
 		that.clientUnRead = 0
 		return
-	} else if that.Proto == "HTTP/1.0" {
-		that.BodyBuf = that.req.reader.UnreadBuf(-1)
-		return
 	}
-	// http/2.0 按tcp处理
+	// 其它按长连接处理
+	that.BodyBuf = that.req.reader.UnreadBuf(-1)
 	return
 }
 
