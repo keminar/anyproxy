@@ -35,6 +35,7 @@ type httpStream struct {
 	FirstLine    string      //第一行字串
 	BodyBuf      []byte
 	clientUnRead int
+	tp           *text.Reader
 }
 
 func newHTTPStream(req *Request) *httpStream {
@@ -60,30 +61,36 @@ func (that *httpStream) validHead() bool {
 	}
 	that.Method = strings.ToUpper(string(tmpBuf[:s1]))
 
+	isHTTP := false
 	allMethods := []string{"CONNECT", "OPTIONS", "DELETE", "TRACE", "POST", "HEAD", "GET", "PUT"}
 	for _, one := range allMethods {
 		if one == that.Method {
-			return true
+			isHTTP = true
 		}
+	}
+	if isHTTP {
+		// 下面是http的内容了，用封装的reader比较好按行取内容
+		that.tp = text.NewReader(that.req.reader)
+		// First line: GET /index.html HTTP/1.0
+		if that.FirstLine, err = that.tp.ReadLine(true); err != nil {
+			return false
+		}
+
+		var ok bool
+		that.RequestURI, that.Proto, ok = parseRequestLine(that.FirstLine)
+		if !ok {
+			// 格式非http请求, 报错
+			return false
+		}
+		if that.Proto != "HTTP/1.0" && that.Proto != "HTTP/1.1" {
+			return false
+		}
+		return true
 	}
 	return false
 }
 
 func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
-	// 下面是http的内容了，用封装的reader比较好按行取内容
-	tp := text.NewReader(that.req.reader)
-	// First line: GET /index.html HTTP/1.0
-	if that.FirstLine, err = tp.ReadLine(true); err != nil {
-		return false, err
-	}
-
-	var ok bool
-	that.RequestURI, that.Proto, ok = parseRequestLine(that.FirstLine)
-	if !ok {
-		// 格式非http请求, 报错
-		return false, errors.New("not http request format")
-	}
-
 	rawurl := that.RequestURI
 	if that.Method == "CONNECT" && from == "server" {
 		key := []byte(getToken())
@@ -111,7 +118,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 
 	// 读取http的头部信息
 	// Subsequent lines: Key: value.
-	that.Header, err = tp.ReadHeader()
+	that.Header, err = that.tp.ReadHeader()
 	if err != nil {
 		return false, err
 	}
@@ -124,7 +131,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	that.getNameIPPort()
 
 	//debug
-	if config.DebugLevel == config.LevelDebug {
+	if config.DebugLevel >= config.LevelDebug {
 		fmt.Println(trace.ID(that.req.ID), that.FirstLine)
 		for k, v := range that.Header {
 			fmt.Println(trace.ID(that.req.ID), k, "=", v)
@@ -136,6 +143,11 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 
 func (that *httpStream) readBody() {
 	that.clientUnRead = -1
+	if that.Method == "CONNECT" {
+		// 多层代理按长连接处理
+		that.BodyBuf = that.req.reader.UnreadBuf(-1)
+		return
+	}
 	if that.Proto == "HTTP/1.1" {
 		//websocket 按长连接处理
 		if test, ok := that.Header["Connection"]; ok && test[0] == "Upgrade" {

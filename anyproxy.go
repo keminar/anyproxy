@@ -24,13 +24,15 @@ var (
 	gProxyServerSpec string
 	gHelp            bool
 	gDebug           int
+	gPprof           string
 )
 
 func init() {
 	flag.Usage = help.Usage
 	flag.StringVar(&gListenAddrPort, "l", ":3000", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
-	flag.IntVar(&gDebug, "d", 0, "debug mode (0, 1, 2)")
+	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
+	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
 
 }
@@ -63,6 +65,7 @@ func main() {
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort
 	}
+	config.SetListenPort(gListenAddrPort)
 
 	var writer io.Writer
 	// 前台执行，daemon运行根据环境变量识别
@@ -75,14 +78,18 @@ func main() {
 	// 设置代理
 	config.SetProxyServer(gProxyServerSpec)
 
-	// 临时用gDebug==5001后面增加自己配置
-	if gDebug == 5001 {
+	// 调试模式
+	if len(gPprof) > 0 {
 		go func() {
+			// 支持只输入端口的形式
+			if !strings.Contains(gPprof, ":") {
+				gPprof = ":" + gPprof
+			}
 			//浏览器访问: http://:5001/debug/pprof/
 			log.Println("Starting pprof debug server ...")
 			// 这里不要使用log.Fatal会在平滑重启时导致进程退出
 			// 因为http server现在没办法加入平滑重启，第一次重启会报端口冲突，可以通过重启两次来启动到pprof
-			log.Println(http.ListenAndServe(":5001", nil))
+			log.Println(http.ListenAndServe(gPprof, nil))
 		}()
 	}
 	server := grace.NewServer(gListenAddrPort, proto.ClientHandler)

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"syscall"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/trace"
 )
@@ -59,6 +61,12 @@ func GetOriginalDstAddr(tcpConn *net.TCPConn) (dstIP string, dstPort uint16, new
 		// only support ipv4
 		dstIP = net.IPv4(mreq.Multiaddr[4], mreq.Multiaddr[5], mreq.Multiaddr[6], mreq.Multiaddr[7]).String()
 		dstPort = uint16(mreq.Multiaddr[2])<<8 + uint16(mreq.Multiaddr[3])
+
+		ipArr := strings.Split(srcipport, ":")
+		// 来源和目标地址是同一个ip，且目标端口和本服务是同一个端口
+		if ipArr[0] == dstIP && dstPort == config.ListenPort {
+			err = fmt.Errorf("may be loop call: %s=>%s:%d", srcipport, dstIP, dstPort)
+		}
 		return
 	}
 	err = fmt.Errorf("GETORIGINALDST|%v|ERR: newConn is not a *net.TCPConn, instead it is: %T (%v)", srcipport, newConn, newConn)

@@ -4,6 +4,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+
+	"github.com/keminar/anyproxy/utils/tools"
 )
 
 // ProxyScheme 协议
@@ -20,6 +22,9 @@ var TimeFormat string = "2006-01-02 15:04:05"
 
 // DebugLevel 调试级别
 var DebugLevel int
+
+// ListenPort 监听端口
+var ListenPort uint16
 
 const (
 	// LevelShort 简短格式
@@ -59,4 +64,14 @@ func SetProxyServer(gProxyServerSpec string) {
 // SetDebugLevel 调试级别
 func SetDebugLevel(gDebug int) {
 	DebugLevel = gDebug
+}
+
+// SetListenPort 端口
+func SetListenPort(gListenAddrPort string) {
+	intStr := tools.GetPort(gListenAddrPort)
+	intNum, err := strconv.Atoi(intStr)
+	if err != nil {
+		log.Printf("SetListenPort err %s\n", err.Error())
+	}
+	ListenPort = uint16(intNum)
 }
