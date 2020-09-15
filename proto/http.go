@@ -145,6 +145,7 @@ func (that *httpStream) readBody() {
 		if _, ok := that.Header["Transfer-Encoding"]; ok {
 			return
 		}
+		// 主要处理IE复用链接请求不同域名的问题
 		if contentLen, ok := that.Header["Content-Length"]; ok {
 			if bodyLen, err := parseContentLength(contentLen[0]); err == nil {
 				that.BodyBuf = that.req.reader.UnreadBuf(int(bodyLen))
