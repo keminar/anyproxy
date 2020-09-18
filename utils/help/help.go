@@ -47,7 +47,7 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_wmem = 4096 65536 16777216\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_congestion_control = cubic\n\n")
 
-	fmt.Fprintf(os.Stdout, "Report bugs to <linuxphp@126.com>.\n")
+	fmt.Fprintf(os.Stdout, "Report bugs to https://github.com/keminar/anyproxy or <linuxphp@126.com>.\n")
 	fmt.Fprintf(os.Stdout, "Thanks to https://github.com/ryanchapman/go-any-proxy.git\n")
 }
 
