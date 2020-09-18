@@ -69,25 +69,31 @@ func (that *httpStream) validHead() bool {
 		}
 	}
 	if isHTTP {
-		// 下面是http的内容了，用封装的reader比较好按行取内容
-		that.tp = text.NewReader(that.req.reader)
-		// First line: GET /index.html HTTP/1.0
-		if that.FirstLine, err = that.tp.ReadLine(true); err != nil {
-			return false
-		}
-
-		var ok bool
-		that.RequestURI, that.Proto, ok = parseRequestLine(that.FirstLine)
-		if !ok {
-			// 格式非http请求, 报错
-			return false
-		}
-		if that.Proto != "HTTP/1.0" && that.Proto != "HTTP/1.1" {
-			return false
-		}
-		return true
+		return that.readFistLine()
 	}
 	return false
+}
+
+// 会在keep.go调用，所以要独立出来
+func (that *httpStream) readFistLine() bool {
+	var err error
+	// 下面是http的内容了，用封装的reader比较好按行取内容
+	that.tp = text.NewReader(that.req.reader)
+	// First line: GET /index.html HTTP/1.0
+	if that.FirstLine, err = that.tp.ReadLine(true); err != nil {
+		return false
+	}
+
+	var ok bool
+	that.RequestURI, that.Proto, ok = parseRequestLine(that.FirstLine)
+	if !ok {
+		// 格式非http请求, 报错
+		return false
+	}
+	if that.Proto != "HTTP/1.0" && that.Proto != "HTTP/1.1" {
+		return false
+	}
+	return true
 }
 
 func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
