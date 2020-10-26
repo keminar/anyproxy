@@ -133,7 +133,8 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	that.Host = that.Header.Get("Host")
 	if that.URL.Host != "" && that.URL.Host != that.Host {
 		that.URL.Host = that.Host
-		that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.URL.String(), that.Proto)
+		that.RequestURI = that.URL.String()
+		that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
 	}
 	//that.Header.Set("Connection", "Close")
 	that.readBody()
