@@ -128,9 +128,12 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	that.Host = that.URL.Host
-	if that.Host == "" {
-		that.Host = that.Header.Get("Host")
+
+	// iptables代理后访问百度贴吧有遇到首行中的域名被变成了ip请求会403。所以主要用头部host，且不一致时将FirstLine变量更新
+	that.Host = that.Header.Get("Host")
+	if that.URL.Host != "" && that.URL.Host != that.Host {
+		that.URL.Host = that.Host
+		that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.URL.String(), that.Proto)
 	}
 	//that.Header.Set("Connection", "Close")
 	that.readBody()

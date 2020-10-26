@@ -165,6 +165,7 @@ sudo iptables -t nat -D OUTPUT 2
 * 与Tunnel的多账户认证，账户可设置有效期
 * ~~支持HTTP/1.1 keep-alive 一外链接多次请求不同域名~~
 * HTTP/1.1 keep-alive后端也能复用tcp
+* ~~修复iptables转发后百度贴吧无法访问的问题~~
 
 # 感谢
 
