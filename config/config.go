@@ -33,6 +33,8 @@ const (
 	LevelLong
 	// LevelDebug 长日志 + 更多日志
 	LevelDebug
+	// LevelDebugBody 打印body
+	LevelDebugBody
 )
 
 // SetProxyServer 设置代理服务器
