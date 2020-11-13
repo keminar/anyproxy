@@ -84,7 +84,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 				// 未读完
 				s.clientUnRead -= nr
 			}
-			if config.DebugLevel >= config.LevelDebug {
+			if config.DebugLevel >= config.LevelDebugBody {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
 				fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
 			}

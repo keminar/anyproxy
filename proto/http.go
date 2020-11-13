@@ -112,10 +112,15 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 			rawurl = string(x2)
 		}
 	}
+	if config.DebugLevel >= config.LevelDebug {
+		fmt.Println(trace.ID(that.req.ID), "rawurl:", rawurl)
+	}
 	justAuthority := that.Method == "CONNECT" && !strings.HasPrefix(rawurl, "/")
+	addedScheme := false
 	if justAuthority {
 		//CONNECT是http的,如果RequestURI不是/开头,则为域名且不带http://, 这里补上
 		rawurl = "http://" + rawurl
+		addedScheme = true
 	}
 
 	if that.URL, err = url.ParseRequestURI(rawurl); err != nil {
@@ -128,9 +133,33 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	if err != nil {
 		return false, err
 	}
+
+	// 首先header里的host可能会没传，有遇到taobao的个别CONNECT请求，所以优先使用that.URL.Host, 但这个也可能没传域名，比如 GET /test HTTP/1.1 这些情况都用原FirstLine值
+	// 另外如果全信that.URL.Host，当手机代理走电脑再走iptables代理后访问百度贴吧有遇到首行中的域名被变成了ip请求会403。所以头部host也要看，当不一致时将FirstLine更新
 	that.Host = that.URL.Host
-	if that.Host == "" {
+	if that.URL.Host == "" {
 		that.Host = that.Header.Get("Host")
+	} else if that.Header.Get("Host") != "" {
+		if that.Header.Get("Host") != that.URL.Host {
+			if config.DebugLevel >= config.LevelDebug {
+				fmt.Println(trace.ID(that.req.ID), "headerHost:", that.Header.Get("Host"), "urlHost:", that.URL.Host)
+				fmt.Println(trace.ID(that.req.ID), "firstLine:", that.FirstLine)
+			}
+			// 有些header里的域名没带端口，拼接上端口
+			that.Host = that.Header.Get("Host")
+			if strings.Contains(that.URL.Host, ":") && !strings.Contains(that.Host, ":") {
+				that.Host += ":" + that.URL.Port()
+			}
+			// 赋值回URL来生成RequestURI
+			that.URL.Host = that.Host
+			that.RequestURI = that.URL.String()
+			if addedScheme {
+				// 去掉拼的http://
+				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI[7:], that.Proto)
+			} else {
+				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
+			}
+		}
 	}
 	//that.Header.Set("Connection", "Close")
 	that.readBody()
