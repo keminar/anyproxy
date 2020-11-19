@@ -2,6 +2,7 @@
 SCRIPT=$(readlink -f $0)
 ROOT_DIR=$(dirname $SCRIPT)/../
 cd $ROOT_DIR
+ulimit -n 65536
 
 if ! (sudo cat /etc/passwd|grep ^anyproxy: > /dev/null); then
     echo "添加账号"
