@@ -161,6 +161,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 			}
 		}
 	}
+	//todo Vue的 /sockjs-node/ 请求，走了代理首行GET后面会有域名，服务会响应错的内容
 	//that.Header.Set("Connection", "Close")
 	that.readBody()
 	that.getNameIPPort()
