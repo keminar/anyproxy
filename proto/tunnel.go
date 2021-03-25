@@ -267,7 +267,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	proxyPort := config.ProxyPort
 	if host.Proxy != "" { //如果有自定义代理，则走自定义
 		proxyScheme, proxyServer, proxyPort, err = getProxyServer(host.Proxy)
-		if err == nil {
+		if err != nil {
 			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
 		}
 	}
