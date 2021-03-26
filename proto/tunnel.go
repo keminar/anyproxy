@@ -266,12 +266,17 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	proxyServer := config.ProxyServer
 	proxyPort := config.ProxyPort
 	if host.Proxy != "" { //如果有自定义代理，则走自定义
-		proxyScheme, proxyServer, proxyPort, err = getProxyServer(host.Proxy)
+		proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(host.Proxy)
 		if err != nil {
+			// 如果自定义代理不可用，confTarget为local则走本地，confTarget为其它则走全局代理
 			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
-		}
-		if confTarget == "local" { //如果有代理，就不能用local
-			confTarget = "auto"
+		} else {
+			proxyScheme = proxyScheme2
+			proxyServer = proxyServer2
+			proxyPort = proxyPort2
+			if confTarget == "local" { //如果有定制代理，就不能用local
+				confTarget = "auto"
+			}
 		}
 	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {

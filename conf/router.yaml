@@ -14,9 +14,13 @@ hosts:
     # contain 包含,equal 完全相等, preg 正则
     match: contain
     # 参考全局target 
+    # 如果有用proxy自定义代理可用，target为local当auto使用，为其它值则不变
+    # 如果有用proxy自定义代理不可用，target为local则走本地，target为其它则走全局代理
     target: remote
     # 参考全局localDns 
     dns: local
+    # 支持 http:// , tunnel:// , socks5:// 三种协议，默认 tunnel://
+    proxy:  http://127.0.0.1:8888
   - name: golang.org
     match: contain
     target: auto
@@ -29,7 +33,6 @@ hosts:
     target: deny
   - name: dev.example.com
     ip: 127.0.0.1
-    proxy:  http://127.0.0.1:8888
 # anyproxy 和 tunnel通信密钥, 必须16位长度
 #token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
