@@ -182,7 +182,13 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 	connTimeout := time.Duration(5) * time.Second
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dstIP, dstPort), connTimeout) // 3s timeout
 	if err != nil {
-		return
+		if strings.Contains(err.Error(), "too many colons in address") {
+			// tcp6 支持
+			conn, err = net.DialTimeout("tcp6", fmt.Sprintf("[%s]:%d", dstIP, dstPort), connTimeout) // 3s timeout
+		}
+		if err != nil {
+			return
+		}
 	}
 	s.conn = conn.(*net.TCPConn)
 	return

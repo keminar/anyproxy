@@ -1,5 +1,5 @@
 log:
-  dir: /tmp/
+  dir: ./logs/
 # 使用的DNS服务器 local 当前环境， remote远程, 仅当target使用remote有效
 dns: local
 # 默认环境，local 当前环境, remote 远程, deny 禁止
