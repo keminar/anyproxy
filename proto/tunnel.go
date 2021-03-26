@@ -343,7 +343,8 @@ func getProxyServer(proxySpec string) (string, string, uint16, error) {
 	if proxySpec == "" {
 		return "", "", 0, errors.New("proxy 长度为空")
 	}
-	var proxyScheme, proxyServer string
+	proxyScheme := "tunnel"
+	var proxyServer string
 	var proxyPort uint16
 	// 先检查协议
 	tmp := strings.Split(proxySpec, "://")
