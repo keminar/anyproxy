@@ -29,7 +29,7 @@ var (
 
 func init() {
 	flag.Usage = help.Usage
-	flag.StringVar(&gListenAddrPort, "l", ":3000", "Address and port to listen on")
+	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
@@ -61,6 +61,7 @@ func main() {
 	// 是否后台运行
 	daemon.Daemonize(envRunMode, fd)
 
+	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig.Listen, ":3000")
 	// 支持只输入端口的形式
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort
@@ -76,6 +77,7 @@ func main() {
 
 	logging.SetDefaultLogger(logDir, cmdName, true, 3, writer)
 	// 设置代理
+	gProxyServerSpec = config.IfEmptyThen(gProxyServerSpec, conf.RouterConfig.Proxy, "")
 	config.SetProxyServer(gProxyServerSpec)
 
 	// 调试模式
