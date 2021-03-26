@@ -8,8 +8,8 @@ import (
 	"github.com/keminar/anyproxy/utils/tools"
 )
 
-// ProxyScheme 协议
-var ProxyScheme string = "http"
+// ProxyScheme 协议,目前支持 tunnel为自定义协议，socks5,http为标准协议
+var ProxyScheme string = "tunnel"
 
 // ProxyServer 代理服务器
 var ProxyServer string

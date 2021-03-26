@@ -307,8 +307,10 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		switch proxyScheme {
 		case "socks5":
 			err = s.socks5(target, proxyServer, proxyPort)
+		case "tunnel":
+			err = s.httpConnect(target, proxyServer, proxyPort, true)
 		case "http":
-			err = s.httpConnect(target, proxyServer, proxyPort)
+			err = s.httpConnect(target, proxyServer, proxyPort, false)
 		default:
 			log.Println(trace.ID(s.req.ID), "proxy scheme", proxyScheme, "is error")
 			err = fmt.Errorf("%s is error", proxyScheme)
@@ -383,22 +385,26 @@ func (s *tunnel) socks5(target string, proxyServer string, proxyPort uint16) (er
 }
 
 // http代理
-func (s *tunnel) httpConnect(target string, proxyServer string, proxyPort uint16) (err error) {
+func (s *tunnel) httpConnect(target string, proxyServer string, proxyPort uint16, encrypt bool) (err error) {
 	err = s.dail(proxyServer, proxyPort)
 	if err != nil {
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
-	key := []byte(getToken())
-	var x1 []byte
-	x1, err = crypto.EncryptAES([]byte(target), key)
-	if err != nil {
-		log.Println(trace.ID(s.req.ID), "encrypt err", err.Error())
-		return
+	var connectString string
+	if encrypt {
+		key := []byte(getToken())
+		var x1 []byte
+		x1, err = crypto.EncryptAES([]byte(target), key)
+		if err != nil {
+			log.Println(trace.ID(s.req.ID), "encrypt err", err.Error())
+			return
+		}
+		// CONNECT实现的加密
+		connectString = fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
+	} else {
+		connectString = fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", target)
 	}
-
-	// CONNECT实现的加密
-	connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
 	fmt.Fprintf(s.conn, connectString)
 	var status string
 	status, err = bufio.NewReader(s.conn).ReadString('\n')
