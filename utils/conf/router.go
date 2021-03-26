@@ -16,6 +16,7 @@ type Host struct {
 	Target string `yaml:"target"` //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
 	DNS    string `yaml:"dns"`    //local 当前环境, remote 远程, 仅当target使用remote有效
 	IP     string `yaml:"ip"`     //本地解析ip
+	Proxy  string `yaml:"proxy"`  //指定代理服务器
 }
 
 // Log 日志

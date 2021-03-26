@@ -14,9 +14,12 @@ hosts:
     # contain 包含,equal 完全相等, preg 正则
     match: contain
     # 参考全局target 
+    # 如果有用proxy自定义代理可用，target强制当remote使用，proxy代理不可用，target按原逻辑处理
     target: remote
     # 参考全局localDns 
     dns: local
+    # 支持 http:// , tunnel:// , socks5:// 三种协议，默认 tunnel://
+    proxy:  http://127.0.0.1:8888
   - name: golang.org
     match: contain
     target: auto

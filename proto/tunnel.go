@@ -262,11 +262,27 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
 		return
 	}
-
-	if config.ProxyServer != "" && config.ProxyPort > 0 && confTarget != "local" {
+	proxyScheme := config.ProxyScheme
+	proxyServer := config.ProxyServer
+	proxyPort := config.ProxyPort
+	if host.Proxy != "" { //如果有自定义代理，则走自定义
+		proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(host.Proxy)
+		if err != nil {
+			// 如果自定义代理不可用，confTarget走原来逻辑
+			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
+		} else {
+			proxyScheme = proxyScheme2
+			proxyServer = proxyServer2
+			proxyPort = proxyPort2
+			if confTarget != "remote" { //如果有定制代理，就不能用local 和 auto
+				confTarget = "remote"
+			}
+		}
+	}
+	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
 		if confTarget == "auto" {
 			if state != cache.StateFail {
-				//local dial成功则返回
+				//local dial成功则返回，走本地网络
 				//auto 只能优化ip ping 不通的情况，能dail通访问不了的需要手动remote
 				err = s.dail(dstIP, dstPort)
 				if err == nil {
@@ -294,16 +310,18 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			err = errors.New("target host is empty")
 			return
 		}
-		log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", config.ProxyServer, config.ProxyPort, target))
+		log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
 
-		switch config.ProxyScheme {
+		switch proxyScheme {
 		case "socks5":
-			err = s.socks5(target)
+			err = s.socks5(target, proxyServer, proxyPort)
+		case "tunnel":
+			err = s.httpConnect(target, proxyServer, proxyPort, true)
 		case "http":
-			err = s.httpConnect(target)
+			err = s.httpConnect(target, proxyServer, proxyPort, false)
 		default:
-			log.Println(trace.ID(s.req.ID), "proxy scheme", config.ProxyScheme, "is error")
-			err = fmt.Errorf("%s is error", config.ProxyScheme)
+			log.Println(trace.ID(s.req.ID), "proxy scheme", proxyScheme, "is error")
+			err = fmt.Errorf("%s is error", proxyScheme)
 			return
 		}
 	} else {
@@ -320,9 +338,44 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	return
 }
 
+//  getProxyServer 解析代理服务器
+func getProxyServer(proxySpec string) (string, string, uint16, error) {
+	if proxySpec == "" {
+		return "", "", 0, errors.New("proxy 长度为空")
+	}
+	proxyScheme := "tunnel"
+	var proxyServer string
+	var proxyPort uint16
+	// 先检查协议
+	tmp := strings.Split(proxySpec, "://")
+	if len(tmp) == 2 {
+		proxyScheme = tmp[0]
+		proxySpec = tmp[1]
+	}
+	// 检查端口，和上面的顺序不能反
+	tmp = strings.Split(proxySpec, ":")
+	if len(tmp) == 2 {
+		portInt, err := strconv.Atoi(tmp[1])
+		if err == nil {
+			proxyServer = tmp[0]
+			proxyPort = uint16(portInt)
+			// 检查是否可连通
+			connTimeout := time.Duration(1) * time.Second
+			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", proxyServer, proxyPort), connTimeout)
+			if err != nil {
+				return "", "", 0, err
+			}
+			conn.Close()
+			return proxyScheme, proxyServer, proxyPort, nil
+		}
+		return "", "", 0, err
+	}
+	return "", "", 0, errors.New("proxy 格式不对")
+}
+
 // socket5代理
-func (s *tunnel) socks5(target string) (err error) {
-	address := fmt.Sprintf("%s:%d", config.ProxyServer, config.ProxyPort)
+func (s *tunnel) socks5(target string, proxyServer string, proxyPort uint16) (err error) {
+	address := fmt.Sprintf("%s:%d", proxyServer, proxyPort)
 	var dialProxy proxy.Dialer
 	dialProxy, err = proxy.SOCKS5("tcp", address, nil, proxy.Direct)
 	if err != nil {
@@ -341,22 +394,26 @@ func (s *tunnel) socks5(target string) (err error) {
 }
 
 // http代理
-func (s *tunnel) httpConnect(target string) (err error) {
-	err = s.dail(config.ProxyServer, config.ProxyPort)
+func (s *tunnel) httpConnect(target string, proxyServer string, proxyPort uint16, encrypt bool) (err error) {
+	err = s.dail(proxyServer, proxyPort)
 	if err != nil {
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
-	key := []byte(getToken())
-	var x1 []byte
-	x1, err = crypto.EncryptAES([]byte(target), key)
-	if err != nil {
-		log.Println(trace.ID(s.req.ID), "encrypt err", err.Error())
-		return
+	var connectString string
+	if encrypt {
+		key := []byte(getToken())
+		var x1 []byte
+		x1, err = crypto.EncryptAES([]byte(target), key)
+		if err != nil {
+			log.Println(trace.ID(s.req.ID), "encrypt err", err.Error())
+			return
+		}
+		// CONNECT实现的加密
+		connectString = fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
+	} else {
+		connectString = fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", target)
 	}
-
-	// CONNECT实现的加密
-	connectString := fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", base64.StdEncoding.EncodeToString(x1))
 	fmt.Fprintf(s.conn, connectString)
 	var status string
 	status, err = bufio.NewReader(s.conn).ReadString('\n')

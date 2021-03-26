@@ -116,9 +116,10 @@ docker run  -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 sudo useradd -M -s /sbin/nologin anyproxy
 # uid为anyproxy的tcp请求不转发,并用anyproxy用户启动anyproxy程序
 sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner anyproxy -j RETURN
+# 单独指定root账号走代理
+sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m owner --uid-owner 0 --to-port 3000
 # 其它用户的tcp请求转发到本地3000端口
 sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
-
 ```
 
 > 如果删除全局代理
@@ -154,7 +155,7 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~日志信息完善~~
 * ~~DNS解析增加cache~~
 * ~~自动路由模式下可设置检测时间和cache~~
-* 可以支持多个server，如果一个不可用用下一个
+* ~~可以自定义代理server，如果不可用则用全局的~~
 * ~~server多级转发~~
 * ~~加域名黑名单功能，不给请求~~
 * 请求Body内容体记录, 涉及安全，可能不会实现
@@ -166,6 +167,7 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~支持HTTP/1.1 keep-alive 一外链接多次请求不同域名~~
 * HTTP/1.1 keep-alive后端也能复用tcp
 * ~~修复iptables转发后百度贴吧无法访问的问题~~
+* 转发的mysql的连接请求会一直卡住
 
 # 感谢
 
