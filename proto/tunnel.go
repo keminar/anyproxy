@@ -268,21 +268,21 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	if host.Proxy != "" { //如果有自定义代理，则走自定义
 		proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(host.Proxy)
 		if err != nil {
-			// 如果自定义代理不可用，confTarget为local则走本地，confTarget为其它则走全局代理
+			// 如果自定义代理不可用，confTarget走原来逻辑
 			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
 		} else {
 			proxyScheme = proxyScheme2
 			proxyServer = proxyServer2
 			proxyPort = proxyPort2
-			if confTarget == "local" { //如果有定制代理，就不能用local
-				confTarget = "auto"
+			if confTarget != "remote" { //如果有定制代理，就不能用local 和 auto
+				confTarget = "remote"
 			}
 		}
 	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
 		if confTarget == "auto" {
 			if state != cache.StateFail {
-				//local dial成功则返回
+				//local dial成功则返回，走本地网络
 				//auto 只能优化ip ping 不通的情况，能dail通访问不了的需要手动remote
 				err = s.dail(dstIP, dstPort)
 				if err == nil {
