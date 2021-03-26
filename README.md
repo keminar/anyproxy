@@ -2,7 +2,7 @@
 
 anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将tcp流转到tunneld或SOCKS代理, 达到让不支持设置代理的网络程序通过HTTP或SOCKS代理运行的目的。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。
 
-[下载二进制包](http://cloudme.io/anyproxy)
+[下载Linux包](http://cloudme.io/anyproxy) 、 [下载Mac包](http://cloudme.io/anyproxy.mac) 、  [下载Windows包](http://cloudme.io/anyproxy.exe) 、 [下载alpine包](http://cloudme.io/anyproxy.netgo) 
 
 tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用
 
@@ -86,7 +86,7 @@ sudo -u anyproxy ./anyproxy
 ./anyproxy -h
 ```
 
-注：因为用到了Linux系统函数，并不能跨平台编译。对于windows系统用户可以选择在虚拟机中启动或是win10的WSL中启动
+注：因为本地iptables转发是Linux功能，所以windows系统使用时精简掉了此部分功能
 
 > 平滑重启
 
@@ -168,6 +168,7 @@ sudo iptables -t nat -D OUTPUT 2
 * HTTP/1.1 keep-alive后端也能复用tcp
 * ~~修复iptables转发后百度贴吧无法访问的问题~~
 * 转发的mysql的连接请求会一直卡住
+* ~~支持windows平台使用~~
 
 # 感谢
 

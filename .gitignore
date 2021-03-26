@@ -2,6 +2,8 @@
 .vscode
 anyproxy
 anyproxy.netgo
+anyproxy.mac
+anyproxy.exe
 tunneld
 tunneld.netgo
 tunnel/tunneld
