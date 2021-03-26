@@ -270,6 +270,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		if err != nil {
 			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
 		}
+		if confTarget == "local" { //如果有代理，就不能用local
+			confTarget = "auto"
+		}
 	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
 		if confTarget == "auto" {
