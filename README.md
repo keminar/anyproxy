@@ -1,9 +1,11 @@
 # Any Proxy
 
-anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将tcp流转到tunneld或SOCKS代理, 达到让不支持设置代理的网络程序通过HTTP或SOCKS代理运行的目的。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。
+anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将请求转到tunneld或SOCKS或charles等代理。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。经过跨平台编译，如果只做网络包的转发可以在windows等平台使用。
 
 [下载Linux包](http://cloudme.io/anyproxy) 、 [下载Mac包](http://cloudme.io/anyproxy-darwin) 、  
 [下载Windows包](http://cloudme.io/anyproxy-windows.exe) 、 [下载alpine包](http://cloudme.io/anyproxy-alpine) 
+
+提醒：请使用浏览器右键的“链接另存为”下载文件
 
 tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用
 
