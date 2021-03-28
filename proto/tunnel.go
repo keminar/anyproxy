@@ -183,9 +183,9 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 	var conn net.Conn
 	if strings.Contains(dstIP, ":") {
 		// tcp6 支持
-		conn, err = net.DialTimeout("tcp6", fmt.Sprintf("[%s]:%d", dstIP, dstPort), connTimeout) // 3s timeout
+		conn, err = net.DialTimeout("tcp6", fmt.Sprintf("[%s]:%d", dstIP, dstPort), connTimeout)
 	} else {
-		conn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dstIP, dstPort), connTimeout) // 3s timeout
+		conn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dstIP, dstPort), connTimeout)
 	}
 	if err != nil {
 		return
