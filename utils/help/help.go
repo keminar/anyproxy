@@ -9,7 +9,7 @@ import (
 )
 
 //VERSION 版本
-const VERSION = "1.0"
+const VERSION = "0.9"
 
 // Usage 帮助
 func Usage() {
