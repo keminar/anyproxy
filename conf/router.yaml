@@ -1,5 +1,5 @@
 log:
-  dir: /tmp/
+  dir: ./logs/
 # 使用的DNS服务器 local 当前环境， remote远程, 仅当target使用remote有效
 dns: local
 # 默认环境，local 当前环境, remote 远程, deny 禁止
@@ -8,6 +8,10 @@ target: auto
 tcpTarget: remote
 # 默认域名比对方案
 match: equal
+# 全局代理服务器, 优先级低于启动传参
+proxy:
+# 监听端口IP, 优先级低于启动传参
+listen:
 # 域名
 hosts:
   - name: github

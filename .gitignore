@@ -1,10 +1,12 @@
 .history
 .vscode
 anyproxy
-anyproxy.netgo
+anyproxy-alpine
+anyproxy-darwin
+anyproxy-windows.exe
 tunneld
-tunneld.netgo
+tunneld-alpine
 tunnel/tunneld
-tunnel/tunneld.netgo
+tunnel/tunneld-alpine
 logs/
 tunnel/logs/

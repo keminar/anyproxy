@@ -77,3 +77,14 @@ func SetListenPort(gListenAddrPort string) {
 	}
 	ListenPort = uint16(intNum)
 }
+
+// IfEmptyThen 取值
+func IfEmptyThen(str string, str2 string, str3 string) string {
+	if str == "" {
+		if str2 == "" {
+			return str3
+		}
+		return str2
+	}
+	return str
+}

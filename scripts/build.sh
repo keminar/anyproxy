@@ -3,9 +3,30 @@ SCRIPT=$(readlink -f $0)
 ROOT_DIR=$(dirname $SCRIPT)/../
 cd $ROOT_DIR
 
-# for alpine
-go build -tags netgo -o anyproxy.netgo  anyproxy.go
 
-# common
+# anyproxy
+echo "build anyproxy"
+# for linux
+echo "  for linux"
 go build -o anyproxy  anyproxy.go
+
+# for mac
+echo "  for mac"
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o anyproxy-darwin anyproxy.go
+
+# for windows
+echo "  for windows"
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o anyproxy-windows.exe anyproxy.go
+
+# for alpine
+echo "  for alpine"
+go build -tags netgo -o anyproxy-alpine  anyproxy.go
+
+# tunneld
+echo "build tunneld"
+echo "  for linux"
 go build -o tunnel/tunneld tunnel/tunneld.go
+
+# for alpine
+echo "  for alpine"
+go build -tags netgo -o tunnel/tunneld-alpine  tunnel/tunneld.go

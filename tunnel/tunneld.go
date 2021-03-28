@@ -25,7 +25,7 @@ var (
 
 func init() {
 	flag.Usage = help.Usage
-	flag.StringVar(&gListenAddrPort, "l", ":3001", "Address and port to listen on")
+	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.IntVar(&gDebug, "d", 0, "debug mode")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
@@ -56,6 +56,7 @@ func main() {
 	// 是否后台运行
 	daemon.Daemonize(envRunMode, fd)
 
+	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig.Listen, ":3001")
 	// 支持只输入端口的形式
 	if !strings.Contains(gListenAddrPort, ":") {
 		gListenAddrPort = ":" + gListenAddrPort
@@ -70,6 +71,7 @@ func main() {
 
 	logging.SetDefaultLogger(logDir, cmdName, true, 3, writer)
 	// 设置代理
+	gProxyServerSpec = config.IfEmptyThen(gProxyServerSpec, conf.RouterConfig.Proxy, "")
 	config.SetProxyServer(gProxyServerSpec)
 
 	server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
