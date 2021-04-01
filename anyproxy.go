@@ -13,6 +13,7 @@ import (
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/logging"
+	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto"
 	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/daemon"
@@ -22,6 +23,8 @@ import (
 var (
 	gListenAddrPort  string
 	gProxyServerSpec string
+	gWebsocketListen string
+	gWebsocketConn   string
 	gHelp            bool
 	gDebug           int
 	gPprof           string
@@ -31,6 +34,8 @@ func init() {
 	flag.Usage = help.Usage
 	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
+	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
+	flag.StringVar(&gWebsocketConn, "ws-connect", "", "websocket Address and port to connect")
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
@@ -93,6 +98,14 @@ func main() {
 			// 因为http server现在没办法加入平滑重启，第一次重启会报端口冲突，可以通过重启两次来启动到pprof
 			log.Println(http.ListenAndServe(gPprof, nil))
 		}()
+	}
+
+	if gWebsocketListen != "" {
+		go nat.NewServer(&gWebsocketListen)
+	}
+
+	if gWebsocketConn != "" {
+		go nat.NewClient(&gWebsocketConn)
 	}
 	server := grace.NewServer(gListenAddrPort, proto.ClientHandler)
 	server.ListenAndServe()

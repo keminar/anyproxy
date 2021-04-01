@@ -258,6 +258,18 @@ func (that *httpStream) badRequest(err error) {
 }
 
 func (that *httpStream) response() error {
+	if test, ok := that.Header["Anyproxy-Action"]; ok && test[0] == "websocket" {
+		that.Header.Del("Anyproxy-Action")
+		tunnel := newWsTunnel(that.req)
+		// 先将请求头部发出
+		tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
+		that.Header.Write(tunnel.buffer)
+		tunnel.buffer.Write([]byte("\r\n"))
+		// 多读取的body部分
+		tunnel.buffer.Write(that.BodyBuf)
+		tunnel.transfer()
+		return nil
+	}
 	tunnel := newTunnel(that.req)
 	if ip, ok := tunnel.isAllowed(); !ok {
 		err := errors.New(ip + " is not allowed")
