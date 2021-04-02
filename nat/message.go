@@ -16,6 +16,7 @@ type AnswerMessage struct {
 }
 
 type Message struct {
-	User string
-	Body []byte
+	ID     string
+	Method string
+	Body   []byte
 }

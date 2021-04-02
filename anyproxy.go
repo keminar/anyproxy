@@ -105,7 +105,7 @@ func main() {
 	}
 
 	if gWebsocketConn != "" {
-		go nat.NewClient(&gWebsocketConn)
+		go nat.ConnectServer(&gWebsocketConn)
 	}
 	server := grace.NewServer(gListenAddrPort, proto.ClientHandler)
 	server.ListenAndServe()

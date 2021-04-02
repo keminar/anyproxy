@@ -86,6 +86,9 @@ func (s *wsTunnel) transfer() {
 	if config.DebugLevel >= config.LevelLong {
 		log.Println(trace.ID(s.req.ID), "transfer start")
 	}
+
+	Bridges.Register(s.req.ID, s.req.conn)
+
 	var err error
 	done := make(chan int, 1)
 
