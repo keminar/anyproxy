@@ -17,23 +17,30 @@ import (
 var interruptClose bool
 
 var proxyConn net.Conn
+var proxyBool bool
 
 func NewClient(addr *string) {
 	interruptClose = false
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	connTimeout := time.Duration(5) * time.Second
-	var err error
-	proxyConn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", "127.0.0.1", 4003), connTimeout)
-	fmt.Println(err)
-
+	proxyBool = false
 	for {
 		conn(addr, interrupt)
 		if interruptClose {
 			break
 		}
 	}
+}
+
+func dial() {
+	connTimeout := time.Duration(5) * time.Second
+	var err error
+	proxyConn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", "127.0.0.1", 4003), connTimeout)
+	if err != nil {
+		fmt.Println("dial self", err)
+	}
+	proxyBool = true
 }
 
 func copyBuffer(dst io.Writer, src io.Reader, srcname string) (written int64, err error) {
@@ -45,6 +52,10 @@ func copyBuffer(dst io.Writer, src io.Reader, srcname string) (written int64, er
 		i++
 		nr, er := src.Read(buf)
 		if nr > 0 {
+			if srcname == "client" && string(buf[0:nr]) == "ok" {
+				fmt.Println("recv ok")
+				break
+			}
 			fmt.Println("test", string(buf[0:nr]))
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
@@ -124,12 +135,35 @@ func conn(addr *string, interrupt chan os.Signal) {
 			}
 			log.Printf("recv: %s", message)
 		}*/
-		go func() {
-			readSize, err := copyBuffer(proxyConn.(*net.TCPConn), w, "client")
-			fmt.Println(readSize, err)
-		}()
-		writeSize, err := copyBuffer(w, tcp.NewReader(proxyConn.(*net.TCPConn)), "server")
-		fmt.Println(writeSize, err)
+		for {
+			if proxyBool == false {
+				dial()
+			}
+			// 如果与服务器断开，需要重连
+			reConn := false
+			done2 := make(chan int, 1)
+			go func() {
+				defer func() {
+					done2 <- 1
+					close(done2)
+				}()
+				readSize, err := copyBuffer(proxyConn.(*net.TCPConn), w, "client")
+				fmt.Println("websocket->client", readSize, err)
+				if err != nil {
+					reConn = true
+				}
+				proxyConn.(*net.TCPConn).CloseWrite()
+				proxyBool = false
+			}()
+			writeSize, err := copyBuffer(w, tcp.NewReader(proxyConn.(*net.TCPConn)), "websocket")
+			fmt.Println("client->websocket", writeSize, err)
+			w.Write([]byte("ok"))
+			<-done2
+			log.Println("websocket transfer finished, response size", writeSize)
+			if reConn {
+				break
+			}
+		}
 	}()
 
 	for {

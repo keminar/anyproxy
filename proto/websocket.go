@@ -43,6 +43,10 @@ func (s *wsTunnel) copyBuffer(dst io.Writer, src io.Reader, srcname string) (wri
 		}
 		nr, er := src.Read(buf)
 		if nr > 0 {
+			if srcname == "websocket" && string(buf[0:nr]) == "ok" {
+				fmt.Println("recv ok")
+				break
+			}
 			if config.DebugLevel >= config.LevelDebugBody {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
 				fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
@@ -64,8 +68,15 @@ func (s *wsTunnel) copyBuffer(dst io.Writer, src io.Reader, srcname string) (wri
 			if er != io.EOF {
 				err = er
 			}
+
+			if srcname == "client" {
+				fmt.Println("send ok")
+				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
+				dst.Write([]byte("ok"))
+			}
 			break
 		}
+
 	}
 	return written, err
 }
@@ -95,7 +106,7 @@ func (s *wsTunnel) transfer() {
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	//log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
+	log.Println(trace.ID(s.req.ID), "websocket transfer finished, response size", s.writeSize)
 }
 
 func (s *wsTunnel) logCopyErr(name string, err error) {
