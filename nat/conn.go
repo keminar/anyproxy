@@ -41,6 +41,9 @@ type Client struct {
 
 	// Buffered channel of outbound messages.
 	send chan []byte
+
+	User      string
+	Subscribe SubscribeMessage
 }
 
 // writePump pumps messages from the hub to the websocket connection.
@@ -88,7 +91,28 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte)}
+
+	var user AuthMessage
+	err = conn.ReadJSON(&user)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	if user.User == "111" && user.Token == "test" {
+		conn.WriteMessage(websocket.TextMessage, []byte("ok"))
+	} else {
+		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+	}
+
+	var subscribe SubscribeMessage
+	err = conn.ReadJSON(&subscribe)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
+
+	client := &Client{hub: hub, conn: conn, send: make(chan []byte), User: user.User, Subscribe: subscribe}
 	client.hub.register <- client
 
 	// Allow collection of memory referenced by the caller by doing all work in

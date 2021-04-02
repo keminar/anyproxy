@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/proto/tcp"
 )
 
@@ -36,10 +38,12 @@ func NewClient(addr *string) {
 func dial() {
 	connTimeout := time.Duration(5) * time.Second
 	var err error
-	proxyConn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", "127.0.0.1", 4003), connTimeout)
+	localProxy := fmt.Sprintf("%s:%d", "127.0.0.1", config.ListenPort)
+	proxyConn, err = net.DialTimeout("tcp", localProxy, connTimeout)
 	if err != nil {
-		fmt.Println("dial self", err)
+		fmt.Println("dial local proxy", err)
 	}
+	log.Printf("websocket connecting to %s", localProxy)
 	proxyBool = true
 }
 
@@ -80,21 +84,21 @@ func copyBuffer(dst io.Writer, src io.Reader, srcname string) (written int64, er
 	return written, err
 }
 
-type WsHelp struct {
+type ClientHandler struct {
 	c *websocket.Conn
 }
 
-func newWsHelp(c *websocket.Conn) *WsHelp {
-	return &WsHelp{c: c}
+func newClientHandler(c *websocket.Conn) *ClientHandler {
+	return &ClientHandler{c: c}
 }
 
-func (h *WsHelp) Read(p []byte) (n int, err error) {
+func (h *ClientHandler) Read(p []byte) (n int, err error) {
 	_, message, err := h.c.ReadMessage()
 	n = copy(p, message)
 	return n, err
 }
 
-func (h *WsHelp) Write(p []byte) (n int, err error) {
+func (h *ClientHandler) Write(p []byte) (n int, err error) {
 	h.c.SetWriteDeadline(time.Now().Add(writeWait))
 
 	w, err := h.c.NextWriter(websocket.BinaryMessage)
@@ -106,6 +110,43 @@ func (h *WsHelp) Write(p []byte) (n int, err error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+func (h *ClientHandler) Auth(user string, token string) error {
+	msg := AuthMessage{User: user, Token: token}
+	return h.ask(&msg)
+}
+
+func (h *ClientHandler) Subscribe(key string, val string) error {
+	msg := SubscribeMessage{Key: key, Val: val}
+	return h.ask(&msg)
+}
+
+func (h *ClientHandler) ask(v interface{}) error {
+	err := h.c.WriteJSON(v)
+	if err != nil {
+		return err
+	}
+	ticker := time.NewTicker(3 * time.Second)
+	defer func() {
+		ticker.Stop()
+	}()
+
+	send := make(chan []byte)
+	go func() {
+		defer close(send)
+		_, message, _ := h.c.ReadMessage()
+		send <- message
+	}()
+	select {
+	case message := <-send:
+		if string(message) != "ok" {
+			return errors.New("fail, " + string(message))
+		}
+	case <-ticker.C:
+		return errors.New("timeout")
+	}
+	return nil
 }
 
 func conn(addr *string, interrupt chan os.Signal) {
@@ -121,20 +162,24 @@ func conn(addr *string, interrupt chan os.Signal) {
 	}
 	defer c.Close()
 
-	w := newWsHelp(c)
+	w := newClientHandler(c)
+	err = w.Auth("111", "test")
+	if err != nil {
+		log.Println("auth:", err)
+		time.Sleep(time.Duration(3) * time.Second)
+		return
+	}
+	err = w.Subscribe("aa", "bb")
+	if err != nil {
+		log.Println("subscribe:", err)
+		time.Sleep(time.Duration(3) * time.Second)
+		return
+	}
+	log.Println("websocket auth and subscribe ok")
 
 	done := make(chan struct{})
-
 	go func() {
 		defer close(done)
-		/*for {
-			_, message, err := c.ReadMessage()
-			if err != nil {
-				log.Println("read:", err)
-				return
-			}
-			log.Printf("recv: %s", message)
-		}*/
 		for {
 			if proxyBool == false {
 				dial()
@@ -148,18 +193,19 @@ func conn(addr *string, interrupt chan os.Signal) {
 					close(done2)
 				}()
 				readSize, err := copyBuffer(proxyConn.(*net.TCPConn), w, "client")
-				fmt.Println("websocket->client", readSize, err)
+				log.Println("request body size", readSize)
+				logCopyErr("websocket->client", err)
+				proxyConn.(*net.TCPConn).CloseWrite()
+				proxyBool = false
 				if err != nil {
 					reConn = true
 				}
-				proxyConn.(*net.TCPConn).CloseWrite()
-				proxyBool = false
 			}()
 			writeSize, err := copyBuffer(w, tcp.NewReader(proxyConn.(*net.TCPConn)), "websocket")
-			fmt.Println("client->websocket", writeSize, err)
+			log.Println("websocket transfer finished, response size", writeSize)
+			logCopyErr("client->websocket", err)
 			w.Write([]byte("ok"))
 			<-done2
-			log.Println("websocket transfer finished, response size", writeSize)
 			if reConn {
 				break
 			}
@@ -187,5 +233,16 @@ func conn(addr *string, interrupt chan os.Signal) {
 			}
 			return
 		}
+	}
+}
+
+func logCopyErr(name string, err error) {
+	if err == nil {
+		return
+	}
+	if config.DebugLevel >= config.LevelLong {
+		log.Println(name, err.Error())
+	} else if err != io.EOF {
+		log.Println(name, err.Error())
 	}
 }
