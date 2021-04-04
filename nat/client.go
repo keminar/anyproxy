@@ -13,13 +13,10 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/keminar/anyproxy/config"
-	"github.com/keminar/anyproxy/proto/tcp"
+	"github.com/keminar/anyproxy/utils/trace"
 )
 
 var interruptClose bool
-
-var proxyConn net.Conn
-var proxyBool bool
 
 // Client is a middleman between the websocket connection and the hub.
 type Client struct {
@@ -29,17 +26,13 @@ type Client struct {
 	conn *websocket.Conn
 
 	// Buffered channel of outbound messages.
-	send chan []byte
+	send chan *Message
 
 	User      string
 	Subscribe SubscribeMessage
 }
 
-// writePump pumps messages from the hub to the websocket connection.
-//
-// A goroutine running writePump is started for each connection. The
-// application ensures that there is at most one writer to a connection by
-// executing all writes from this goroutine.
+// write to pc client
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -48,7 +41,7 @@ func (c *Client) writePump() {
 	}()
 	for {
 		select {
-		case message, ok := <-c.send:
+		case message, ok := <-c.send: //ok为判断channel是否关闭
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
@@ -56,14 +49,7 @@ func (c *Client) writePump() {
 				return
 			}
 
-			w, err := c.conn.NextWriter(websocket.BinaryMessage)
-			if err != nil {
-				return
-			}
-			w.Write(message)
-			if err := w.Close(); err != nil {
-				return
-			}
+			c.conn.WriteJSON(message)
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -73,12 +59,16 @@ func (c *Client) writePump() {
 	}
 }
 
+var LocalBridge *BridgeHub
+
 func ConnectServer(addr *string) {
 	interruptClose = false
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	proxyBool = false
+	LocalBridge = newBridgeHub()
+	go LocalBridge.run()
+
 	for {
 		conn(addr, interrupt)
 		if interruptClose {
@@ -87,16 +77,16 @@ func ConnectServer(addr *string) {
 	}
 }
 
-func dial() {
+func dialProxy() net.Conn {
 	connTimeout := time.Duration(5) * time.Second
 	var err error
 	localProxy := fmt.Sprintf("%s:%d", "127.0.0.1", config.ListenPort)
-	proxyConn, err = net.DialTimeout("tcp", localProxy, connTimeout)
+	proxyConn, err := net.DialTimeout("tcp", localProxy, connTimeout)
 	if err != nil {
 		fmt.Println("dial local proxy", err)
 	}
 	log.Printf("websocket connecting to %s", localProxy)
-	proxyBool = true
+	return proxyConn
 }
 
 func copyBuffer(dst io.Writer, src io.Reader, srcname string) (written int64, err error) {
@@ -108,10 +98,6 @@ func copyBuffer(dst io.Writer, src io.Reader, srcname string) (written int64, er
 		i++
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			if srcname == "client" && string(buf[0:nr]) == "ok" {
-				fmt.Println("recv ok")
-				break
-			}
 			fmt.Println("test", string(buf[0:nr]))
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
@@ -144,26 +130,6 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 	return &ClientHandler{c: c}
 }
 
-func (h *ClientHandler) Read(p []byte) (n int, err error) {
-	_, message, err := h.c.ReadMessage()
-	n = copy(p, message)
-	return n, err
-}
-
-func (h *ClientHandler) Write(p []byte) (n int, err error) {
-	h.c.SetWriteDeadline(time.Now().Add(writeWait))
-
-	w, err := h.c.NextWriter(websocket.BinaryMessage)
-	if err != nil {
-		return 0, err
-	}
-	w.Write(p)
-	if err := w.Close(); err != nil {
-		return 0, err
-	}
-	return len(p), nil
-}
-
 func (h *ClientHandler) Auth(user string, token string) error {
 	msg := AuthMessage{User: user, Token: token}
 	return h.ask(&msg)
@@ -191,7 +157,10 @@ func (h *ClientHandler) ask(v interface{}) error {
 		send <- message
 	}()
 	select {
-	case message := <-send:
+	case message, ok := <-send: //ok为判断channel是否关闭
+		if !ok {
+			return errors.New("fail")
+		}
 		if string(message) != "ok" {
 			return errors.New("fail, " + string(message))
 		}
@@ -233,33 +202,26 @@ func conn(addr *string, interrupt chan os.Signal) {
 	go func() {
 		defer close(done)
 		for {
-			if proxyBool == false {
-				dial()
-			}
-			// 如果与服务器断开，需要重连
-			reConn := false
-			done2 := make(chan int, 1)
-			go func() {
-				defer func() {
-					done2 <- 1
-					close(done2)
-				}()
-				readSize, err := copyBuffer(proxyConn.(*net.TCPConn), w, "client")
-				log.Println("request body size", readSize)
-				logCopyErr("websocket->client", err)
-				proxyConn.(*net.TCPConn).CloseWrite()
-				proxyBool = false
-				if err != nil {
-					reConn = true
-				}
-			}()
-			writeSize, err := copyBuffer(w, tcp.NewReader(proxyConn.(*net.TCPConn)), "websocket")
-			log.Println("websocket transfer finished, response size", writeSize)
-			logCopyErr("client->websocket", err)
-			w.Write([]byte("ok"))
-			<-done2
-			if reConn {
+			msg := &Message{}
+			err := w.c.ReadJSON(msg)
+			if err != nil {
 				break
+			}
+			if msg.Method == "create" {
+				proxConn := dialProxy()
+				b := LocalBridge.Register(msg.ID, proxConn.(*net.TCPConn))
+				go b.ReadPump()
+
+				// 从tcp返回数据到ws
+				go func() {
+					readSize, err := copyBuffer(b, proxConn, "server")
+					logCopyErr("local->websocket", err)
+					log.Println(trace.ID(msg.ID), "request body size", readSize)
+					// close
+					b.CloseWrite()
+				}()
+			} else {
+				LocalBridge.broadcast <- msg
 			}
 		}
 	}()

@@ -43,10 +43,6 @@ func (s *wsTunnel) copyBuffer(dst io.Writer, src io.Reader, srcname string) (wri
 		}
 		nr, er := src.Read(buf)
 		if nr > 0 {
-			if srcname == "websocket" && string(buf[0:nr]) == "ok" {
-				fmt.Println("recv ok")
-				break
-			}
 			if config.DebugLevel >= config.LevelDebugBody {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
 				fmt.Println(trace.ID(s.req.ID), string(buf[0:nr]))
@@ -68,12 +64,6 @@ func (s *wsTunnel) copyBuffer(dst io.Writer, src io.Reader, srcname string) (wri
 			if er != io.EOF {
 				err = er
 			}
-
-			if srcname == "client" {
-				fmt.Println("send ok")
-				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
-				dst.Write([]byte("ok"))
-			}
 			break
 		}
 
@@ -87,7 +77,7 @@ func (s *wsTunnel) transfer() {
 		log.Println(trace.ID(s.req.ID), "transfer start")
 	}
 
-	Bridges.Register(s.req.ID, s.req.conn)
+	b := nat.ServerBridge.Register(s.req.ID, s.req.conn)
 
 	var err error
 	done := make(chan int, 1)
@@ -98,14 +88,14 @@ func (s *wsTunnel) transfer() {
 			done <- 1
 			close(done)
 		}()
-		nat.WsHub.Write([]byte(s.buffer.String()))
-		s.readSize, err = s.copyBuffer(nat.WsHub, s.req.reader, "client")
+		b.Write([]byte(s.buffer.String()))
+		s.readSize, err = s.copyBuffer(b, s.req.reader, "client")
+		b.CloseWrite()
 		s.logCopyErr("client->websocket", err)
 		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
 	}()
 	//取返回结果
-	s.writeSize, err = s.copyBuffer(s.req.conn, nat.WsHub, "websocket")
-	s.logCopyErr("websocket->client", err)
+	b.ReadPump()
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接

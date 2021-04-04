@@ -1,7 +1,6 @@
 package nat
 
 import (
-	"errors"
 	"net"
 )
 
@@ -10,7 +9,7 @@ type BridgeHub struct {
 	bridges map[*Bridge]bool
 
 	// Inbound messages from the clients.
-	broadcast chan []byte
+	broadcast chan *Message
 
 	// Register requests from the clients.
 	register chan *Bridge
@@ -21,7 +20,7 @@ type BridgeHub struct {
 
 func newBridgeHub() *BridgeHub {
 	return &BridgeHub{
-		broadcast:  make(chan []byte),
+		broadcast:  make(chan *Message),
 		register:   make(chan *Bridge),
 		unregister: make(chan *Bridge),
 		bridges:    make(map[*Bridge]bool),
@@ -40,8 +39,16 @@ func (h *BridgeHub) run() {
 			}
 		case message := <-h.broadcast:
 			for bridge := range h.bridges {
+				if bridge.reqID != message.ID {
+					continue
+				}
+				if message.Method == "close" {
+					close(bridge.send)
+					delete(h.bridges, bridge)
+					return
+				}
 				select {
-				case bridge.send <- message:
+				case bridge.send <- message.Body:
 				default:
 					close(bridge.send)
 					delete(h.bridges, bridge)
@@ -51,21 +58,11 @@ func (h *BridgeHub) run() {
 	}
 }
 
-func (h *BridgeHub) Write(p []byte) (n int, err error) {
-	h.broadcast <- p
-	return len(p), nil
-}
-
-func (h *BridgeHub) Read(p []byte) (n int, err error) {
-	for bridge := range h.bridges {
-		n, err := bridge.conn.Read(p)
-		return n, err
-	}
-	return 0, errors.New("fail")
-}
-
-func (h *BridgeHub) Register(ID uint, conn *net.TCPConn) {
+func (h *BridgeHub) Register(ID uint, conn *net.TCPConn) *Bridge {
 	b := &Bridge{reqID: ID, conn: conn, send: make(chan []byte)}
 	h.register <- b
-	//go b.writePump()
+
+	// 发送创建连接请求
+	b.Open()
+	return b
 }

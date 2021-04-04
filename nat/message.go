@@ -16,7 +16,7 @@ type AnswerMessage struct {
 }
 
 type Message struct {
-	ID     string
+	ID     uint
 	Method string
 	Body   []byte
 }
