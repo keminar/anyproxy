@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"log"
 	"net"
 )
 
@@ -31,14 +32,18 @@ func (h *BridgeHub) run() {
 	for {
 		select {
 		case bridge := <-h.register:
+			log.Println("register read")
 			h.bridges[bridge] = true
 		case bridge := <-h.unregister:
+			log.Println("unregister read")
 			if _, ok := h.bridges[bridge]; ok {
 				delete(h.bridges, bridge)
 				close(bridge.send)
 			}
 		case message := <-h.broadcast:
+			log.Println("bridge nums", len(h.bridges))
 			for bridge := range h.bridges {
+				log.Println("nat_debug_write_bridge_hub", bridge.reqID, message.ID, message.Method, string(message.Body))
 				if bridge.reqID != message.ID {
 					continue
 				}
@@ -49,7 +54,7 @@ func (h *BridgeHub) run() {
 				}
 				select {
 				case bridge.send <- message.Body:
-				default:
+				default: // 当send chan满时也会走进default
 					close(bridge.send)
 					delete(h.bridges, bridge)
 				}
@@ -58,11 +63,14 @@ func (h *BridgeHub) run() {
 	}
 }
 
-func (h *BridgeHub) Register(ID uint, conn *net.TCPConn) *Bridge {
-	b := &Bridge{reqID: ID, conn: conn, send: make(chan []byte)}
+func (h *BridgeHub) Register(wsHub *Hub, ID uint, conn *net.TCPConn) *Bridge {
+	b := &Bridge{reqID: ID, conn: conn, send: make(chan []byte, 100), wsHub: wsHub}
+	log.Println("register")
 	h.register <- b
-
-	// 发送创建连接请求
-	b.Open()
+	log.Println("register 2")
 	return b
+}
+
+func (h *BridgeHub) Unregister(b *Bridge) {
+	h.unregister <- b
 }

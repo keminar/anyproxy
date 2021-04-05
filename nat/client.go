@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -44,12 +45,14 @@ func (c *Client) writePump() {
 		case message, ok := <-c.send: //ok为判断channel是否关闭
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
+				log.Println("nat client send chan close")
 				// The hub closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			c.conn.WriteJSON(message)
+			err := c.conn.WriteJSON(message)
+			log.Println("nat websocket writeJson", message.ID, message.Method, string(message.Body), err)
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -59,6 +62,28 @@ func (c *Client) writePump() {
 	}
 }
 
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
+	for {
+		msg := &Message{}
+		err := c.conn.ReadJSON(msg)
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("error: %v", err)
+			}
+			break
+		}
+		log.Println("nat_debug_read_from_client", msg.ID, msg.Method, string(msg.Body))
+		ServerBridge.broadcast <- msg
+	}
+}
+
+var ClientHub *Hub
 var LocalBridge *BridgeHub
 
 func ConnectServer(addr *string) {
@@ -66,11 +91,13 @@ func ConnectServer(addr *string) {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
+	ClientHub = newHub()
+	go ClientHub.run()
 	LocalBridge = newBridgeHub()
 	go LocalBridge.run()
 
 	for {
-		conn(addr, interrupt)
+		connect(addr, interrupt)
 		if interruptClose {
 			break
 		}
@@ -83,43 +110,10 @@ func dialProxy() net.Conn {
 	localProxy := fmt.Sprintf("%s:%d", "127.0.0.1", config.ListenPort)
 	proxyConn, err := net.DialTimeout("tcp", localProxy, connTimeout)
 	if err != nil {
-		fmt.Println("dial local proxy", err)
+		log.Println("dial local proxy", err)
 	}
-	log.Printf("websocket connecting to %s", localProxy)
+	log.Printf("local websocket connecting to %s", localProxy)
 	return proxyConn
-}
-
-func copyBuffer(dst io.Writer, src io.Reader, srcname string) (written int64, err error) {
-	//如果设置过大会耗内存高，4k比较合理
-	size := 4 * 1024
-	buf := make([]byte, size)
-	i := 0
-	for {
-		i++
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			fmt.Println("test", string(buf[0:nr]))
-			nw, ew := dst.Write(buf[0:nr])
-			if nw > 0 {
-				written += int64(nw)
-			}
-			if ew != nil {
-				err = ew
-				break
-			}
-			if nr != nw {
-				err = io.ErrShortWrite
-				break
-			}
-		}
-		if er != nil {
-			if er != io.EOF {
-				err = er
-			}
-			break
-		}
-	}
-	return written, err
 }
 
 type ClientHandler struct {
@@ -170,7 +164,7 @@ func (h *ClientHandler) ask(v interface{}) error {
 	return nil
 }
 
-func conn(addr *string, interrupt chan os.Signal) {
+func connect(addr *string, interrupt chan os.Signal) {
 
 	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
 	log.Printf("connecting to %s", u.String())
@@ -198,25 +192,44 @@ func conn(addr *string, interrupt chan os.Signal) {
 	}
 	log.Println("websocket auth and subscribe ok")
 
+	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, 100), User: "111", Subscribe: SubscribeMessage{Key: "aa", Val: "bb"}}
+	client.hub.register <- client
+	defer func() {
+		client.hub.unregister <- client
+		log.Println("nat_debug_unregister_local_client")
+	}()
+	go client.writePump()
 	done := make(chan struct{})
-	go func() {
+	go func() { //client.readRump
 		defer close(done)
 		for {
 			msg := &Message{}
-			err := w.c.ReadJSON(msg)
+			_, message, err := c.ReadMessage()
 			if err != nil {
-				break
+				log.Println("nat_local_debug_read_error", err.Error())
+				return
 			}
+
+			err = json.Unmarshal(message, &msg)
+			if err != nil {
+				log.Println("nat_local_debug_json_error", err.Error())
+				return
+			}
+			log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, string(msg.Body))
+
 			if msg.Method == "create" {
 				proxConn := dialProxy()
-				b := LocalBridge.Register(msg.ID, proxConn.(*net.TCPConn))
-				go b.ReadPump()
+				b := LocalBridge.Register(ClientHub, msg.ID, proxConn.(*net.TCPConn))
+				defer func() {
+					LocalBridge.Unregister(b)
+				}()
+				go b.WritePump()
 
 				// 从tcp返回数据到ws
 				go func() {
-					readSize, err := copyBuffer(b, proxConn, "server")
-					logCopyErr("local->websocket", err)
-					log.Println(trace.ID(msg.ID), "request body size", readSize)
+					readSize, err := b.CopyBuffer(b, proxConn, "local")
+					logCopyErr("nat_debug local->websocket", err)
+					log.Println(trace.ID(msg.ID), "nat debug request body size", readSize)
 					// close
 					b.CloseWrite()
 				}()

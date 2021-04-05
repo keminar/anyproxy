@@ -1,5 +1,7 @@
 package nat
 
+import "log"
+
 // Hub maintains the set of active clients and broadcasts messages to the
 // clients.
 type Hub struct {
@@ -36,13 +38,17 @@ func (h *Hub) run() {
 				close(client.send)
 			}
 		case message := <-h.broadcast:
+			log.Println("clients nums", len(h.clients))
+		Exit:
 			for client := range h.clients {
 				// todo check client subscribe
+				log.Println("nat_debug_write_client_hub", message.ID, message.Method, string(message.Body))
 				select {
 				case client.send <- message:
 					//发送给一个订阅者就要返回，不然变成多个并发请求了，而且接收数据也会出错。
-					break
-				default:
+					break Exit
+				default: // 当send chan满时也会走进default
+					log.Println("why ?????")
 					close(client.send)
 					delete(h.clients, client)
 				}
