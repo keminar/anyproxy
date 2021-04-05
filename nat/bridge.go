@@ -5,21 +5,25 @@ import (
 	"io"
 	"log"
 	"net"
-	"time"
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/trace"
 )
 
 type Bridge struct {
-	hub   *BridgeHub
-	wsHub *Hub
+	bridgeHub *BridgeHub
+	wsHub     *Hub
 
-	reqID uint
+	reqID uint //请求id
 	conn  *net.TCPConn
 
 	// Buffered channel of outbound messages.
 	send chan []byte
+}
+
+// 包外面调用取消注册
+func (h *Bridge) Unregister(b *Bridge) {
+	h.bridgeHub.unregister <- b
 }
 
 // 向websocket hub写数据
@@ -31,40 +35,42 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 
 // 通知websocket 创建连接
 func (b *Bridge) Open() {
-	msg := &Message{ID: b.reqID, Method: "create"}
+	msg := &Message{ID: b.reqID, Method: METHOD_CREATE}
 	b.wsHub.broadcast <- msg
 }
 
 // 通知tcp关闭连接
 func (b *Bridge) CloseWrite() {
-	msg := &Message{ID: b.reqID, Method: "close"}
+	msg := &Message{ID: b.reqID, Method: METHOD_CLOSE}
 	b.wsHub.broadcast <- msg
 }
 
-// 从websocket hub读数据
-func (b *Bridge) WritePump() {
-	ticker := time.NewTicker(pingPeriod)
+// 从websocket hub读数据写到请求http端
+func (b *Bridge) WritePump() (written int64, err error) {
 	defer func() {
-		ticker.Stop()
 		b.conn.CloseWrite()
-		log.Println("net_debug_close_proxy_write")
+		if config.DebugLevel >= config.LevelDebug {
+			log.Println("net_debug_write_proxy_close")
+		}
 	}()
 	for {
 		select {
 		case message, ok := <-b.send: //ok为判断channel是否关闭
 			if !ok {
-				log.Println("nat_debug_bridge_send_close")
+				if config.DebugLevel >= config.LevelDebug {
+					log.Println("nat_debug_bridge_send_chan_closed")
+				}
 				return
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
 				log.Println("nat_debug_write_proxy", string(message))
 			}
-			_, err := b.conn.Write(message)
+			var nw int
+			nw, err = b.conn.Write(message)
 			if err != nil {
 				return
 			}
-		case <-ticker.C:
-			return
+			written += int64(nw)
 		}
 	}
 }
@@ -103,7 +109,9 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 			if er != io.EOF {
 				err = er
 			}
-			log.Println("nat_debug_read_error", srcname, er)
+			if config.DebugLevel >= config.LevelDebug {
+				log.Println("nat_debug_read_error", srcname, er)
+			}
 			break
 		}
 

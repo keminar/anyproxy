@@ -41,7 +41,9 @@ func (h *BridgeHub) run() {
 				close(bridge.send)
 			}
 		case message := <-h.broadcast:
-			log.Println("bridge nums", len(h.bridges))
+			if config.DebugLevel >= config.LevelDebug {
+				log.Println("bridge nums", len(h.bridges))
+			}
 		Exit:
 			for bridge := range h.bridges {
 				if config.DebugLevel >= config.LevelDebugBody {
@@ -50,14 +52,18 @@ func (h *BridgeHub) run() {
 				if bridge.reqID != message.ID {
 					continue
 				}
-				if message.Method == "close" {
+				if message.Method == METHOD_CLOSE {
 					close(bridge.send)
 					delete(h.bridges, bridge)
 					break Exit
 				}
 				select {
 				case bridge.send <- message.Body:
+					break Exit
 				default: // 当send chan满时也会走进default
+					if config.DebugLevel >= config.LevelDebug {
+						log.Println("why go here ?????")
+					}
 					close(bridge.send)
 					delete(h.bridges, bridge)
 				}
@@ -67,11 +73,7 @@ func (h *BridgeHub) run() {
 }
 
 func (h *BridgeHub) Register(wsHub *Hub, ID uint, conn *net.TCPConn) *Bridge {
-	b := &Bridge{reqID: ID, conn: conn, send: make(chan []byte, 100), wsHub: wsHub}
+	b := &Bridge{bridgeHub: h, reqID: ID, conn: conn, send: make(chan []byte, 100), wsHub: wsHub}
 	h.register <- b
 	return b
-}
-
-func (h *BridgeHub) Unregister(b *Bridge) {
-	h.unregister <- b
 }

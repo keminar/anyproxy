@@ -42,19 +42,23 @@ func (h *Hub) run() {
 				close(client.send)
 			}
 		case message := <-h.broadcast:
-			log.Println("clients nums", len(h.clients))
+			if config.DebugLevel >= config.LevelDebug {
+				log.Println("clients nums", len(h.clients))
+			}
 		Exit:
 			for client := range h.clients {
-				// todo check client subscribe
 				if config.DebugLevel >= config.LevelDebugBody {
 					log.Println("nat_debug_write_client_hub", message.ID, message.Method, string(message.Body))
 				}
+				// todo 检查 client subscribe 来判断发送给谁
 				select {
 				case client.send <- message:
 					//发送给一个订阅者就要返回，不然变成多个并发请求了，而且接收数据也会出错。
 					break Exit
 				default: // 当send chan满时也会走进default
-					log.Println("why ?????")
+					if config.DebugLevel >= config.LevelDebug {
+						log.Println("why go here ?????")
+					}
 					close(client.send)
 					delete(h.clients, client)
 				}

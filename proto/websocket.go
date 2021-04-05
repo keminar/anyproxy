@@ -37,7 +37,7 @@ func (s *wsTunnel) transfer() {
 
 	b := nat.ServerBridge.Register(nat.ServerHub, s.req.ID, s.req.conn)
 	defer func() {
-		nat.ServerBridge.Unregister(b)
+		b.Unregister(b)
 	}()
 
 	// 发送创建连接请求
@@ -45,20 +45,21 @@ func (s *wsTunnel) transfer() {
 	var err error
 	done := make(chan int, 1)
 
-	//发送请求
+	//发送请求给websocket
 	go func() {
 		defer func() {
 			done <- 1
 			close(done)
 		}()
 		b.Write([]byte(s.buffer.String()))
-		s.readSize, err = b.CopyBuffer(b, s.req.reader, "client")
-		s.logCopyErr("client->websocket", err)
+		s.readSize, err = b.CopyBuffer(b, s.req.reader, "request")
+		s.logCopyErr("request->websocket", err)
 		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
 		b.CloseWrite()
 	}()
-	//取返回结果
-	b.WritePump()
+	//取返回结果写入请求端
+	s.writeSize, err = b.WritePump()
+	s.logCopyErr("websocket->request", err)
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
