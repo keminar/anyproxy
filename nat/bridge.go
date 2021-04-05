@@ -56,7 +56,9 @@ func (b *Bridge) WritePump() {
 				log.Println("nat_debug_bridge_send_close")
 				return
 			}
-			log.Println("nat_debug_write_proxy", string(message))
+			if config.DebugLevel >= config.LevelDebugBody {
+				log.Println("nat_debug_write_proxy", string(message))
+			}
 			_, err := b.conn.Write(message)
 			if err != nil {
 				return
@@ -101,7 +103,7 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 			if er != io.EOF {
 				err = er
 			}
-			log.Println("nat_debug_read_error", er)
+			log.Println("nat_debug_read_error", srcname, er)
 			break
 		}
 

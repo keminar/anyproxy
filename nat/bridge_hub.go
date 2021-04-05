@@ -3,6 +3,8 @@ package nat
 import (
 	"log"
 	"net"
+
+	"github.com/keminar/anyproxy/config"
 )
 
 type BridgeHub struct {
@@ -32,25 +34,26 @@ func (h *BridgeHub) run() {
 	for {
 		select {
 		case bridge := <-h.register:
-			log.Println("register read")
 			h.bridges[bridge] = true
 		case bridge := <-h.unregister:
-			log.Println("unregister read")
 			if _, ok := h.bridges[bridge]; ok {
 				delete(h.bridges, bridge)
 				close(bridge.send)
 			}
 		case message := <-h.broadcast:
 			log.Println("bridge nums", len(h.bridges))
+		Exit:
 			for bridge := range h.bridges {
-				log.Println("nat_debug_write_bridge_hub", bridge.reqID, message.ID, message.Method, string(message.Body))
+				if config.DebugLevel >= config.LevelDebugBody {
+					log.Println("nat_debug_write_bridge_hub", bridge.reqID, message.ID, message.Method, string(message.Body))
+				}
 				if bridge.reqID != message.ID {
 					continue
 				}
 				if message.Method == "close" {
 					close(bridge.send)
 					delete(h.bridges, bridge)
-					return
+					break Exit
 				}
 				select {
 				case bridge.send <- message.Body:
@@ -65,9 +68,7 @@ func (h *BridgeHub) run() {
 
 func (h *BridgeHub) Register(wsHub *Hub, ID uint, conn *net.TCPConn) *Bridge {
 	b := &Bridge{reqID: ID, conn: conn, send: make(chan []byte, 100), wsHub: wsHub}
-	log.Println("register")
 	h.register <- b
-	log.Println("register 2")
 	return b
 }
 

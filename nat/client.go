@@ -52,7 +52,9 @@ func (c *Client) writePump() {
 			}
 
 			err := c.conn.WriteJSON(message)
-			log.Println("nat websocket writeJson", message.ID, message.Method, string(message.Body), err)
+			if config.DebugLevel >= config.LevelDebugBody {
+				log.Println("nat websocket writeJson", message.ID, message.Method, string(message.Body), err)
+			}
 		case <-ticker.C:
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
@@ -78,7 +80,9 @@ func (c *Client) readPump() {
 			}
 			break
 		}
-		log.Println("nat_debug_read_from_client", msg.ID, msg.Method, string(msg.Body))
+		if config.DebugLevel >= config.LevelDebugBody {
+			log.Println("nat_debug_read_from_client", msg.ID, msg.Method, string(msg.Body))
+		}
 		ServerBridge.broadcast <- msg
 	}
 }

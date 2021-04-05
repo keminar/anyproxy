@@ -55,7 +55,6 @@ func (s *wsTunnel) transfer() {
 		s.readSize, err = b.CopyBuffer(b, s.req.reader, "client")
 		s.logCopyErr("client->websocket", err)
 		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
-		log.Println("debug send close ?")
 		b.CloseWrite()
 	}()
 	//取返回结果
