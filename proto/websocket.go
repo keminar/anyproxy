@@ -41,6 +41,7 @@ func (s *wsTunnel) transfer() bool {
 	c := nat.ServerHub.GetClient(s.header)
 	if c == nil {
 		// 走旧转发
+		log.Println(trace.ID(s.req.ID), "websocket transfer fail")
 		return false
 	}
 	b := nat.ServerBridge.Register(c, s.req.ID, s.req.conn)

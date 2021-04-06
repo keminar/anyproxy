@@ -259,9 +259,14 @@ func (that *httpStream) badRequest(err error) {
 }
 
 func (that *httpStream) response() error {
+	specialHeader := "Anyproxy-Action"
+	if config.DebugLevel >= config.LevelDebug {
+		fmt.Println(that.Header)
+		log.Println(trace.ID(that.req.ID), "nat server status", nat.Eable(), "special header", that.Header.Get(specialHeader))
+	}
 	if nat.Eable() {
-		if test, ok := that.Header["Anyproxy-Action"]; ok && test[0] == "websocket" {
-			that.Header.Del("Anyproxy-Action")
+		if that.Header.Get(specialHeader) == "websocket" {
+			that.Header.Del(specialHeader)
 			tunnel := newWsTunnel(that.req, that.Header)
 			// 先将请求头部发出
 			tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))

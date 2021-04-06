@@ -5,20 +5,22 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/logging"
+	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto"
 	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/daemon"
 	"github.com/keminar/anyproxy/utils/help"
+	"github.com/keminar/anyproxy/utils/tools"
 )
 
 var (
 	gListenAddrPort  string
 	gProxyServerSpec string
+	gWebsocketListen string
 	gHelp            bool
 	gDebug           int
 )
@@ -27,9 +29,10 @@ func init() {
 	flag.Usage = help.Usage
 	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
-	flag.IntVar(&gDebug, "d", 0, "debug mode")
+	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
+	//不支持ws-connect
+	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
-
 }
 
 func main() {
@@ -57,10 +60,7 @@ func main() {
 	daemon.Daemonize(envRunMode, fd)
 
 	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig.Listen, ":3001")
-	// 支持只输入端口的形式
-	if !strings.Contains(gListenAddrPort, ":") {
-		gListenAddrPort = ":" + gListenAddrPort
-	}
+	gListenAddrPort = tools.FillPort(gListenAddrPort)
 
 	var writer io.Writer
 	// 前台执行，daemon运行根据环境变量识别
@@ -73,6 +73,11 @@ func main() {
 	// 设置代理
 	gProxyServerSpec = config.IfEmptyThen(gProxyServerSpec, conf.RouterConfig.Proxy, "")
 	config.SetProxyServer(gProxyServerSpec)
+
+	if gWebsocketListen != "" {
+		gWebsocketListen = tools.FillPort(gWebsocketListen)
+		go nat.NewServer(&gWebsocketListen)
+	}
 
 	server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
 	server.ListenAndServe()

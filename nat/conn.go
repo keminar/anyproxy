@@ -113,9 +113,13 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
 
+	clientNum := len(hub.clients)
 	// 注册连接
 	client := &Client{hub: hub, conn: conn, send: make(chan *Message, 100), User: user.User, Subscribe: subscribe}
 	client.hub.register <- client
+	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
+
+	log.Printf("client ip %s connected, total client nums %d\n", r.RemoteAddr, clientNum)
 
 	go client.writePump()
 	go client.readPump()

@@ -3,6 +3,7 @@ package tools
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"strings"
 )
 
 // GetPort 从 127.0.0.1:3000 结构中取出3000
@@ -20,4 +21,12 @@ func Md5Str(str string) (string, error) {
 	h.Write([]byte(str))
 	cipherStr := h.Sum(nil)
 	return hex.EncodeToString(cipherStr), nil
+}
+
+// 支持只输入端口的形式
+func FillPort(port string) string {
+	if !strings.Contains(port, ":") {
+		port = ":" + port
+	}
+	return port
 }

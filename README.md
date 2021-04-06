@@ -149,7 +149,6 @@ sudo iptables -t nat -D OUTPUT 2
 
 > ~~划线~~ 部分为已实现功能
 * ~~可将请求转发到Tunnel服务~~
-* 根据CIDR做不同出口请求
 * ~~对域名支持加Host绑定~~
 * ~~对域名配置请求出口~~
 * ~~增加全局默认出口配置~~
@@ -161,17 +160,15 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~可以自定义代理server，如果不可用则用全局的~~
 * ~~server多级转发~~
 * ~~加域名黑名单功能，不给请求~~
-* 请求Body内容体记录, 涉及安全，可能不会实现
-* 服务间通信http请求完全加密（header+body)
-* HTTPS的SNI的支持?
 * ~~支持转发到socket5服务~~
-* TCP 增加更多协议解析支持，如rtmp，ftp等
-* 与Tunnel的多账户认证，账户可设置有效期
 * ~~支持HTTP/1.1 keep-alive 一外链接多次请求不同域名~~
-* HTTP/1.1 keep-alive后端也能复用tcp
 * ~~修复iptables转发后百度贴吧无法访问的问题~~
-* 转发的mysql的连接请求会一直卡住
 * ~~支持windows平台使用~~
+* ~~通过websocket实现内网穿透(必须为http的非CONNECT请求)~~
+* TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
+* TCP 转发的mysql的连接请求会一直卡住
+* 与Tunnel的多账户认证，账户可设置有效期
+* HTTP/1.1 keep-alive后端也能复用tcp
 
 # 感谢
 
