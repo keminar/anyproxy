@@ -10,6 +10,7 @@ const METHOD_CLOSE = "close"
 type AuthMessage struct {
 	User  string
 	Token string
+	Xtime int64
 }
 
 // 订阅

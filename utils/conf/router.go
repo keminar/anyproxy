@@ -24,18 +24,32 @@ type Log struct {
 	Dir string `yaml:"dir"`
 }
 
+// Subscribe 订阅标志
+type Subscribe struct {
+	Key string `yaml:"key"`
+	Val string `yaml:"val"`
+}
+
+// Websocket 与服务端websocket通信
+type Websocket struct {
+	User      string      `yaml:"user"`
+	Pass      string      `yaml:"pass"`
+	Subscribe []Subscribe `yaml:"subscribe"`
+}
+
 // Router 配置文件模型
 type Router struct {
-	Listen    string   `yaml:"listen"`    //监听端口
-	Log       Log      `yaml:"log"`       //日志目录
-	Token     string   `yaml:"token"`     //加密值
-	DNS       string   `yaml:"dns"`       //默认的DNS服务器
-	Target    string   `yaml:"target"`    //http默认访问策略
-	TCPTarget string   `yaml:"tcpTarget"` //tcp默认访问策略
-	Match     string   `yaml:"match"`     //默认域名比对
-	Proxy     string   `yaml:"proxy"`     //全局代理服务器
-	Hosts     []Host   `yaml:"hosts"`     //域名列表
-	AllowIP   []string `yaml:"allowIP"`   //可以访问的客户端IP
+	Listen    string    `yaml:"listen"`    //监听端口
+	Log       Log       `yaml:"log"`       //日志目录
+	Token     string    `yaml:"token"`     //加密值
+	DNS       string    `yaml:"dns"`       //默认的DNS服务器
+	Target    string    `yaml:"target"`    //http默认访问策略
+	TCPTarget string    `yaml:"tcpTarget"` //tcp默认访问策略
+	Match     string    `yaml:"match"`     //默认域名比对
+	Proxy     string    `yaml:"proxy"`     //全局代理服务器
+	Hosts     []Host    `yaml:"hosts"`     //域名列表
+	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP
+	Websocket Websocket `yaml:"websocket"` //会话订阅请求信息
 }
 
 // LoadRouterConfig 加载配置

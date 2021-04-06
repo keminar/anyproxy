@@ -12,6 +12,9 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/tools"
+
 	"github.com/gorilla/websocket"
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -20,7 +23,7 @@ import (
 var ClientHub *Hub
 var LocalBridge *BridgeHub
 
-// 连接到websocket服务
+// ConnectServer 连接到websocket服务
 func ConnectServer(addr *string) {
 	interruptClose = false
 	interrupt := make(chan os.Signal, 1)
@@ -66,13 +69,13 @@ func connect(addr *string, interrupt chan os.Signal) {
 	defer c.Close()
 
 	w := newClientHandler(c)
-	err = w.Auth("111", "test")
+	err = w.auth(conf.RouterConfig.Websocket.User, conf.RouterConfig.Websocket.Pass)
 	if err != nil {
 		log.Println("auth:", err)
 		time.Sleep(time.Duration(3) * time.Second)
 		return
 	}
-	err = w.Subscribe("aa", "bb")
+	err = w.subscribe(conf.RouterConfig.Websocket.Subscribe)
 	if err != nil {
 		log.Println("subscribe:", err)
 		time.Sleep(time.Duration(3) * time.Second)
@@ -80,7 +83,7 @@ func connect(addr *string, interrupt chan os.Signal) {
 	}
 	log.Println("websocket auth and subscribe ok")
 
-	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, 100), User: "111", Subscribe: SubscribeMessage{Key: "aa", Val: "bb"}}
+	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, 100)}
 	client.hub.register <- client
 	defer func() {
 		client.hub.unregister <- client
@@ -165,13 +168,23 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 	return &ClientHandler{c: c}
 }
 
-func (h *ClientHandler) Auth(user string, token string) error {
-	msg := AuthMessage{User: user, Token: token}
+// auth 认证
+func (h *ClientHandler) auth(user string, pass string) error {
+	xtime := time.Now().Unix()
+	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user, pass, xtime))
+	if err != nil {
+		return err
+	}
+	msg := AuthMessage{User: user, Token: token, Xtime: xtime}
 	return h.ask(&msg)
 }
 
-func (h *ClientHandler) Subscribe(key string, val string) error {
-	msg := SubscribeMessage{Key: key, Val: val}
+// subscribe 订阅
+func (h *ClientHandler) subscribe(sub []conf.Subscribe) error {
+	msg := []SubscribeMessage{}
+	for _, s := range sub {
+		msg = append(msg, SubscribeMessage{Key: s.Key, Val: s.Val})
+	}
 	return h.ask(&msg)
 }
 

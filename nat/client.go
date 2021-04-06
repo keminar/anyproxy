@@ -24,7 +24,7 @@ type Client struct {
 	User string
 
 	// 订阅特征
-	Subscribe SubscribeMessage
+	Subscribe []SubscribeMessage
 }
 
 // 写数据到websocket的对端

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/tools"
 )
 
 const (
@@ -65,17 +67,32 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		log.Println(err)
 		return
 	}
-	if user.User == "111" && user.Token == "test" {
-		conn.WriteMessage(websocket.TextMessage, []byte("ok"))
-	} else {
-		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+	xtime := time.Now().Unix()
+	if xtime-user.Xtime > 60 {
+		conn.WriteMessage(websocket.TextMessage, []byte("xtime err"))
+		return
+	}
+	if user.User != conf.RouterConfig.Websocket.User {
+		conn.WriteMessage(websocket.TextMessage, []byte("user err"))
+		return
 	}
 
+	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, conf.RouterConfig.Websocket.Pass, user.Xtime))
+	if err != nil || user.Token != token {
+		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+		return
+	}
+	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
+
 	// 订阅
-	var subscribe SubscribeMessage
+	var subscribe []SubscribeMessage
 	err = conn.ReadJSON(&subscribe)
 	if err != nil {
 		log.Println(err)
+		return
+	}
+	if len(subscribe) == 0 {
+		conn.WriteMessage(websocket.TextMessage, []byte("subscribe empty err"))
 		return
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
