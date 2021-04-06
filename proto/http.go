@@ -261,7 +261,6 @@ func (that *httpStream) badRequest(err error) {
 func (that *httpStream) response() error {
 	specialHeader := "Anyproxy-Action"
 	if config.DebugLevel >= config.LevelDebug {
-		fmt.Println(that.Header)
 		log.Println(trace.ID(that.req.ID), "nat server status", nat.Eable(), "special header", that.Header.Get(specialHeader))
 	}
 	if nat.Eable() {
