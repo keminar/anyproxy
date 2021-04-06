@@ -35,11 +35,27 @@ var upgrader = websocket.Upgrader{
 var ServerHub *Hub
 var ServerBridge *BridgeHub
 
+// serverStart 是否开启服务
+var serverStart = false
+
+// Eable 检查是否可以发送nat请求
+func Eable() bool {
+	if !serverStart {
+		return false
+	}
+	if len(ServerHub.clients) == 0 {
+		return false
+	}
+	return true
+}
+
+// NewServer 开启服务
 func NewServer(addr *string) {
 	ServerHub = newHub()
 	go ServerHub.run()
 	ServerBridge = newBridgeHub()
 	go ServerBridge.run()
+	serverStart = true
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(ServerHub, w, r)

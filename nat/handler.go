@@ -84,10 +84,6 @@ func connect(addr *string, interrupt chan os.Signal) {
 	log.Println("websocket auth and subscribe ok")
 
 	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, 100)}
-	client.hub.register <- client
-	defer func() {
-		client.hub.unregister <- client
-	}()
 
 	go client.writePump()
 	done := make(chan struct{})
@@ -113,7 +109,7 @@ func connect(addr *string, interrupt chan os.Signal) {
 
 			if msg.Method == METHOD_CREATE {
 				proxConn := dialProxy()
-				b := LocalBridge.Register(ClientHub, msg.ID, proxConn.(*net.TCPConn))
+				b := LocalBridge.Register(client, msg.ID, proxConn.(*net.TCPConn))
 				go func() {
 					written, err := b.WritePump()
 					logCopyErr("nat_local_debug websocket->local", err)

@@ -72,8 +72,8 @@ func (h *BridgeHub) run() {
 	}
 }
 
-func (h *BridgeHub) Register(wsHub *Hub, ID uint, conn *net.TCPConn) *Bridge {
-	b := &Bridge{bridgeHub: h, reqID: ID, conn: conn, send: make(chan []byte, 100), wsHub: wsHub}
+func (h *BridgeHub) Register(c *Client, ID uint, conn *net.TCPConn) *Bridge {
+	b := &Bridge{bridgeHub: h, reqID: ID, conn: conn, send: make(chan []byte, 100), client: c}
 	h.register <- b
 	return b
 }

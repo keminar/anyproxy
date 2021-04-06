@@ -12,6 +12,7 @@ import (
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
+	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto/http"
 	"github.com/keminar/anyproxy/proto/text"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -258,17 +259,21 @@ func (that *httpStream) badRequest(err error) {
 }
 
 func (that *httpStream) response() error {
-	if test, ok := that.Header["Anyproxy-Action"]; ok && test[0] == "websocket" {
-		that.Header.Del("Anyproxy-Action")
-		tunnel := newWsTunnel(that.req)
-		// 先将请求头部发出
-		tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
-		that.Header.Write(tunnel.buffer)
-		tunnel.buffer.Write([]byte("\r\n"))
-		// 多读取的body部分
-		tunnel.buffer.Write(that.BodyBuf)
-		tunnel.transfer()
-		return nil
+	if nat.Eable() {
+		if test, ok := that.Header["Anyproxy-Action"]; ok && test[0] == "websocket" {
+			that.Header.Del("Anyproxy-Action")
+			tunnel := newWsTunnel(that.req, that.Header)
+			// 先将请求头部发出
+			tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
+			that.Header.Write(tunnel.buffer)
+			tunnel.buffer.Write([]byte("\r\n"))
+			// 多读取的body部分
+			tunnel.buffer.Write(that.BodyBuf)
+			ok := tunnel.transfer()
+			if ok == true {
+				return nil
+			}
+		}
 	}
 	tunnel := newTunnel(that.req)
 	if ip, ok := tunnel.isAllowed(); !ok {

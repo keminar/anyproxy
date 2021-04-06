@@ -12,7 +12,7 @@ import (
 
 type Bridge struct {
 	bridgeHub *BridgeHub
-	wsHub     *Hub
+	client    *Client
 
 	reqID uint //请求id
 	conn  *net.TCPConn
@@ -29,20 +29,20 @@ func (h *Bridge) Unregister(b *Bridge) {
 // 向websocket hub写数据
 func (b *Bridge) Write(p []byte) (n int, err error) {
 	msg := &Message{ID: b.reqID, Body: p}
-	b.wsHub.broadcast <- msg
+	b.client.send <- msg
 	return len(p), nil
 }
 
 // 通知websocket 创建连接
 func (b *Bridge) Open() {
 	msg := &Message{ID: b.reqID, Method: METHOD_CREATE}
-	b.wsHub.broadcast <- msg
+	b.client.send <- msg
 }
 
 // 通知tcp关闭连接
 func (b *Bridge) CloseWrite() {
 	msg := &Message{ID: b.reqID, Method: METHOD_CLOSE}
-	b.wsHub.broadcast <- msg
+	b.client.send <- msg
 }
 
 // 从websocket hub读数据写到请求http端
