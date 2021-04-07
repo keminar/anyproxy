@@ -63,7 +63,7 @@ func (b *Bridge) WritePump() (written int64, err error) {
 				return
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat_debug_write_proxy", string(message))
+				log.Println("nat_debug_write_proxy", len(message), string(message))
 			}
 			var nw int
 			nw, err = b.conn.Write(message)
@@ -90,7 +90,9 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 		if nr > 0 {
 			if config.DebugLevel >= config.LevelDebugBody {
 				log.Printf("%s bridge of %s proxy, n=%d, data len: %d\n", trace.ID(b.reqID), srcname, i, nr)
-				fmt.Println(trace.ID(b.reqID), string(buf[0:nr]))
+				if srcname != "local" { //在写入websocket时已有输出
+					fmt.Println(trace.ID(b.reqID), string(buf[0:nr]))
+				}
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {

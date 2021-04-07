@@ -45,7 +45,7 @@ func (h *BridgeHub) run() {
 				log.Println("bridge nums", len(h.bridges))
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat_debug_write_bridge_hub", message.ID, message.Method, string(message.Body))
+				log.Println("nat_debug_write_bridge_hub", message.ID, message.Method, len(message.Body))
 			}
 		Exit:
 			for bridge := range h.bridges {

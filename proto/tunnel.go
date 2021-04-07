@@ -67,7 +67,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			// 如果为HTTP/1.1的Keep-alive情况下
-			if srcname == "client" && s.clientUnRead >= 0 {
+			if srcname == "request" && s.clientUnRead >= 0 {
 				// 之前已读完，说明要建新链接
 				if s.clientUnRead == 0 {
 					// 关闭与旧的服务器的连接的写
@@ -120,7 +120,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 				}
 			}
 
-			if srcname == "client" {
+			if srcname == "request" {
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
 				s.conn.CloseWrite()
 				s.curState = stateClosed
@@ -148,15 +148,15 @@ func (s *tunnel) transfer(clientUnRead int) {
 		}()
 		//不能和外层共用err
 		var err error
-		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "client")
-		s.logCopyErr("client->server", err)
+		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "request")
+		s.logCopyErr("request->server", err)
 		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
 	}()
 
 	var err error
 	//取返回结果
 	s.writeSize, err = s.copyBuffer(s.req.conn, tcp.NewReader(s.conn), "server")
-	s.logCopyErr("server->client", err)
+	s.logCopyErr("server->request", err)
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接

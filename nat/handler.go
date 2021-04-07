@@ -1,7 +1,6 @@
 package nat
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -90,21 +89,19 @@ func connect(addr *string, interrupt chan os.Signal) {
 	go func() { //客户端的client.readRump
 		defer close(done)
 		for {
-			// 使用普通形式读，可以读到类似连接已关闭等的错误
-			_, message, err := c.ReadMessage()
+			_, p, err := c.ReadMessage()
 			if err != nil {
 				log.Println("nat_local_debug_read_error", err.Error())
 				return
 			}
 
-			msg := &Message{}
-			err = json.Unmarshal(message, &msg)
+			msg, err := decodeMessage(p)
 			if err != nil {
-				log.Println("nat_local_debug_json_error", err.Error())
+				log.Println("nat_local_debug_decode_error", err.Error())
 				return
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, string(msg.Body))
+				log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, len(msg.Body))
 			}
 
 			if msg.Method == METHOD_CREATE {

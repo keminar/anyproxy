@@ -39,17 +39,23 @@ func (c *Client) writePump() {
 		case message, ok := <-c.send: //ok为判断channel是否关闭
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				log.Println("nat client send chan close")
+				log.Println("nat_debug_client_send_chan_close")
 				// The hub closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			err := c.conn.WriteJSON(message)
-			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat websocket writeJson", message.ID, message.Method, string(message.Body), err)
-			}
+			w, err := c.conn.NextWriter(websocket.BinaryMessage)
 			if err != nil {
+				return
+			}
+
+			if config.DebugLevel >= config.LevelDebugBody {
+				log.Println("nat_debug_write_websocket", message.ID, message.Method, len(message.Body), err, string(message.Body))
+			}
+			msgByte, err := message.encode()
+			w.Write(msgByte)
+			if err := w.Close(); err != nil {
 				return
 			}
 		case <-ticker.C:
@@ -70,16 +76,20 @@ func (c *Client) readPump() {
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.conn.SetPongHandler(func(string) error { c.conn.SetReadDeadline(time.Now().Add(pongWait)); return nil })
 	for {
-		msg := &Message{}
-		err := c.conn.ReadJSON(msg)
+		_, p, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("nat_debug_read_message_error: %v", err)
 			}
 			break
 		}
+		msg, err := decodeMessage(p)
+		if err != nil {
+			log.Printf("nat_debug_decode_message_error: %v", err)
+			break
+		}
 		if config.DebugLevel >= config.LevelDebugBody {
-			log.Println("nat_debug_read_from_client", msg.ID, msg.Method, string(msg.Body))
+			log.Println("nat_debug_read_from_websocket", msg.ID, msg.Method, len(msg.Body))
 		}
 		ServerBridge.broadcast <- msg
 	}
