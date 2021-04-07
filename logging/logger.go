@@ -31,6 +31,8 @@ func SetDefaultLogger(dir, prefix string, compress bool, reserveDay int, w io.Wr
 		log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
 	case config.LevelDebug:
 		log.SetFlags(log.Llongfile | log.Ldate | log.Lmicroseconds)
+	case config.LevelDebugBody:
+		log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
 	default:
 		log.SetFlags(log.Lshortfile | log.LstdFlags)
 	}
