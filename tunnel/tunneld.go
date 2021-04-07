@@ -9,7 +9,6 @@ import (
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/logging"
-	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto"
 	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/daemon"
@@ -20,17 +19,15 @@ import (
 var (
 	gListenAddrPort  string
 	gProxyServerSpec string
-	gWebsocketListen string
 	gHelp            bool
 	gDebug           int
 )
 
 func init() {
-	flag.Usage = help.Usage
+	flag.Usage = help.TunnelUsage
 	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
-	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
-	//不支持ws-connect
+	//CONNECT请求不支持ws-listen 和 ws-connect，且tunnel只做接收anyproxy的安全转发，不需要支持ws
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
 }
@@ -74,11 +71,7 @@ func main() {
 	gProxyServerSpec = config.IfEmptyThen(gProxyServerSpec, conf.RouterConfig.Proxy, "")
 	config.SetProxyServer(gProxyServerSpec)
 
-	if gWebsocketListen != "" {
-		gWebsocketListen = tools.FillPort(gWebsocketListen)
-		go nat.NewServer(&gWebsocketListen)
-	}
-
+	// 与anyproxy不同之处在ServerHandler
 	server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
 	server.ListenAndServe()
 }

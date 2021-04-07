@@ -261,9 +261,9 @@ func (that *httpStream) badRequest(err error) {
 func (that *httpStream) response() error {
 	specialHeader := "Anyproxy-Action"
 	if config.DebugLevel >= config.LevelDebug {
-		log.Println(trace.ID(that.req.ID), "nat server status", nat.Eable(), "special header", that.Header.Get(specialHeader))
+		log.Println(trace.ID(that.req.ID), "nat server status:", nat.Eable(), ",special header:", that.Header.Get(specialHeader))
 	}
-	if nat.Eable() {
+	if that.Method != "CONNECT" && nat.Eable() { //CONNECT 请求不支持ws转发
 		if that.Header.Get(specialHeader) == "websocket" {
 			that.Header.Del(specialHeader)
 			tunnel := newWsTunnel(that.req, that.Header)
