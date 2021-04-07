@@ -173,6 +173,7 @@ sudo iptables -t nat -D OUTPUT 2
 * TCP 转发的mysql的连接请求会一直卡住
 * 与Tunnel的多账户认证，账户可设置有效期
 * HTTP/1.1 keep-alive后端也能复用tcp
+* 启用ws-listen后的平滑重启问题
 
 # 感谢
 
