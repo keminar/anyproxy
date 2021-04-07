@@ -3,7 +3,7 @@ SCRIPT=$(readlink -f $0)
 ROOT_DIR=$(dirname $SCRIPT)/../
 cd $ROOT_DIR
 
-mkdir dist/
+mkdir -p dist/
 
 # anyproxy
 echo "build anyproxy"

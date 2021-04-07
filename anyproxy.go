@@ -94,11 +94,14 @@ func main() {
 		}()
 	}
 
+	// websocket 配置
+	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig.Websocket.Listen, "")
 	if gWebsocketListen != "" {
 		gWebsocketListen = tools.FillPort(gWebsocketListen)
 		go nat.NewServer(&gWebsocketListen)
 	}
 
+	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Connect, "")
 	if gWebsocketConn != "" {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
 		go nat.ConnectServer(&gWebsocketConn)

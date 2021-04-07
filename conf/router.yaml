@@ -40,7 +40,11 @@ hosts:
 #token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
 #allowIP:
+
+#websocket配置
 websocket:
+  listen:
+  connect:
   user: 111
   pass: 111
   subscribe:

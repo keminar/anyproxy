@@ -212,7 +212,7 @@ func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
 }
 
 // 查询配置
-func (s *tunnel) findHost(dstName, dstIP string) conf.Host {
+func findHost(dstName, dstIP string) conf.Host {
 	for _, h := range conf.RouterConfig.Hosts {
 		confMatch := getString(h.Match, conf.RouterConfig.Match, "equal")
 		switch confMatch {
@@ -249,7 +249,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		// http请求,dns解析
 		dstIP, state = s.lookup(dstName, dstIP)
 	}
-	host := s.findHost(dstName, dstIP)
+	host := findHost(dstName, dstIP)
 	var confTarget string
 	if proto == protoTCP {
 		confTarget = getString(host.Target, conf.RouterConfig.TCPTarget, "auto")

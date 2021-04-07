@@ -11,7 +11,7 @@ import (
 
 // Host 域名
 type Host struct {
-	Name   string `yaml:"name"`
+	Name   string `yaml:"name"`   //域名关键字
 	Match  string `yaml:"match"`  //contain 包含, equal 完全相等, preg 正则
 	Target string `yaml:"target"` //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
 	DNS    string `yaml:"dns"`    //local 当前环境, remote 远程, 仅当target使用remote有效
@@ -26,15 +26,17 @@ type Log struct {
 
 // Subscribe 订阅标志
 type Subscribe struct {
-	Key string `yaml:"key"`
-	Val string `yaml:"val"`
+	Key string `yaml:"key"` //Header的key
+	Val string `yaml:"val"` //Header的val
 }
 
 // Websocket 与服务端websocket通信
 type Websocket struct {
-	User      string      `yaml:"user"`
-	Pass      string      `yaml:"pass"`
-	Subscribe []Subscribe `yaml:"subscribe"`
+	Listen    string      `yaml:"listen"`    //websocket 监听
+	Connect   string      `yaml:"connect"`   //websocket 连接
+	User      string      `yaml:"user"`      //认证用户
+	Pass      string      `yaml:"pass"`      //密码
+	Subscribe []Subscribe `yaml:"subscribe"` //订阅信息
 }
 
 // Router 配置文件模型
@@ -80,7 +82,7 @@ func getPath(filename string) (string, error) {
 		if !fileExists(configPath) {
 			configPath = filepath.Join(AppSrcPath, "conf", filename)
 			if !fileExists(configPath) {
-				return "", errors.New(filename + " not found")
+				return "", errors.New("conf/" + filename + " not found")
 			}
 		}
 	}

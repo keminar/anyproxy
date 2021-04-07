@@ -8,6 +8,7 @@ import (
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto/http"
+	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/trace"
 )
 
@@ -30,6 +31,21 @@ func newWsTunnel(req *Request, header http.Header) *wsTunnel {
 		buffer: new(bytes.Buffer),
 	}
 	return s
+}
+
+// 检查ws转发是否允许
+func (s *wsTunnel) getTarget(dstName string) (ok bool) {
+	if dstName == "" {
+		return false
+	}
+	host := findHost(dstName, dstName)
+	var confTarget string
+	confTarget = getString(host.Target, conf.RouterConfig.Target, "auto")
+
+	if confTarget == "deny" {
+		return false
+	}
+	return true
 }
 
 // transfer 交换数据

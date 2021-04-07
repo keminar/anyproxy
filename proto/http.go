@@ -267,15 +267,18 @@ func (that *httpStream) response() error {
 		if that.Header.Get(specialHeader) == "websocket" {
 			that.Header.Del(specialHeader)
 			tunnel := newWsTunnel(that.req, that.Header)
-			// 先将请求头部发出
-			tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
-			that.Header.Write(tunnel.buffer)
-			tunnel.buffer.Write([]byte("\r\n"))
-			// 多读取的body部分
-			tunnel.buffer.Write(that.BodyBuf)
-			ok := tunnel.transfer()
-			if ok == true {
-				return nil
+			if tunnel.getTarget(that.req.DstName) {
+				// 先将请求头部发出
+				tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
+				that.Header.Write(tunnel.buffer)
+				tunnel.buffer.Write([]byte("\r\n"))
+				// 多读取的body部分
+				tunnel.buffer.Write(that.BodyBuf)
+				ok := tunnel.transfer()
+				if ok == true {
+					return nil
+				}
+				// 请求不成，则走普通转发
 			}
 		}
 	}
