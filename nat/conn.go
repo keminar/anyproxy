@@ -3,7 +3,9 @@ package nat
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -119,8 +121,31 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	client.hub.register <- client
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 
-	log.Printf("client ip %s connected, total client nums %d\n", r.RemoteAddr, clientNum)
+	remote := getIPAdress(r, []string{"X-Real-IP"})
+	log.Printf("client ip %s connected, total client nums %d\n", remote, clientNum)
 
 	go client.writePump()
 	go client.readPump()
+}
+
+// getIPAdress 客户端IP
+func getIPAdress(req *http.Request, head []string) string {
+	var ipAddress string
+	// X-Forwarded-For容易被伪造,最好不用
+	if len(head) == 0 {
+		head = []string{"X-Real-IP"}
+	}
+	for _, h := range head {
+		for _, ip := range strings.Split(req.Header.Get(h), ",") {
+			ip = strings.TrimSpace(ip)
+			realIP := net.ParseIP(ip)
+			if realIP != nil {
+				ipAddress = ip
+			}
+		}
+	}
+	if len(ipAddress) == 0 {
+		ipAddress, _, _ = net.SplitHostPort(req.RemoteAddr)
+	}
+	return ipAddress
 }

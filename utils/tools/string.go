@@ -3,6 +3,7 @@ package tools
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"strconv"
 	"strings"
 )
 
@@ -26,7 +27,10 @@ func Md5Str(str string) (string, error) {
 // 支持只输入端口的形式
 func FillPort(port string) string {
 	if !strings.Contains(port, ":") {
-		port = ":" + port
+		d, err := strconv.Atoi(port)
+		if err == nil && strconv.Itoa(d) == port { //说明输入为纯数字
+			port = ":" + port
+		}
 	}
 	return port
 }

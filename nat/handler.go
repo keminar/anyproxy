@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/keminar/anyproxy/utils/conf"
@@ -35,6 +36,10 @@ func ConnectServer(addr *string) {
 	LocalBridge = newBridgeHub()
 	go LocalBridge.run()
 
+	addrs := strings.Split(*addr, "://")
+	if addrs[0] == "ws" && len(addrs) == 2 {
+		*addr = addrs[1]
+	}
 	for {
 		connect(addr, interrupt)
 		if interruptClose {
