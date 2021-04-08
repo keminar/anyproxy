@@ -11,6 +11,9 @@ const METHOD_CREATE = "create"
 // 关闭连接命令
 const METHOD_CLOSE = "close"
 
+// 发送通道长度
+const SEND_CHAN_LEN = 200
+
 // 认证
 type AuthMessage struct {
 	User  string
@@ -29,6 +32,12 @@ type Message struct {
 	ID     uint
 	Method string
 	Body   []byte
+}
+
+// 普通消息体的复合类型，标记要向哪个Client发送
+type CMessage struct {
+	Client  *Client
+	Message *Message
 }
 
 func (m *Message) encode() ([]byte, error) {

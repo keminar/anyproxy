@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/url"
@@ -19,7 +18,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/keminar/anyproxy/config"
-	"github.com/keminar/anyproxy/utils/trace"
 )
 
 var ClientHub *Hub
@@ -89,52 +87,13 @@ func connect(addr *string, interrupt chan os.Signal) {
 	}
 	log.Println("websocket auth and subscribe ok")
 
-	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, 100)}
+	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, SEND_CHAN_LEN)}
 
 	go client.writePump()
 	done := make(chan struct{})
 	go func() { //客户端的client.readRump
 		defer close(done)
-		for {
-			_, p, err := c.ReadMessage()
-			if err != nil {
-				log.Println("nat_local_debug_read_error", err.Error())
-				return
-			}
-
-			msg, err := decodeMessage(p)
-			if err != nil {
-				log.Println("nat_local_debug_decode_error", err.Error())
-				return
-			}
-			if config.DebugLevel >= config.LevelDebugBody {
-				md5Val, _ := Md5Byte(msg.Body)
-				log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, md5Val)
-			}
-
-			if msg.Method == METHOD_CREATE {
-				proxConn := dialProxy()
-				b := LocalBridge.Register(client, msg.ID, proxConn.(*net.TCPConn))
-				go func() {
-					written, err := b.WritePump()
-					logCopyErr("nat_local_debug websocket->local", err)
-					log.Println(trace.ID(msg.ID), "nat debug response size", written)
-				}()
-
-				// 从tcp返回数据到ws
-				go func() {
-					defer func() {
-						b.bridgeHub.unregister <- b
-					}()
-					readSize, err := b.CopyBuffer(b, proxConn, "local")
-					logCopyErr("nat_local_debug local->websocket", err)
-					log.Println(trace.ID(msg.ID), "nat debug request body size", readSize)
-					b.CloseWrite()
-				}()
-			} else {
-				LocalBridge.broadcast <- msg
-			}
-		}
+		client.localReadPump()
 	}()
 
 	for {
@@ -217,17 +176,6 @@ func (h *ClientHandler) ask(v interface{}) error {
 		return errors.New("timeout")
 	}
 	return nil
-}
-
-func logCopyErr(name string, err error) {
-	if err == nil {
-		return
-	}
-	if config.DebugLevel >= config.LevelLong {
-		log.Println(name, err.Error())
-	} else if err != io.EOF {
-		log.Println(name, err.Error())
-	}
 }
 
 func Md5Byte(data []byte) (string, error) {

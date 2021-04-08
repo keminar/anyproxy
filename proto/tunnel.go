@@ -138,12 +138,11 @@ func (s *tunnel) transfer(clientUnRead int) {
 	}
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
-	done := make(chan int, 1)
+	done := make(chan struct{})
 
 	//发送请求
 	go func() {
 		defer func() {
-			done <- 1
 			close(done)
 		}()
 		//不能和外层共用err

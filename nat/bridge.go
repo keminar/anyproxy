@@ -37,20 +37,24 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 		log.Println("nat_debug_write_chan", msg.ID, md5Val)
 	}
 
-	b.client.send <- msg
+	cmsg := &CMessage{Client: b.client, Message: msg}
+	b.client.hub.broadcast <- cmsg
 	return len(p), nil
 }
 
 // Open 通知websocket 创建连接
 func (b *Bridge) Open() {
 	msg := &Message{ID: b.reqID, Method: METHOD_CREATE}
-	b.client.send <- msg
+	//b.client.send <- msg //注意:不能直接写send会与close有并发安全冲突
+	cmsg := &CMessage{Client: b.client, Message: msg}
+	b.client.hub.broadcast <- cmsg
 }
 
 // CloseWrite 通知tcp关闭连接
 func (b *Bridge) CloseWrite() {
 	msg := &Message{ID: b.reqID, Method: METHOD_CLOSE}
-	b.client.send <- msg
+	cmsg := &CMessage{Client: b.client, Message: msg}
+	b.client.hub.broadcast <- cmsg
 }
 
 // WritePump 从websocket hub读数据写到请求http端

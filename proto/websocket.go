@@ -68,14 +68,11 @@ func (s *wsTunnel) transfer() bool {
 	// 发送创建连接请求
 	b.Open()
 	var err error
-	done := make(chan int, 1)
+	done := make(chan struct{})
 
 	//发送请求给websocket
 	go func() {
-		defer func() {
-			done <- 1
-			close(done)
-		}()
+		defer close(done)
 		b.Write([]byte(s.buffer.String()))
 		s.readSize, err = b.CopyBuffer(b, s.req.reader, "request")
 		s.logCopyErr("request->websocket", err)

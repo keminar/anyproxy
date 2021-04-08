@@ -117,7 +117,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	clientNum := len(hub.clients)
 	// 注册连接
-	client := &Client{hub: hub, conn: conn, send: make(chan *Message, 100), User: user.User, Subscribe: subscribe}
+	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Subscribe: subscribe}
 	client.hub.register <- client
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 
@@ -125,7 +125,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	log.Printf("client ip %s connected, total client nums %d\n", remote, clientNum)
 
 	go client.writePump()
-	go client.readPump()
+	go client.serverReadPump()
 }
 
 // getIPAdress 客户端IP

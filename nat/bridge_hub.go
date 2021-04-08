@@ -22,6 +22,7 @@ type BridgeHub struct {
 }
 
 func newBridgeHub() *BridgeHub {
+	// 无缓冲通道，保证并发安全
 	return &BridgeHub{
 		broadcast:  make(chan *Message),
 		register:   make(chan *Bridge),
@@ -61,10 +62,8 @@ func (h *BridgeHub) run() {
 				select {
 				case bridge.send <- message.Body:
 					break Exit
-				default: // 当send chan满时也会走进default
-					if config.DebugLevel >= config.LevelDebug {
-						log.Println("why go here ?????")
-					}
+				default: // 当send chan写不进时会走进default，防止某一个send卡着影响整个系统
+					log.Println("net_bridge_send_chan_full", message.ID)
 					close(bridge.send)
 					delete(h.bridges, bridge)
 				}

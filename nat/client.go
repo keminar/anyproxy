@@ -1,11 +1,14 @@
 package nat
 
 import (
+	"io"
 	"log"
+	"net"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/keminar/anyproxy/config"
+	"github.com/keminar/anyproxy/utils/trace"
 )
 
 var interruptClose bool
@@ -68,8 +71,8 @@ func (c *Client) writePump() {
 	}
 }
 
-// 从websocket的客户端读取数据
-func (c *Client) readPump() {
+// 服务器从websocket的客户端读取数据
+func (c *Client) serverReadPump() {
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close()
@@ -94,5 +97,58 @@ func (c *Client) readPump() {
 			log.Println("nat_debug_read_from_websocket", msg.ID, msg.Method, md5Val)
 		}
 		ServerBridge.broadcast <- msg
+	}
+}
+
+// 本地从websocket服务端取数据
+func (c *Client) localReadPump() {
+	for {
+		_, p, err := c.conn.ReadMessage()
+		if err != nil {
+			log.Println("nat_local_debug_read_error", err.Error())
+			return
+		}
+
+		msg, err := decodeMessage(p)
+		if err != nil {
+			log.Println("nat_local_debug_decode_error", err.Error())
+			return
+		}
+		if config.DebugLevel >= config.LevelDebugBody {
+			md5Val, _ := Md5Byte(msg.Body)
+			log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, md5Val)
+		}
+
+		if msg.Method == METHOD_CREATE {
+			proxConn := dialProxy() //创建本地与本地代理端口之间的连接
+			b := LocalBridge.Register(c, msg.ID, proxConn.(*net.TCPConn))
+			go func() {
+				written, err := b.WritePump()
+				logCopyErr(trace.ID(msg.ID), "nat_local_debug websocket->local", err)
+				log.Println(trace.ID(msg.ID), "nat debug response size", written)
+			}()
+
+			// 从tcp返回数据到ws
+			go func() {
+				defer b.Unregister()
+				readSize, err := b.CopyBuffer(b, proxConn, "local")
+				logCopyErr(trace.ID(msg.ID), "nat_local_debug local->websocket", err)
+				log.Println(trace.ID(msg.ID), "nat debug request body size", readSize)
+				b.CloseWrite()
+			}()
+		} else {
+			LocalBridge.broadcast <- msg
+		}
+	}
+}
+
+func logCopyErr(traceID, name string, err error) {
+	if err == nil {
+		return
+	}
+	if config.DebugLevel >= config.LevelLong {
+		log.Println(traceID, name, err.Error())
+	} else if err != io.EOF {
+		log.Println(traceID, name, err.Error())
 	}
 }
