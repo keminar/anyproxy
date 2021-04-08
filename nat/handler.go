@@ -1,6 +1,8 @@
 package nat
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -101,7 +103,8 @@ func connect(addr *string, interrupt chan os.Signal) {
 				return
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, len(msg.Body))
+				md5Val, _ := Md5Byte(msg.Body)
+				log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, md5Val)
 			}
 
 			if msg.Method == METHOD_CREATE {
@@ -220,4 +223,11 @@ func logCopyErr(name string, err error) {
 	} else if err != io.EOF {
 		log.Println(name, err.Error())
 	}
+}
+
+func Md5Byte(data []byte) (string, error) {
+	h := md5.New()
+	h.Write(data)
+	cipherStr := h.Sum(nil)
+	return hex.EncodeToString(cipherStr), nil
 }

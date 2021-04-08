@@ -51,9 +51,10 @@ func (c *Client) writePump() {
 			}
 
 			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat_debug_write_websocket", message.ID, message.Method, len(message.Body), err, string(message.Body))
+				md5Val, _ := Md5Byte(message.Body)
+				log.Println("nat_debug_write_websocket", message.ID, message.Method, md5Val, "\n", string(message.Body))
 			}
-			msgByte, err := message.encode()
+			msgByte, _ := message.encode()
 			w.Write(msgByte)
 			if err := w.Close(); err != nil {
 				return
@@ -89,7 +90,8 @@ func (c *Client) readPump() {
 			break
 		}
 		if config.DebugLevel >= config.LevelDebugBody {
-			log.Println("nat_debug_read_from_websocket", msg.ID, msg.Method, len(msg.Body))
+			md5Val, _ := Md5Byte(msg.Body)
+			log.Println("nat_debug_read_from_websocket", msg.ID, msg.Method, md5Val)
 		}
 		ServerBridge.broadcast <- msg
 	}

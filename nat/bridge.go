@@ -1,7 +1,6 @@
 package nat
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -22,30 +21,39 @@ type Bridge struct {
 }
 
 // 包外面调用取消注册
-func (h *Bridge) Unregister(b *Bridge) {
-	h.bridgeHub.unregister <- b
+func (b *Bridge) Unregister() {
+	b.bridgeHub.unregister <- b
 }
 
 // 向websocket hub写数据
 func (b *Bridge) Write(p []byte) (n int, err error) {
-	msg := &Message{ID: b.reqID, Body: p}
+	// 先把p拷贝一份，否则会被外面的CopyBuffer再次修改，因为是引入传递
+	body := make([]byte, len(p))
+	copy(body, p)
+	msg := &Message{ID: b.reqID, Body: body}
+
+	if config.DebugLevel >= config.LevelDebugBody {
+		md5Val, _ := Md5Byte(msg.Body)
+		log.Println("nat_debug_write_chan", msg.ID, md5Val)
+	}
+
 	b.client.send <- msg
 	return len(p), nil
 }
 
-// 通知websocket 创建连接
+// Open 通知websocket 创建连接
 func (b *Bridge) Open() {
 	msg := &Message{ID: b.reqID, Method: METHOD_CREATE}
 	b.client.send <- msg
 }
 
-// 通知tcp关闭连接
+// CloseWrite 通知tcp关闭连接
 func (b *Bridge) CloseWrite() {
 	msg := &Message{ID: b.reqID, Method: METHOD_CLOSE}
 	b.client.send <- msg
 }
 
-// 从websocket hub读数据写到请求http端
+// WritePump 从websocket hub读数据写到请求http端
 func (b *Bridge) WritePump() (written int64, err error) {
 	defer func() {
 		b.conn.CloseWrite()
@@ -62,11 +70,12 @@ func (b *Bridge) WritePump() (written int64, err error) {
 				}
 				return
 			}
-			if config.DebugLevel >= config.LevelDebugBody {
-				log.Println("nat_debug_write_proxy", len(message), string(message))
-			}
 			var nw int
 			nw, err = b.conn.Write(message)
+			if config.DebugLevel >= config.LevelDebugBody {
+				md5Val, _ := Md5Byte(message)
+				log.Println("nat_debug_write_proxy", md5Val, err, "\n", string(message))
+			}
 			if err != nil {
 				return
 			}
@@ -89,10 +98,8 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			if config.DebugLevel >= config.LevelDebugBody {
-				log.Printf("%s bridge of %s proxy, n=%d, data len: %d\n", trace.ID(b.reqID), srcname, i, nr)
-				if srcname != "local" { //在写入websocket时已有输出
-					fmt.Println(trace.ID(b.reqID), string(buf[0:nr]))
-				}
+				md5Val, _ := Md5Byte(buf[0:nr])
+				log.Println("net_debug_copy_buffer", trace.ID(b.reqID), srcname, i, nr, md5Val)
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {

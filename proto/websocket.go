@@ -62,7 +62,7 @@ func (s *wsTunnel) transfer() bool {
 	}
 	b := nat.ServerBridge.Register(c, s.req.ID, s.req.conn)
 	defer func() {
-		b.Unregister(b)
+		b.Unregister()
 	}()
 
 	// 发送创建连接请求
