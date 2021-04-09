@@ -3,6 +3,7 @@ package nat
 import (
 	"log"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/proto/http"
 )
 
@@ -43,15 +44,22 @@ func (h *Hub) run() {
 				close(client.send)
 			}
 		case cmessage := <-h.broadcast:
+			if config.DebugLevel >= config.LevelDebug {
+				log.Println("client nums", len(h.clients))
+			}
+			if config.DebugLevel >= config.LevelDebugBody {
+				md5Val, _ := md5Byte(cmessage.message.Body)
+				log.Println("nat_debug_write_client_hub", cmessage.message.ID, cmessage.message.Method, md5Val)
+			}
 			// 使用broadcast 无缓冲且不会关闭解决并发问题
 			// 如果在外部直接写client.send,会与close()有并发安全冲突
 		Exit:
 			for client := range h.clients {
-				if client != cmessage.Client {
+				if client != cmessage.client {
 					continue
 				}
 				select {
-				case client.send <- cmessage.Message:
+				case client.send <- cmessage.message:
 					break Exit
 				default: // 当send chan写不进时会走进default，防止某一个send卡着影响整个系统
 					log.Println("net_client_send_chan_full")

@@ -34,7 +34,10 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
+// ServerHub 服务端的ws链接信息
 var ServerHub *Hub
+
+// ServerBridge 服务端的http与ws链接
 var ServerBridge *BridgeHub
 
 // serverStart 是否开启服务

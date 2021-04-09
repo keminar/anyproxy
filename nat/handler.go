@@ -20,7 +20,10 @@ import (
 	"github.com/keminar/anyproxy/config"
 )
 
+// ClientHub 客户端的ws信息
 var ClientHub *Hub
+
+// LocalBridge 客户端的ws与http关系
 var LocalBridge *BridgeHub
 
 // ConnectServer 连接到websocket服务
@@ -88,6 +91,10 @@ func connect(addr *string, interrupt chan os.Signal) {
 	log.Println("websocket auth and subscribe ok")
 
 	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, SEND_CHAN_LEN)}
+	client.hub.register <- client
+	defer func() {
+		client.hub.unregister <- client
+	}()
 
 	go client.writePump()
 	done := make(chan struct{})
@@ -120,6 +127,7 @@ func connect(addr *string, interrupt chan os.Signal) {
 	}
 }
 
+// ClientHandler 认证助手
 type ClientHandler struct {
 	c *websocket.Conn
 }
@@ -178,7 +186,8 @@ func (h *ClientHandler) ask(v interface{}) error {
 	return nil
 }
 
-func Md5Byte(data []byte) (string, error) {
+// md5
+func md5Byte(data []byte) (string, error) {
 	h := md5.New()
 	h.Write(data)
 	cipherStr := h.Sum(nil)

@@ -7,6 +7,7 @@ import (
 	"github.com/keminar/anyproxy/config"
 )
 
+// BridgeHub 桥接组
 type BridgeHub struct {
 	// Registered clients.
 	bridges map[*Bridge]bool
@@ -46,7 +47,7 @@ func (h *BridgeHub) run() {
 				log.Println("bridge nums", len(h.bridges))
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
-				md5Val, _ := Md5Byte(message.Body)
+				md5Val, _ := md5Byte(message.Body)
 				log.Println("nat_debug_write_bridge_hub", message.ID, message.Method, md5Val)
 			}
 		Exit:
@@ -72,6 +73,7 @@ func (h *BridgeHub) run() {
 	}
 }
 
+// Register 注册
 func (h *BridgeHub) Register(c *Client, ID uint, conn *net.TCPConn) *Bridge {
 	b := &Bridge{bridgeHub: h, reqID: ID, conn: conn, send: make(chan []byte, 100), client: c}
 	h.register <- b

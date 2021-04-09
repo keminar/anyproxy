@@ -5,41 +5,42 @@ import (
 	"encoding/gob"
 )
 
-// 创建连接命令
+// METHOD_CREATE 创建连接命令
 const METHOD_CREATE = "create"
 
-// 关闭连接命令
+// METHOD_CLOSE 关闭连接命令
 const METHOD_CLOSE = "close"
 
-// 发送通道长度
+// SEND_CHAN_LEN 发送通道长度
 const SEND_CHAN_LEN = 200
 
-// 认证
+// AuthMessage 认证
 type AuthMessage struct {
 	User  string
 	Token string
 	Xtime int64
 }
 
-// 订阅
+// SubscribeMessage 订阅
 type SubscribeMessage struct {
 	Key string
 	Val string
 }
 
-// 普通消息体
+// Message 普通消息体
 type Message struct {
 	ID     uint
 	Method string
 	Body   []byte
 }
 
-// 普通消息体的复合类型，标记要向哪个Client发送
+// CMessage 普通消息体的复合类型，标记要向哪个Client发送
 type CMessage struct {
-	Client  *Client
-	Message *Message
+	client  *Client
+	message *Message
 }
 
+// 转成二进制
 func (m *Message) encode() ([]byte, error) {
 	var buf bytes.Buffer
 	enc := gob.NewEncoder(&buf)
@@ -47,6 +48,7 @@ func (m *Message) encode() ([]byte, error) {
 	return buf.Bytes(), err
 }
 
+// 转成struct
 func decodeMessage(data []byte) (*Message, error) {
 	var buf bytes.Buffer
 	var m Message
