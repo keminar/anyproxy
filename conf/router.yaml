@@ -43,10 +43,17 @@ hosts:
 
 #websocket配置
 websocket:
+  # 监听端口
   listen:
+  # ip 端口
   connect:
-  user: 111
-  pass: 111
+  # connect 域名
+  host:
+  # 用户名
+  user:
+  # 密码
+  pass:
+  # 订阅头部信息
   subscribe:
-    - key: devId
-      val: xxx
+    - key:
+      val:

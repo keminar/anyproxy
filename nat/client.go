@@ -125,7 +125,9 @@ func (c *Client) localReadPump() {
 			go func() {
 				written, err := b.WritePump()
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug websocket->local", err)
-				log.Println(trace.ID(msg.ID), "nat debug response size", written)
+				if config.DebugLevel >= config.LevelDebug {
+					log.Println(trace.ID(msg.ID), "nat debug response size", written)
+				}
 			}()
 
 			// 从tcp返回数据到ws
@@ -133,7 +135,9 @@ func (c *Client) localReadPump() {
 				defer b.Unregister()
 				readSize, err := b.CopyBuffer(b, proxConn, "local")
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug local->websocket", err)
-				log.Println(trace.ID(msg.ID), "nat debug request body size", readSize)
+				if config.DebugLevel >= config.LevelDebug {
+					log.Println(trace.ID(msg.ID), "nat debug request body size", readSize)
+				}
 				b.CloseWrite()
 			}()
 		} else {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -67,7 +68,11 @@ func connect(addr *string, interrupt chan os.Signal) {
 	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
 	log.Printf("connecting to %s", u.String())
 
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	h := http.Header{}
+	if conf.RouterConfig.Websocket.Host != "" {
+		h.Add("Host", conf.RouterConfig.Websocket.Host)
+	}
+	c, _, err := websocket.DefaultDialer.Dial(u.String(), h)
 	if err != nil {
 		log.Println("dial:", err)
 		time.Sleep(time.Duration(3) * time.Second)

@@ -76,7 +76,9 @@ func (s *wsTunnel) transfer() bool {
 		b.Write([]byte(s.buffer.String()))
 		s.readSize, err = b.CopyBuffer(b, s.req.reader, "request")
 		s.logCopyErr("request->websocket", err)
-		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
+		if config.DebugLevel >= config.LevelDebug {
+			log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
+		}
 		b.CloseWrite()
 	}()
 	//取返回结果写入请求端
@@ -85,7 +87,9 @@ func (s *wsTunnel) transfer() bool {
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	log.Println(trace.ID(s.req.ID), "websocket transfer finished, response size", s.writeSize)
+	if config.DebugLevel >= config.LevelDebug {
+		log.Println(trace.ID(s.req.ID), "websocket transfer finished, response size", s.writeSize)
+	}
 	return true
 }
 

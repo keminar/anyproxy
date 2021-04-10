@@ -149,7 +149,9 @@ func (s *tunnel) transfer(clientUnRead int) {
 		var err error
 		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "request")
 		s.logCopyErr("request->server", err)
-		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
+		if config.DebugLevel >= config.LevelDebug {
+			log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
+		}
 	}()
 
 	var err error
@@ -159,7 +161,9 @@ func (s *tunnel) transfer(clientUnRead int) {
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
+	if config.DebugLevel >= config.LevelDebug {
+		log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
+	}
 }
 
 func (s *tunnel) logCopyErr(name string, err error) {
@@ -274,7 +278,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(host.Proxy)
 		if err != nil {
 			// 如果自定义代理不可用，confTarget走原来逻辑
-			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
+			log.Println(trace.ID(s.req.ID), "host.proxy err", err)
 		} else {
 			proxyScheme = proxyScheme2
 			proxyServer = proxyServer2
