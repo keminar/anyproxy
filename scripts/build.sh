@@ -9,7 +9,7 @@ mkdir -p dist/
 echo "build anyproxy"
 # for linux
 echo "  for linux"
-go build -o dist/anyproxy  anyproxy.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/anyproxy  anyproxy.go
 
 # for mac
 echo "  for mac"
@@ -21,13 +21,13 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o dist/anyproxy-windows.exe an
 
 # for alpine
 echo "  for alpine"
-go build -tags netgo -o dist/anyproxy-alpine  anyproxy.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -o dist/anyproxy-alpine  anyproxy.go
 
 # tunneld
 echo "build tunneld"
 echo "  for linux"
-go build -o dist/tunneld tunnel/tunneld.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/tunneld tunnel/tunneld.go
 
 # for alpine
 echo "  for alpine"
-go build -tags netgo -o dist/tunneld-alpine  tunnel/tunneld.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -o dist/tunneld-alpine  tunnel/tunneld.go
