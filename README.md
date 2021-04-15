@@ -174,6 +174,8 @@ sudo iptables -t nat -D OUTPUT 2
 * 与Tunnel的多账户认证，账户可设置有效期
 * HTTP/1.1 keep-alive后端也能复用tcp
 * 启用ws-listen后的平滑重启问题
+* 监听配置文件变化重新加载路由
+* 订阅增加用户名标识，用于辨别在线用户
 
 # 感谢
 

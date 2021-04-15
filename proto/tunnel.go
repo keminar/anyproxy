@@ -102,7 +102,6 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 			}
 		}
 		if er != nil {
-
 			if er != io.EOF {
 				err = er
 			} else {
@@ -115,7 +114,11 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 						break
 					} else if s.curState != stateClosed {
 						// 如果非客户端导致的服务端关闭，则关闭客户端读
-						dst.(*net.TCPConn).CloseRead()
+						// Notice: 如果只是CloseRead(),当在windows上执行时，且是做为订阅端从服务器收到请求再转到charles
+						//         等服务时,当请求的地址返回足够长的内容时会触发卡住问题。
+						//         流程如 curl -> anyproxy(server) -> ws -> anyproxy(windows) -> charles
+						//         用Close()可以解决卡住，不过客户端会收到use of closed network connection的错误提醒
+						dst.(*net.TCPConn).Close()
 					}
 				}
 			}
