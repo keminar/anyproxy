@@ -40,7 +40,7 @@ func (s *wsTunnel) getTarget(dstName string) (ok bool) {
 	}
 	host := findHost(dstName, dstName)
 	var confTarget string
-	confTarget = getString(host.Target, conf.RouterConfig.Target, "auto")
+	confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
 
 	if confTarget == "deny" {
 		return false

@@ -220,7 +220,7 @@ func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
 // 查询配置
 func findHost(dstName, dstIP string) conf.Host {
 	for _, h := range conf.RouterConfig.Hosts {
-		confMatch := getString(h.Match, conf.RouterConfig.Match, "equal")
+		confMatch := getString(h.Match, conf.RouterConfig.Default.Match, "equal")
 		switch confMatch {
 		case "equal":
 			if h.Name == dstName || h.Name == dstIP {
@@ -258,11 +258,11 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	host := findHost(dstName, dstIP)
 	var confTarget string
 	if proto == protoTCP {
-		confTarget = getString(host.Target, conf.RouterConfig.TCPTarget, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
 	} else {
-		confTarget = getString(host.Target, conf.RouterConfig.Target, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
 	}
-	confDNS := getString(host.DNS, conf.RouterConfig.DNS, "local")
+	confDNS := getString(host.DNS, conf.RouterConfig.Default.DNS, "local")
 
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
 	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行

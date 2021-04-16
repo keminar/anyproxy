@@ -1,18 +1,30 @@
-log:
-  dir: ./logs/
-# 使用的DNS服务器 local 当前环境， remote远程, 仅当target使用remote有效
-dns: local
-# 默认环境，local 当前环境, remote 远程, deny 禁止
-# auto根据dial选择，local dial失败则remote
-target: auto
-tcpTarget: remote
-# 默认域名比对方案
-match: equal
-# 全局代理服务器, 优先级低于启动传参
-proxy:
 # 监听端口IP, 优先级低于启动传参
 listen:
-# 域名
+# 日志目录
+log:
+  dir: ./logs/
+# 监听配置文件变化  
+watcher: true
+# anyproxy 和 tunnel通信密钥, 必须16位长度
+#token: anyproxyproxyany
+# 可访问的客户端IP，为空不限制
+#allowIP:
+
+# 默认操作，可热加载
+default:
+  # 使用的DNS服务器 local 当前环境， remote远程, 仅当target使用remote有效
+  dns: local
+  # 默认环境，local 当前环境, remote 远程, deny 禁止
+  # auto根据dial选择，local dial失败则remote
+  target: auto  
+  # tcp 请求环境，local 当前环境, remote 远程, deny 禁止  
+  tcpTarget: remote
+  # 默认域名比对方案,contain 包含,equal 完全相等, preg 正则
+  match: equal
+  # 全局代理服务器, 优先级低于启动传参
+  proxy:
+
+# 域名，可热加载
 hosts:
   - name: github
     # contain 包含,equal 完全相等, preg 正则
@@ -36,10 +48,6 @@ hosts:
     target: deny
   - name: dev.example.com
     ip: 127.0.0.1
-# anyproxy 和 tunnel通信密钥, 必须16位长度
-#token: anyproxyproxyany
-# 可访问的客户端IP，为空不限制
-#allowIP:
 
 #websocket配置
 websocket:

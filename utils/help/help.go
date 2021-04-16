@@ -8,13 +8,16 @@ import (
 	"time"
 )
 
-//VERSION 版本
-const VERSION = "0.9"
+var (
+	version   string
+	gitHash   string
+	goVersion string
+)
 
 // Usage 帮助
 func Usage() {
 	fmt.Fprintf(os.Stdout, "%s\n\n", versionString("anyproxy"))
-	fmt.Fprintf(os.Stdout, "usage: %s -l listenaddress -p proxies \n", os.Args[0])
+	fmt.Fprintf(os.Stdout, "Usage: %s -l listenaddress -p proxies \n", os.Args[0])
 	fmt.Fprintf(os.Stdout, "       Proxies any tcp port transparently using Linux netfilter\n\n")
 	fmt.Fprintf(os.Stdout, "Mandatory\n")
 	fmt.Fprintf(os.Stdout, "  -l=ADDRPORT      Address and port to listen on (e.g., :3000 or 127.0.0.1:3000)\n")
@@ -57,7 +60,7 @@ func Usage() {
 // TunnelUsage 帮助
 func TunnelUsage() {
 	fmt.Fprintf(os.Stdout, "%s\n\n", versionString("tunneld"))
-	fmt.Fprintf(os.Stdout, "usage: %s -l listenaddress -p proxies \n", os.Args[0])
+	fmt.Fprintf(os.Stdout, "Usage: %s -l listenaddress -p proxies \n", os.Args[0])
 	fmt.Fprintf(os.Stdout, "       Proxies anyproxy reqest\n\n")
 	fmt.Fprintf(os.Stdout, "Mandatory\n")
 	fmt.Fprintf(os.Stdout, "  -l=ADDRPORT      Address and port to listen on (e.g., :3001 or 127.0.0.1:3001)\n")
@@ -77,6 +80,8 @@ func versionString(name string) (v string) {
 	now := time.Now().Unix()
 	buildNum := strings.ToUpper(strconv.FormatInt(now, 36))
 	buildDate := time.Unix(now, 0).Format(time.UnixDate)
-	v = fmt.Sprintf("%s %s (build %v, %v)", name, VERSION, buildNum, buildDate)
+	v = fmt.Sprintf("%s %s (build %v, %v)", name, version, buildNum, buildDate)
+	v += fmt.Sprintf("\nGit Commit Hash: %s", gitHash)
+	v += fmt.Sprintf("\nGoLang Version: %s", goVersion)
 	return
 }

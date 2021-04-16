@@ -41,38 +41,39 @@ type Websocket struct {
 	Subscribe []Subscribe `yaml:"subscribe"` //订阅信息
 }
 
+// Default 域名
+type Default struct {
+	Match     string `yaml:"match"`     //默认域名比对
+	Target    string `yaml:"target"`    //http默认访问策略
+	DNS       string `yaml:"dns"`       //默认的DNS服务器
+	Proxy     string `yaml:"proxy"`     //全局代理服务器
+	TCPTarget string `yaml:"tcpTarget"` //tcp默认访问策略
+}
+
 // Router 配置文件模型
 type Router struct {
 	Listen    string    `yaml:"listen"`    //监听端口
 	Log       Log       `yaml:"log"`       //日志目录
-	Token     string    `yaml:"token"`     //加密值
-	DNS       string    `yaml:"dns"`       //默认的DNS服务器
-	Target    string    `yaml:"target"`    //http默认访问策略
-	TCPTarget string    `yaml:"tcpTarget"` //tcp默认访问策略
-	Match     string    `yaml:"match"`     //默认域名比对
-	Proxy     string    `yaml:"proxy"`     //全局代理服务器
+	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
+	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
+	Default   Default   `yaml:"default"`   //默认配置
 	Hosts     []Host    `yaml:"hosts"`     //域名列表
 	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP
 	Websocket Websocket `yaml:"websocket"` //会话订阅请求信息
 }
 
 // LoadRouterConfig 加载配置
-func LoadRouterConfig(configName string) (cnf Router, err error) {
-	configPath, err := getPath(configName + ".yaml")
-	if err != nil {
-		return cnf, err
-	}
+func LoadRouterConfig(configPath string) (cnf Router, err error) {
 	data, err := ioutil.ReadFile(configPath)
 	if err != nil {
-		return cnf, err
+		return
 	}
-	t := Router{}
-	err = yaml.Unmarshal(data, &t)
-	return t, err
+	err = yaml.Unmarshal(data, &cnf)
+	return
 }
 
 // 获取文件路径
-func getPath(filename string) (string, error) {
+func GetPath(filename string) (string, error) {
 	// 当前登录用户所在目录
 	workPath, err := os.Getwd()
 	if err != nil {
