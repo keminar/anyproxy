@@ -337,10 +337,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			return
 		}
 	} else {
-		if dstIP == "" {
-			err = errors.New("dstIP is empty")
-		} else {
+		if dstIP != "" {
 			err = s.dail(dstIP, dstPort)
+		} else if dstName != "" {
+			err = s.dail(dstName, dstPort)
+		} else {
+			err = errors.New("dstName && dstIP is empty")
 		}
 	}
 	if err != nil {
