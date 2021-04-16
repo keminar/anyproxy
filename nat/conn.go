@@ -89,8 +89,8 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	xtime := time.Now().Unix()
-	if xtime-user.Xtime > 60 {
-		conn.WriteMessage(websocket.TextMessage, []byte("xtime err"))
+	if xtime-user.Xtime > 300 {
+		conn.WriteMessage(websocket.TextMessage, []byte("xtime err, please check local time"))
 		return
 	}
 	if user.User != conf.RouterConfig.Websocket.User {
@@ -125,7 +125,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 
 	remote := getIPAdress(r, []string{"X-Real-IP"})
-	log.Printf("client ip %s connected, total client nums %d\n", remote, clientNum)
+	log.Printf("client email %s ip %s connected, subscribe %v, total client nums %d\n", user.Email, remote, subscribe, clientNum)
 
 	go client.writePump()
 	go client.serverReadPump()

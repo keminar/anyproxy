@@ -53,6 +53,8 @@ websocket:
   user:
   # 密码
   pass:
+  # Email用于定位用户
+  email:
   # 订阅头部信息
   subscribe:
     - key:

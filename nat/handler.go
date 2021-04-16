@@ -27,6 +27,8 @@ var ClientHub *Hub
 // LocalBridge 客户端的ws与http关系
 var LocalBridge *BridgeHub
 
+var tempDelay time.Duration
+
 // ConnectServer 连接到websocket服务
 func ConnectServer(addr *string) {
 	interruptClose = false
@@ -81,12 +83,22 @@ func connect(addr *string, interrupt chan os.Signal) {
 	defer c.Close()
 
 	w := newClientHandler(c)
-	err = w.auth(conf.RouterConfig.Websocket.User, conf.RouterConfig.Websocket.Pass)
+	err = w.auth(conf.RouterConfig.Websocket.User, conf.RouterConfig.Websocket.Pass, conf.RouterConfig.Websocket.Email)
 	if err != nil {
 		log.Println("auth:", err)
-		time.Sleep(time.Duration(3) * time.Second)
+
+		if tempDelay == 0 {
+			tempDelay = 3 * time.Second
+		} else {
+			tempDelay *= 2
+		}
+		if max := 1 * time.Minute; tempDelay > max {
+			tempDelay = max
+		}
+		time.Sleep(tempDelay)
 		return
 	}
+	tempDelay = 0
 	err = w.subscribe(conf.RouterConfig.Websocket.Subscribe)
 	if err != nil {
 		log.Println("subscribe:", err)
@@ -142,13 +154,19 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 }
 
 // auth 认证
-func (h *ClientHandler) auth(user string, pass string) error {
+func (h *ClientHandler) auth(user string, pass string, email string) error {
+	if user == "" {
+		return errors.New("user is empty")
+	}
+	if email == "" {
+		return errors.New("email is emtpy")
+	}
 	xtime := time.Now().Unix()
 	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user, pass, xtime))
 	if err != nil {
 		return err
 	}
-	msg := AuthMessage{User: user, Token: token, Xtime: xtime}
+	msg := AuthMessage{User: user, Token: token, Xtime: xtime, Email: email}
 	return h.ask(&msg)
 }
 

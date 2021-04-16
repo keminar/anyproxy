@@ -37,6 +37,7 @@ type Websocket struct {
 	Host      string      `yaml:"host"`      //connect的域名
 	User      string      `yaml:"user"`      //认证用户
 	Pass      string      `yaml:"pass"`      //密码
+	Email     string      `yaml:"email"`     //邮箱
 	Subscribe []Subscribe `yaml:"subscribe"` //订阅信息
 }
 

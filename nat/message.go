@@ -17,6 +17,7 @@ const SEND_CHAN_LEN = 200
 // AuthMessage 认证
 type AuthMessage struct {
 	User  string
+	Email string
 	Token string
 	Xtime int64
 }

@@ -169,13 +169,13 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~修复iptables转发后百度贴吧无法访问的问题~~
 * ~~支持windows平台使用~~
 * ~~通过websocket实现内网穿透(必须为http的非CONNECT请求)~~
+* ~~订阅增加邮箱标识，用于辨别在线用户~~
 * TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
 * TCP 转发的mysql的连接请求会一直卡住
 * 与Tunnel的多账户认证，账户可设置有效期
 * HTTP/1.1 keep-alive后端也能复用tcp
 * 启用ws-listen后的平滑重启问题
 * 监听配置文件变化重新加载路由
-* 订阅增加用户名标识，用于辨别在线用户
 
 # 感谢
 
