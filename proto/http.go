@@ -12,6 +12,7 @@ import (
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
+	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto/http"
 	"github.com/keminar/anyproxy/proto/text"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -258,6 +259,29 @@ func (that *httpStream) badRequest(err error) {
 }
 
 func (that *httpStream) response() error {
+	specialHeader := "Anyproxy-Action"
+	if config.DebugLevel >= config.LevelDebug {
+		log.Println(trace.ID(that.req.ID), "nat server status:", nat.Eable(), ",special header:", that.Header.Get(specialHeader))
+	}
+	if that.Method != "CONNECT" && nat.Eable() { //CONNECT 请求不支持ws转发
+		if that.Header.Get(specialHeader) == "websocket" {
+			that.Header.Del(specialHeader)
+			tunnel := newWsTunnel(that.req, that.Header)
+			if tunnel.getTarget(that.req.DstName) {
+				// 先将请求头部发出
+				tunnel.buffer.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
+				that.Header.Write(tunnel.buffer)
+				tunnel.buffer.Write([]byte("\r\n"))
+				// 多读取的body部分
+				tunnel.buffer.Write(that.BodyBuf)
+				ok := tunnel.transfer()
+				if ok == true {
+					return nil
+				}
+				// 请求不成，则走普通转发
+			}
+		}
+	}
 	tunnel := newTunnel(that.req)
 	if ip, ok := tunnel.isAllowed(); !ok {
 		err := errors.New(ip + " is not allowed")

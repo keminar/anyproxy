@@ -67,7 +67,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 		nr, er := src.Read(buf)
 		if nr > 0 {
 			// 如果为HTTP/1.1的Keep-alive情况下
-			if srcname == "client" && s.clientUnRead >= 0 {
+			if srcname == "request" && s.clientUnRead >= 0 {
 				// 之前已读完，说明要建新链接
 				if s.clientUnRead == 0 {
 					// 关闭与旧的服务器的连接的写
@@ -102,7 +102,6 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 			}
 		}
 		if er != nil {
-
 			if er != io.EOF {
 				err = er
 			} else {
@@ -115,12 +114,16 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 						break
 					} else if s.curState != stateClosed {
 						// 如果非客户端导致的服务端关闭，则关闭客户端读
-						dst.(*net.TCPConn).CloseRead()
+						// Notice: 如果只是CloseRead(),当在windows上执行时，且是做为订阅端从服务器收到请求再转到charles
+						//         等服务时,当请求的地址返回足够长的内容时会触发卡住问题。
+						//         流程如 curl -> anyproxy(server) -> ws -> anyproxy(windows) -> charles
+						//         用Close()可以解决卡住，不过客户端会收到use of closed network connection的错误提醒
+						dst.(*net.TCPConn).Close()
 					}
 				}
 			}
 
-			if srcname == "client" {
+			if srcname == "request" {
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
 				s.conn.CloseWrite()
 				s.curState = stateClosed
@@ -138,29 +141,32 @@ func (s *tunnel) transfer(clientUnRead int) {
 	}
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
-	done := make(chan int, 1)
+	done := make(chan struct{})
 
 	//发送请求
 	go func() {
 		defer func() {
-			done <- 1
 			close(done)
 		}()
 		//不能和外层共用err
 		var err error
-		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "client")
-		s.logCopyErr("client->server", err)
-		log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
+		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "request")
+		s.logCopyErr("request->server", err)
+		if config.DebugLevel >= config.LevelDebug {
+			log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
+		}
 	}()
 
 	var err error
 	//取返回结果
 	s.writeSize, err = s.copyBuffer(s.req.conn, tcp.NewReader(s.conn), "server")
-	s.logCopyErr("server->client", err)
+	s.logCopyErr("server->request", err)
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
+	if config.DebugLevel >= config.LevelDebug {
+		log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
+	}
 }
 
 func (s *tunnel) logCopyErr(name string, err error) {
@@ -212,9 +218,9 @@ func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
 }
 
 // 查询配置
-func (s *tunnel) findHost(dstName, dstIP string) conf.Host {
+func findHost(dstName, dstIP string) conf.Host {
 	for _, h := range conf.RouterConfig.Hosts {
-		confMatch := getString(h.Match, conf.RouterConfig.Match, "equal")
+		confMatch := getString(h.Match, conf.RouterConfig.Default.Match, "equal")
 		switch confMatch {
 		case "equal":
 			if h.Name == dstName || h.Name == dstIP {
@@ -249,14 +255,14 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		// http请求,dns解析
 		dstIP, state = s.lookup(dstName, dstIP)
 	}
-	host := s.findHost(dstName, dstIP)
+	host := findHost(dstName, dstIP)
 	var confTarget string
 	if proto == protoTCP {
-		confTarget = getString(host.Target, conf.RouterConfig.TCPTarget, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
 	} else {
-		confTarget = getString(host.Target, conf.RouterConfig.Target, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
 	}
-	confDNS := getString(host.DNS, conf.RouterConfig.DNS, "local")
+	confDNS := getString(host.DNS, conf.RouterConfig.Default.DNS, "local")
 
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
 	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
@@ -275,7 +281,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(host.Proxy)
 		if err != nil {
 			// 如果自定义代理不可用，confTarget走原来逻辑
-			log.Println(trace.ID(s.req.ID), "host.proxy err", host.Proxy, err)
+			log.Println(trace.ID(s.req.ID), "host.proxy err", err)
 		} else {
 			proxyScheme = proxyScheme2
 			proxyServer = proxyServer2
@@ -331,10 +337,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			return
 		}
 	} else {
-		if dstIP == "" {
-			err = errors.New("dstIP is empty")
-		} else {
+		if dstIP != "" {
 			err = s.dail(dstIP, dstPort)
+		} else if dstName != "" {
+			err = s.dail(dstName, dstPort)
+		} else {
+			err = errors.New("dstName && dstIP is empty")
 		}
 	}
 	if err != nil {

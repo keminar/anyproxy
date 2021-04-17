@@ -3,30 +3,46 @@ SCRIPT=$(readlink -f $0)
 ROOT_DIR=$(dirname $SCRIPT)/../
 cd $ROOT_DIR
 
+mkdir -p dist/
 
-# anyproxy
-echo "build anyproxy"
-# for linux
-echo "  for linux"
-go build -o anyproxy  anyproxy.go
+# 路径
+GOCMD="go"
+GITCMD="git"
 
-# for mac
-echo "  for mac"
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o anyproxy-darwin anyproxy.go
+# 目标文件前缀
+BIN="anyproxy"
 
-# for windows
-echo "  for windows"
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o anyproxy-windows.exe anyproxy.go
+# 版本号
+ARCH="amd64"
 
-# for alpine
-echo "  for alpine"
-go build -tags netgo -o anyproxy-alpine  anyproxy.go
+#组装变量
+GOBUILD="${GOCMD} build"
+VER=`${GITCMD} describe --tags $(${GITCMD} rev-list --tags --max-count=1)`
+GOVER=`${GOCMD} version`
+COMMIT_SHA1=`${GITCMD} rev-parse HEAD`
+HELP_PRE="github.com/keminar/anyproxy/utils/help"
+LDFLAGS="-X '${HELP_PRE}.goVersion=${GOVER}'" 
+LDFLAGS="${LDFLAGS} -X '${HELP_PRE}.gitHash=${COMMIT_SHA1}'" 
+LDFLAGS="${LDFLAGS} -X '${HELP_PRE}.version=${VER}'" 
 
-# tunneld
-echo "build tunneld"
-echo "  for linux"
-go build -o tunnel/tunneld tunnel/tunneld.go
+# 编译
+echo "build ..."
+if [ "$1" == "all" ] || [ "$1" == "linux" ] ;then
+    echo "  for linux"
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-${ARCH}-${VER}  anyproxy.go
+fi
 
-# for alpine
-echo "  for alpine"
-go build -tags netgo -o tunnel/tunneld-alpine  tunnel/tunneld.go
+if [ "$1" == "all" ] || [ "$1" == "mac" ] ;then
+    echo "  for mac"
+    CGO_ENABLED=0 GOOS=darwin GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-darwin-${ARCH}-${VER} anyproxy.go
+fi
+
+if [ "$1" == "all" ] || [ "$1" == "windows" ] ;then
+    echo "  for windows"
+    CGO_ENABLED=0 GOOS=windows GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-windows-${ARCH}-${VER}.exe anyproxy.go
+fi
+
+if [ "$1" == "all" ] || [ "$1" == "alpine" ] ;then
+    echo "  for alpine"
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -tags netgo -ldflags "$LDFLAGS" -o dist/${BIN}-alpine-${ARCH}-${VER}  anyproxy.go
+fi

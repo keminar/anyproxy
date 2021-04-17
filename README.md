@@ -2,12 +2,11 @@
 
 anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将请求转到tunneld或SOCKS或charles等代理。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。经过跨平台编译，如果只做网络包的转发可以在windows等平台使用。
 
-[下载Linux包](http://cloudme.io/anyproxy) 、 [下载Mac包](http://cloudme.io/anyproxy-darwin) 、  
-[下载Windows包](http://cloudme.io/anyproxy-windows.exe) 、 [下载alpine包](http://cloudme.io/anyproxy-alpine) 
+[下载Linux包](http://cloudme.io/anyproxy) 、 [下载Mac包](http://cloudme.io/anyproxy-darwin) 、  [下载Windows包](http://cloudme.io/anyproxy-windows.exe)
 
 提醒：请使用浏览器右键的“链接另存为”下载文件
 
-tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用
+tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用。非anyproxy请求一概拒绝处理
 
 # 路由支持
 
@@ -28,13 +27,13 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 
 # or
 +----------+      +----------+      +---------+      +---------+      +----------+
-| Computer | <==> | anyproxy | <==> | tunneld | <==> | tunneld | <==> | Internet |
+| Computer | <==> | anyproxy | <==> | tunneld | <==> | socks5  | <==> | Internet |
 +----------+      +----------+      +---------+      +---------+      +----------+
 
 # or
-+----------+      +----------+      +---------+      +---------+      +----------+
-| Computer | <==> | anyproxy | <==> | tunneld | <==> | socks5  | <==> | Internet |
-+----------+      +----------+      +---------+      +---------+      +----------+
++----------+      +---------+      +-----------+  ws  +-----------+      +---------+
+| Computer | <==> | Nginx A | <==> | anyproxy S| <==> | anyproxy C| <==> | Nginx B |
++----------+      +---------+      +-----------+      +-----------+      +---------+
 ```
 
 # 使用案例
@@ -42,11 +41,13 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 
 `使用iptables将本用户下tcp流转到anyproxy，再进行docker pull操作`
 
-![解决Docker pull问题](examples/docker_pull.png)
-
 > 案例2: 解决相同域名访问网站不同测试环境的问题
 
 `本地通过内网 anyproxy 代理上网，遇到测试服务器域名则跳到外网tunneld转发，网站的nginx根据来源IP进行转发到特定测试环境（有几个环境就需要有几个tunneld服务且IP要不同)`
+
+> 案例3: 解决HTTPS抓包问题
+
+`本地将https请求到服务器，服务器解证书后增加特定头部转到anyproxy websocket服务端，本地另起一个anyproxy的websocket客户端接收并将http请求转发到Charles`
 
 # 源码编译
 
@@ -64,7 +65,7 @@ go env -w GOPROXY=https://goproxy.cn,direct
 ```
 git clone https://github.com/keminar/anyproxy.git
 cd anyproxy
-go build anyproxy.git
+make all
 ```
 
 > 本机启动
@@ -77,10 +78,10 @@ sudo -u anyproxy ./anyproxy
 ./anyproxy -daemon
 
 # 示例3. 启动tunneld
-./tunneld
+./anyproxy -mode tunnel
 
 # 示例4. 启动anyproxy并将请求转给tunneld
-./anyproxy -p '127.0.0.1:3001'
+./anyproxy -p 'tunnel://127.0.0.1:3001'
 
 # 示例5. 启动anyproxy并将请求转给socks5
 ./anyproxy -p 'socks5://127.0.0.1:10000'
@@ -149,7 +150,6 @@ sudo iptables -t nat -D OUTPUT 2
 
 > ~~划线~~ 部分为已实现功能
 * ~~可将请求转发到Tunnel服务~~
-* 根据CIDR做不同出口请求
 * ~~对域名支持加Host绑定~~
 * ~~对域名配置请求出口~~
 * ~~增加全局默认出口配置~~
@@ -161,17 +161,17 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~可以自定义代理server，如果不可用则用全局的~~
 * ~~server多级转发~~
 * ~~加域名黑名单功能，不给请求~~
-* 请求Body内容体记录, 涉及安全，可能不会实现
-* 服务间通信http请求完全加密（header+body)
-* HTTPS的SNI的支持?
 * ~~支持转发到socket5服务~~
-* TCP 增加更多协议解析支持，如rtmp，ftp等
-* 与Tunnel的多账户认证，账户可设置有效期
 * ~~支持HTTP/1.1 keep-alive 一外链接多次请求不同域名~~
-* HTTP/1.1 keep-alive后端也能复用tcp
 * ~~修复iptables转发后百度贴吧无法访问的问题~~
-* 转发的mysql的连接请求会一直卡住
 * ~~支持windows平台使用~~
+* ~~通过websocket实现内网穿透(必须为http的非CONNECT请求)~~
+* ~~订阅增加邮箱标识，用于辨别在线用户~~
+* ~~与Tunnel功能合并，使用mode区分~~
+* ~~启用ws-listen后的平滑重启问题~~
+* ~~监听配置文件变化重新加载路由~~
+* TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
+* TCP 转发的mysql的连接请求会一直卡住
 
 # 感谢
 

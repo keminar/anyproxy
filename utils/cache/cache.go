@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/trace"
 )
 
@@ -54,13 +55,19 @@ func (c *resolveLookupCache) Lookup(logID uint, host string) (string, DialState)
 	hit := c.ips[host]
 	if hit != nil {
 		if hit.expires.After(time.Now()) {
-			log.Println(trace.ID(logID), "lookup(): CACHE_HIT", hit.state)
+			if config.DebugLevel >= config.LevelDebug {
+				log.Println(trace.ID(logID), "lookup(): CACHE_HIT", hit.state)
+			}
 			return hit.ipv4, hit.state
 		}
-		log.Println(trace.ID(logID), "lookup(): CACHE_EXPIRED")
+		if config.DebugLevel >= config.LevelDebug {
+			log.Println(trace.ID(logID), "lookup(): CACHE_EXPIRED")
+		}
 		delete(c.ips, host)
 	} else {
-		log.Println(trace.ID(logID), "lookup(): CACHE_MISS")
+		if config.DebugLevel >= config.LevelDebug {
+			log.Println(trace.ID(logID), "lookup(): CACHE_MISS")
+		}
 	}
 	return "", StateNone
 }
