@@ -6,7 +6,7 @@ log:
 # 监听配置文件变化  
 watcher: true
 # anyproxy 和 tunnel通信密钥, 必须16位长度
-#token: anyproxyproxyany
+token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
 #allowIP:
 

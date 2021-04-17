@@ -2,8 +2,7 @@
 
 anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将请求转到tunneld或SOCKS或charles等代理。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。经过跨平台编译，如果只做网络包的转发可以在windows等平台使用。
 
-[下载Linux包](http://cloudme.io/anyproxy) 、 [下载Mac包](http://cloudme.io/anyproxy-darwin) 、  
-[下载Windows包](http://cloudme.io/anyproxy-windows.exe) 、 [下载alpine包](http://cloudme.io/anyproxy-alpine) 
+[下载Linux包](http://cloudme.io/anyproxy) 、 [下载Mac包](http://cloudme.io/anyproxy-darwin) 、  [下载Windows包](http://cloudme.io/anyproxy-windows.exe)
 
 提醒：请使用浏览器右键的“链接另存为”下载文件
 
@@ -42,8 +41,6 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 
 `使用iptables将本用户下tcp流转到anyproxy，再进行docker pull操作`
 
-![解决Docker pull问题](examples/docker_pull.png)
-
 > 案例2: 解决相同域名访问网站不同测试环境的问题
 
 `本地通过内网 anyproxy 代理上网，遇到测试服务器域名则跳到外网tunneld转发，网站的nginx根据来源IP进行转发到特定测试环境（有几个环境就需要有几个tunneld服务且IP要不同)`
@@ -68,7 +65,7 @@ go env -w GOPROXY=https://goproxy.cn,direct
 ```
 git clone https://github.com/keminar/anyproxy.git
 cd anyproxy
-go build anyproxy.git
+make all
 ```
 
 > 本机启动
@@ -81,10 +78,10 @@ sudo -u anyproxy ./anyproxy
 ./anyproxy -daemon
 
 # 示例3. 启动tunneld
-./tunneld
+./anyproxy -mode tunnel
 
 # 示例4. 启动anyproxy并将请求转给tunneld
-./anyproxy -p '127.0.0.1:3001'
+./anyproxy -p 'tunnel://127.0.0.1:3001'
 
 # 示例5. 启动anyproxy并将请求转给socks5
 ./anyproxy -p 'socks5://127.0.0.1:10000'
@@ -170,12 +167,11 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~支持windows平台使用~~
 * ~~通过websocket实现内网穿透(必须为http的非CONNECT请求)~~
 * ~~订阅增加邮箱标识，用于辨别在线用户~~
-* TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
-* TCP 转发的mysql的连接请求会一直卡住
-* 与Tunnel的多账户认证，账户可设置有效期
-* HTTP/1.1 keep-alive后端也能复用tcp
+* ~~与Tunnel功能合并，使用mode区分~~
 * ~~启用ws-listen后的平滑重启问题~~
 * ~~监听配置文件变化重新加载路由~~
+* TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
+* TCP 转发的mysql的连接请求会一直卡住
 
 # 感谢
 

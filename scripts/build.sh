@@ -5,38 +5,44 @@ cd $ROOT_DIR
 
 mkdir -p dist/
 
+# 路径
+GOCMD="go"
+GITCMD="git"
+
+# 目标文件前缀
+BIN="anyproxy"
+
 # 版本号
-VER=`git describe --tags $(git rev-list --tags --max-count=1)`
-GOVER=`go version`
-COMMIT_SHA1=`git rev-parse HEAD`
+ARCH="amd64"
+
+#组装变量
+GOBUILD="${GOCMD} build"
+VER=`${GITCMD} describe --tags $(${GITCMD} rev-list --tags --max-count=1)`
+GOVER=`${GOCMD} version`
+COMMIT_SHA1=`${GITCMD} rev-parse HEAD`
 HELP_PRE="github.com/keminar/anyproxy/utils/help"
 LDFLAGS="-X '${HELP_PRE}.goVersion=${GOVER}'" 
 LDFLAGS="${LDFLAGS} -X '${HELP_PRE}.gitHash=${COMMIT_SHA1}'" 
 LDFLAGS="${LDFLAGS} -X '${HELP_PRE}.version=${VER}'" 
 
-# anyproxy
-echo "build anyproxy"
-# for linux
-echo "  for linux"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/anyproxy-${VER}  anyproxy.go
+# 编译
+echo "build ..."
+if [ "$1" == "all" ] || [ "$1" == "linux" ] ;then
+    echo "  for linux"
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-${ARCH}-${VER}  anyproxy.go
+fi
 
-# for mac
-echo "  for mac"
-CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/anyproxy-darwin-${VER} anyproxy.go
+if [ "$1" == "all" ] || [ "$1" == "mac" ] ;then
+    echo "  for mac"
+    CGO_ENABLED=0 GOOS=darwin GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-darwin-${ARCH}-${VER} anyproxy.go
+fi
 
-# for windows
-echo "  for windows"
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/anyproxy-windows-${VER}.exe anyproxy.go
+if [ "$1" == "all" ] || [ "$1" == "windows" ] ;then
+    echo "  for windows"
+    CGO_ENABLED=0 GOOS=windows GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-windows-${ARCH}-${VER}.exe anyproxy.go
+fi
 
-# for alpine
-echo "  for alpine"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -ldflags "$LDFLAGS" -o dist/anyproxy-alpine-${VER}  anyproxy.go
-
-# tunneld
-echo "build tunneld"
-echo "  for linux"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o dist/tunneld-${VER} tunnel/tunneld.go
-
-# for alpine
-echo "  for alpine"
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags netgo -ldflags "$LDFLAGS" -o dist/tunneld-alpine-${VER}  tunnel/tunneld.go
+if [ "$1" == "all" ] || [ "$1" == "alpine" ] ;then
+    echo "  for alpine"
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -tags netgo -ldflags "$LDFLAGS" -o dist/${BIN}-alpine-${ARCH}-${VER}  anyproxy.go
+fi

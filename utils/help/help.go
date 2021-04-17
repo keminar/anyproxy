@@ -28,6 +28,7 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  -ws-listen       Websocket address and port to listen on\n")
 	fmt.Fprintf(os.Stdout, "  -ws-connect      Websocket Address and port to connect\n")
 	fmt.Fprintf(os.Stdout, "  -daemon          Run as a Unix daemon\n")
+	fmt.Fprintf(os.Stdout, "  -mode            Run mode(proxy, tunnel). proxy mode default\n")
 	fmt.Fprintf(os.Stdout, "  -debug           Debug mode (0, 1, 2, 3)\n")
 	fmt.Fprintf(os.Stdout, "  -pprof           Pprof port, disable if empty\n")
 	fmt.Fprintf(os.Stdout, "  -h               This usage message\n\n")
@@ -52,25 +53,6 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_syncookies = 1\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_wmem = 4096 65536 16777216\n")
 	fmt.Fprintf(os.Stdout, "  net.ipv4.tcp_congestion_control = cubic\n\n")
-
-	fmt.Fprintf(os.Stdout, "Report bugs to https://github.com/keminar/anyproxy or <linuxphp@126.com>.\n")
-	fmt.Fprintf(os.Stdout, "Thanks to https://github.com/ryanchapman/go-any-proxy.git\n")
-}
-
-// TunnelUsage 帮助
-func TunnelUsage() {
-	fmt.Fprintf(os.Stdout, "%s\n\n", versionString("tunneld"))
-	fmt.Fprintf(os.Stdout, "Usage: %s -l listenaddress -p proxies \n", os.Args[0])
-	fmt.Fprintf(os.Stdout, "       Proxies anyproxy reqest\n\n")
-	fmt.Fprintf(os.Stdout, "Mandatory\n")
-	fmt.Fprintf(os.Stdout, "  -l=ADDRPORT      Address and port to listen on (e.g., :3001 or 127.0.0.1:3001)\n")
-	fmt.Fprintf(os.Stdout, "Optional\n")
-	fmt.Fprintf(os.Stdout, "  -p=PROXIES       Address and ports of upstream proxy servers to use\n")
-	fmt.Fprintf(os.Stdout, "                   (e.g., 10.1.1.1:80 will use http proxy, socks5://10.2.2.2:3128 use socks5 proxy,\n")
-	fmt.Fprintf(os.Stdout, "                   tunnel://10.2.2.2:3001 use tunnel proxy)\n")
-	fmt.Fprintf(os.Stdout, "  -daemon          Run as a Unix daemon\n")
-	fmt.Fprintf(os.Stdout, "  -debug           Debug mode (0, 1, 2, 3)\n")
-	fmt.Fprintf(os.Stdout, "  -h               This usage message\n\n")
 
 	fmt.Fprintf(os.Stdout, "Report bugs to https://github.com/keminar/anyproxy or <linuxphp@126.com>.\n")
 	fmt.Fprintf(os.Stdout, "Thanks to https://github.com/ryanchapman/go-any-proxy.git\n")
