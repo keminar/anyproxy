@@ -68,13 +68,18 @@ func NewServer(addr *string) {
 
 	log.Println(fmt.Sprintf("Listening for websocket connections on %s", *addr))
 
+	i := 0
 	for {
 		// 副服务，出错不退出并定时重试。方便主服务做平滑重启
 		err := http.ListenAndServe(*addr, nil)
 		if err != nil {
 			log.Println("ListenAndServe: ", err)
 		}
+		if i > 1000 {
+			break
+		}
 		time.Sleep(10 * time.Second)
+		i++
 	}
 }
 

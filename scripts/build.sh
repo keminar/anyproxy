@@ -6,7 +6,7 @@ cd $ROOT_DIR
 mkdir -p dist/
 
 # 版本号
-VER="1.0"
+VER=`git describe --tags $(git rev-list --tags --max-count=1)`
 GOVER=`go version`
 COMMIT_SHA1=`git rev-parse HEAD`
 HELP_PRE="github.com/keminar/anyproxy/utils/help"
