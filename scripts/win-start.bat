@@ -1,0 +1,1 @@
+cmd /k "anyproxy-windows-amd64-v1.0.exe -c router.yaml"
