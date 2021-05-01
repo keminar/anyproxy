@@ -44,11 +44,11 @@ func (that *tcpStream) response() error {
 	var err error
 	var newTCPConn *net.TCPConn
 	that.req.DstIP, that.req.DstPort, newTCPConn, err = GetOriginalDstAddr(that.req.conn)
-	defer newTCPConn.Close()
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "GetOriginalDstAddr err", err.Error())
 		return err
 	}
+	defer newTCPConn.Close()
 
 	that.showIP("TCP")
 	err = tunnel.handshake(protoTCP, "", that.req.DstIP, uint16(that.req.DstPort))
