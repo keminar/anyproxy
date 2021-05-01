@@ -11,8 +11,13 @@ import (
 var RouterConfig *Router
 
 // LoadAllConfig 加载顺序要求，不写成init
-func LoadAllConfig() {
-	filePath, err := GetPath("router.yaml")
+func LoadAllConfig(filePath string) {
+	var err error
+	if filePath == "" {
+		filePath, err = GetPath("router.yaml")
+	} else if !fileExists(filePath) {
+		filePath, err = GetPath(filePath)
+	}
 	if err != nil {
 		log.Println(fmt.Sprintf("config file %s path err:%s", "router", err.Error()))
 		return
