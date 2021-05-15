@@ -61,13 +61,23 @@ func main() {
 
 	config.SetDebugLevel(gDebug)
 	conf.LoadAllConfig(gConfigFile)
+
 	// 检查配置是否存在
 	if conf.RouterConfig == nil {
+		fmt.Println(gConfigFile + " not found")
+		time.Sleep(60 * time.Second)
 		os.Exit(2)
 	}
 
 	cmdName := "anyproxy"
-	logDir := config.IfEmptyThen(conf.RouterConfig.Log.Dir, "./logs/", "")
+	defLogDir := fmt.Sprintf("%s%s%s%s", conf.AppPath, string(os.PathSeparator), "logs", string(os.PathSeparator))
+	logDir := config.IfEmptyThen(conf.RouterConfig.Log.Dir, defLogDir, "")
+	if _, err := os.Stat(logDir); err != nil {
+		fmt.Println(err)
+		time.Sleep(60 * time.Second)
+		os.Exit(2)
+	}
+
 	envRunMode := fmt.Sprintf("%s_run_mode", cmdName)
 	fd := logging.ErrlogFd(logDir, cmdName)
 	// 是否后台运行
@@ -116,7 +126,6 @@ func main() {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
 		go nat.ConnectServer(&gWebsocketConn)
 	}
-
 	// 运行模式
 	if gMode == "tunnel" {
 		server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
