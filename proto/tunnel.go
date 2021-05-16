@@ -30,6 +30,7 @@ const (
 
 const protoTCP = "tcp"
 const protoHTTP = "http"
+const protoHTTPS = "https"
 
 // 转发实体
 type tunnel struct {
@@ -330,7 +331,11 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		case "tunnel":
 			err = s.httpConnect(target, proxyServer, proxyPort, true)
 		case "http":
-			err = s.httpConnect(target, proxyServer, proxyPort, false)
+			if proto == protoHTTP { //可避免转发到charles显示2次域名，且部分电脑请求出错
+				err = s.dail(proxyServer, proxyPort)
+			} else {
+				err = s.httpConnect(target, proxyServer, proxyPort, false)
+			}
 		default:
 			log.Println(trace.ID(s.req.ID), "proxy scheme", proxyScheme, "is error")
 			err = fmt.Errorf("%s is error", proxyScheme)

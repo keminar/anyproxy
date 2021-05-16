@@ -296,7 +296,7 @@ func (that *httpStream) response() error {
 		}
 
 		that.showIP("CONNECT")
-		err = tunnel.handshake(protoHTTP, that.req.DstName, "", that.req.DstPort)
+		err = tunnel.handshake(protoHTTPS, that.req.DstName, "", that.req.DstPort)
 		if err != nil {
 			log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 			return err

@@ -93,7 +93,7 @@ func main() {
 		writer = io.Writer(os.Stdout)
 	}
 
-	logging.SetDefaultLogger(logDir, cmdName, true, 3, writer)
+	logging.SetDefaultLogger(logDir, fmt.Sprintf("%s.%d", cmdName, config.ListenPort), true, 3, writer)
 	// 设置代理
 	gProxyServerSpec = config.IfEmptyThen(gProxyServerSpec, conf.RouterConfig.Default.Proxy, "")
 	config.SetProxyServer(gProxyServerSpec)
