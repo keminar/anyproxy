@@ -323,17 +323,20 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			err = errors.New("target host is empty")
 			return
 		}
-		log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
 
 		switch proxyScheme {
 		case "socks5":
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
 			err = s.socks5(target, proxyServer, proxyPort)
 		case "tunnel":
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
 			err = s.httpConnect(target, proxyServer, proxyPort, true)
 		case "http":
 			if proto == protoHTTP { //可避免转发到charles显示2次域名，且部分电脑请求出错
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d", proxyServer, proxyPort))
 				err = s.dail(proxyServer, proxyPort)
 			} else {
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
 				err = s.httpConnect(target, proxyServer, proxyPort, false)
 			}
 		default:
@@ -343,8 +346,10 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		}
 	} else {
 		if dstIP != "" {
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d for %s", dstIP, dstPort, dstName))
 			err = s.dail(dstIP, dstPort)
 		} else if dstName != "" {
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstName, dstPort))
 			err = s.dail(dstName, dstPort)
 		} else {
 			err = errors.New("dstName && dstIP is empty")
@@ -379,7 +384,7 @@ func getProxyServer(proxySpec string) (string, string, uint16, error) {
 			proxyServer = tmp[0]
 			proxyPort = uint16(portInt)
 			// 检查是否可连通
-			connTimeout := time.Duration(1) * time.Second
+			connTimeout := time.Duration(100) * time.Millisecond
 			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", proxyServer, proxyPort), connTimeout)
 			if err != nil {
 				return "", "", 0, err
