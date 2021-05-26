@@ -64,7 +64,6 @@ func main() {
 
 	// 检查配置是否存在
 	if conf.RouterConfig == nil {
-		fmt.Println(gConfigFile + " not found")
 		time.Sleep(60 * time.Second)
 		os.Exit(2)
 	}
@@ -73,7 +72,7 @@ func main() {
 	defLogDir := fmt.Sprintf("%s%s%s%s", conf.AppPath, string(os.PathSeparator), "logs", string(os.PathSeparator))
 	logDir := config.IfEmptyThen(conf.RouterConfig.Log.Dir, defLogDir, "")
 	if _, err := os.Stat(logDir); err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		time.Sleep(60 * time.Second)
 		os.Exit(2)
 	}
@@ -94,7 +93,7 @@ func main() {
 		writer = io.Writer(os.Stdout)
 	}
 
-	logging.SetDefaultLogger(logDir, cmdName, true, 3, writer)
+	logging.SetDefaultLogger(logDir, fmt.Sprintf("%s.%d", cmdName, config.ListenPort), true, 3, writer)
 	// 设置代理
 	gProxyServerSpec = config.IfEmptyThen(gProxyServerSpec, conf.RouterConfig.Default.Proxy, "")
 	config.SetProxyServer(gProxyServerSpec)

@@ -3,6 +3,7 @@ package conf
 import (
 	"errors"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -85,6 +86,8 @@ func GetPath(filename string) (string, error) {
 		if !fileExists(configPath) {
 			configPath = filepath.Join(AppSrcPath, "conf", filename)
 			if !fileExists(configPath) {
+				log.Println("workPath:", workPath)
+				log.Println("appPath:", AppPath)
 				return "", errors.New("conf/" + filename + " not found")
 			}
 		}
