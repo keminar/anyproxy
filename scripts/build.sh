@@ -29,20 +29,20 @@ LDFLAGS="${LDFLAGS} -X '${HELP_PRE}.version=${VER}'"
 echo "build ..."
 if [ "$1" == "all" ] || [ "$1" == "linux" ] ;then
     echo "  for linux"
-    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-${ARCH}-${VER}  anyproxy.go
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-${ARCH}-${VER}  anyproxy.go
 fi
 
 if [ "$1" == "all" ] || [ "$1" == "mac" ] ;then
     echo "  for mac"
-    CGO_ENABLED=0 GOOS=darwin GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-darwin-${ARCH}-${VER} anyproxy.go
+    CGO_ENABLED=0 GOOS=darwin GOARCH=${ARCH} ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-darwin-${ARCH}-${VER} anyproxy.go
 fi
 
 if [ "$1" == "all" ] || [ "$1" == "windows" ] ;then
     echo "  for windows"
-    CGO_ENABLED=0 GOOS=windows GOARCH=${ARCH} ${GOBUILD} -ldflags "$LDFLAGS" -o dist/${BIN}-windows-${ARCH}-${VER}.exe anyproxy.go
+    CGO_ENABLED=0 GOOS=windows GOARCH=${ARCH} ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-windows-${ARCH}-${VER}.exe anyproxy.go
 fi
 
 if [ "$1" == "all" ] || [ "$1" == "alpine" ] ;then
     echo "  for alpine"
-    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -tags netgo -ldflags "$LDFLAGS" -o dist/${BIN}-alpine-${ARCH}-${VER}  anyproxy.go
+    CGO_ENABLED=0 GOOS=linux GOARCH=${ARCH} ${GOBUILD} -tags netgo -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-alpine-${ARCH}-${VER}  anyproxy.go
 fi
