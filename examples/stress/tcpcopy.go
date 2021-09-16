@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/keminar/anyproxy/proto/tcp"
@@ -20,6 +21,13 @@ import (
 var listen = flag.String("listen", ":6000", "本地监听端口")
 var server = flag.String("server", ":8000", "目标服务器")
 var num = flag.Int("num", 1, "压力测试数")
+var debug = flag.Int("debug", 0, "调试日志级别")
+
+const (
+	OUT_NONE = iota
+	OUT_INFO
+	OUT_DEBUG
+)
 
 // tcp 压力测试
 func main() {
@@ -62,6 +70,9 @@ func accept() (err error) {
 }
 
 func conn(rwc *net.TCPConn) {
+	if *debug >= OUT_INFO {
+		log.Println("accecpt connection")
+	}
 	connTimeout := time.Duration(5) * time.Second
 	tunnel := newTunnel(rwc)
 	for i := 0; i < *num; i++ {
@@ -131,34 +142,52 @@ func (s *tunnel) transfer() {
 		var err error
 		s.readSize, err = s.copyBuffer(s.clientReader, "request")
 		s.logCopyErr("request->server", err)
-		log.Println("request body size", s.readSize)
+		if *debug >= OUT_INFO {
+			log.Println("request body size", s.readSize)
+		}
 	}()
 
+	// 加锁防止顺序错乱
+	var wg sync.WaitGroup
+	wg.Add(len(s.targets))
 	go func() { // 丢弃其它服务器返回的内容
 		size := 4 * 1024
 		for i, t := range s.targets {
 			if i > 0 {
-				go func(i int) {
+				go func(i int, t target) {
+					defer func() {
+						wg.Done()
+					}()
 					buf := make([]byte, size)
+					var c int64
+					c = 0
 					for {
-						_, er := t.reader.Read(buf)
+						nr, er := t.reader.Read(buf)
+						if nr > 0 {
+							c += int64(nr)
+						}
 						if er != nil {
-							log.Println("reader closed", i)
+							if *debug >= OUT_INFO {
+								s.logReaderClosed("reader closed", i, c, er)
+							}
 							return
 						}
 					}
-				}(i)
+				}(i, t)
+			} else {
+				wg.Done()
 			}
 		}
 	}()
+
 	var err error
 	//取返回结果
 	s.writeSize, err = s.copyBuffer(s.targets[0].reader, "server")
-	s.logCopyErr("server->request", err)
 
+	wg.Wait()
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	log.Println("transfer finished, response size", s.writeSize)
+	s.logReaderClosed("reader closed", 0, s.writeSize, err)
 }
 
 // copyBuffer 传输数据
@@ -175,13 +204,24 @@ func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, err
 			var ew error
 			if srcname == "request" {
 				nw, ew = s.targets[0].conn.Write(buf[0:nr])
+				if *debug >= OUT_DEBUG {
+					s.logReaderClosed("real request", 0, int64(nw), ew)
+				}
+				// 加锁防止顺序错乱
+				var wg sync.WaitGroup
+				wg.Add(len(s.targets))
 				go func() { //同步发到多个连接
 					for tk, tv := range s.targets {
 						if tk > 0 {
-							tv.conn.Write(buf[0:nr])
+							nx, ex := tv.conn.Write(buf[0:nr])
+							if *debug >= OUT_DEBUG {
+								s.logReaderClosed("copy request", tk, int64(nx), ex)
+							}
 						}
+						wg.Done()
 					}
 				}()
+				wg.Wait()
 			} else {
 				nw, ew = s.clientConn.Write(buf[0:nr])
 			}
@@ -227,9 +267,19 @@ func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, err
 	return written, err
 }
 
+// 错误日志
 func (s *tunnel) logCopyErr(name string, err error) {
-	if err == nil {
+	if err == nil || err == io.EOF {
 		return
 	}
 	log.Println(name, err.Error())
+}
+
+// 读取字节日志
+func (s *tunnel) logReaderClosed(msg string, i int, c int64, err error) {
+	if err != nil && err != io.EOF {
+		log.Println(msg, i, "size", c, "error", err.Error())
+	} else {
+		log.Println(msg, i, "size", c)
+	}
 }
