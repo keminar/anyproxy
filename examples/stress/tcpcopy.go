@@ -45,7 +45,9 @@ func main() {
 	fmt.Println("压测目标", *server)
 	fmt.Println("压测连接数", *num)
 	fmt.Println("防看门狗", *ignore)
-	fmt.Println("程序panic长度", *panicLen)
+	if *panicLen > 0 {
+		fmt.Println("程序panic长度", *panicLen)
+	}
 
 	err := accept()
 	fmt.Println(err)
