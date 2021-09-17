@@ -23,6 +23,7 @@ var listen = flag.String("listen", ":6000", "本地监听端口")
 var server = flag.String("server", ":8000", "目标服务器")
 var num = flag.Int("num", 1, "压力测试数")
 var mustLen = flag.Int("mustLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时输出")
+var panicLen = flag.Int("panicLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时panic")
 var ignore = flag.Bool("ignoreDog", false, "忽略127.0.0.1来的请求，防止看门狗的请求被复制")
 var debug = flag.Int("debug", 0, "调试日志级别")
 
@@ -187,14 +188,16 @@ func (s *tunnel) transfer() {
 						lastlast = last
 						nr, er := t.reader.Read(buf)
 						if nr > 0 {
-							if *mustLen > 0 {
+							if *mustLen > 0 || *panicLen > 0 {
 								last = string(buf[0:nr])
 							}
 							c += int64(nr)
 						}
 						if er != nil {
 							if *debug >= OUT_INFO {
-								if *mustLen > 0 && c != int64(*mustLen) { //不为指定大小的结果，输出上一次的值
+								if *panicLen > 0 && c != int64(*mustLen) {
+									panic("reader panic:" + lastlast + string(buf[0:nr]))
+								} else if *mustLen > 0 && c != int64(*mustLen) { //不为指定大小的结果，输出上一次的值
 									fmt.Println("reader", i, "#lastlast#", lastlast, "#this#", string(buf[0:nr]))
 								}
 								s.logReaderClosed("reader closed", i, c, er)
