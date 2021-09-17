@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,6 +64,15 @@ func accept() (err error) {
 		var rw *net.TCPConn
 		rw, err = ln.AcceptTCP()
 		if err != nil {
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				return
+			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				tempDelay := 5 * time.Millisecond
+				log.Printf("Accept error: %v; retrying in %v\n", err, tempDelay)
+				time.Sleep(tempDelay)
+				continue
+			}
 			return
 		}
 		go conn(rw)
@@ -73,14 +83,17 @@ func conn(rwc *net.TCPConn) {
 	if *debug >= OUT_INFO {
 		log.Println("accecpt connection")
 	}
+
+	defer func() {
+		rwc.Close()
+	}()
 	connTimeout := time.Duration(5) * time.Second
 	tunnel := newTunnel(rwc)
 	for i := 0; i < *num; i++ {
 		var conn net.Conn
 		conn, err := net.DialTimeout("tcp", *server, connTimeout)
 		if err != nil {
-			fmt.Println(err)
-			rwc.Close()
+			log.Println("connect", i, err)
 			return
 		}
 		tunnel.addTarget(conn.(*net.TCPConn))
