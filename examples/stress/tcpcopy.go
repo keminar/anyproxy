@@ -22,6 +22,8 @@ import (
 var listen = flag.String("listen", ":6000", "本地监听端口")
 var server = flag.String("server", ":8000", "目标服务器")
 var num = flag.Int("num", 1, "压力测试数")
+var mustLen = flag.Int("mustLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时输出")
+var ignore = flag.Bool("ignoreDog", false, "忽略127.0.0.1来的请求，防止看门狗的请求被复制")
 var debug = flag.Int("debug", 0, "调试日志级别")
 
 const (
@@ -74,6 +76,11 @@ func accept() (err error) {
 				continue
 			}
 			return
+		}
+		// 忽略看门狗程序搔扰
+		if *ignore && strings.Contains(rw.RemoteAddr().String(), "127.0.0.1:") {
+			rw.Close()
+			continue
 		}
 		go conn(rw)
 	}
@@ -173,14 +180,23 @@ func (s *tunnel) transfer() {
 					}()
 					buf := make([]byte, size)
 					var c int64
+					var last string
 					c = 0
 					for {
+						var lastlast string
+						lastlast = last
 						nr, er := t.reader.Read(buf)
 						if nr > 0 {
+							if *mustLen > 0 {
+								last = string(buf[0:nr])
+							}
 							c += int64(nr)
 						}
 						if er != nil {
 							if *debug >= OUT_INFO {
+								if *mustLen > 0 && c != int64(*mustLen) { //不为指定大小的结果，输出上一次的值
+									fmt.Println("reader", i, "#lastlast#", lastlast, "#this#", string(buf[0:nr]))
+								}
 								s.logReaderClosed("reader closed", i, c, er)
 							}
 							return
