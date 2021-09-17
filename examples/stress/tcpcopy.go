@@ -44,6 +44,8 @@ func main() {
 	fmt.Println("本地监听", *listen)
 	fmt.Println("压测目标", *server)
 	fmt.Println("压测连接数", *num)
+	fmt.Println("防看门狗", *ignore)
+	fmt.Println("程序panic长度", *panicLen)
 
 	err := accept()
 	fmt.Println(err)
@@ -195,8 +197,9 @@ func (s *tunnel) transfer() {
 						}
 						if er != nil {
 							if *debug >= OUT_INFO {
-								if *panicLen > 0 && c != int64(*mustLen) {
-									panic("reader panic:" + lastlast + string(buf[0:nr]))
+								fmt.Println(*panicLen, c)
+								if *panicLen > 0 && c != int64(*panicLen) {
+									panic(lastlast + string(buf[0:nr]))
 								} else if *mustLen > 0 && c != int64(*mustLen) { //不为指定大小的结果，输出上一次的值
 									fmt.Println("reader", i, "#lastlast#", lastlast, "#this#", string(buf[0:nr]))
 								}
