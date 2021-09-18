@@ -165,10 +165,12 @@ func (s *tunnel) transfer() {
 		}()
 		//不能和外层共用err
 		var err error
-		s.readSize, err = s.copyBuffer(s.clientReader, "request")
-		s.logCopyErr("request->server", err)
+		var closeWrite int64
+		s.readSize, closeWrite, err = s.copyBuffer(s.clientReader, "request")
+		s.logCopyErr("read from request", err)
 		if *debug >= OUT_INFO {
-			log.Println("request body size", s.readSize)
+			// fmt方便tee到另一个文件日志查看
+			fmt.Println("request body size", s.readSize, "send closeWrite", closeWrite)
 		}
 	}()
 
@@ -199,7 +201,6 @@ func (s *tunnel) transfer() {
 						}
 						if er != nil {
 							if *debug >= OUT_INFO {
-								fmt.Println(*panicLen, c)
 								if *panicLen > 0 && c != int64(*panicLen) {
 									panic(lastlast + string(buf[0:nr]))
 								} else if *mustLen > 0 && c != int64(*mustLen) { //不为指定大小的结果，输出上一次的值
@@ -219,7 +220,7 @@ func (s *tunnel) transfer() {
 
 	var err error
 	//取返回结果
-	s.writeSize, err = s.copyBuffer(s.targets[0].reader, "server")
+	s.writeSize, _, err = s.copyBuffer(s.targets[0].reader, "server")
 
 	wg.Wait()
 	<-done
@@ -228,7 +229,7 @@ func (s *tunnel) transfer() {
 }
 
 // copyBuffer 传输数据
-func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, err error) {
+func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, closeWrite int64, err error) {
 	//如果设置过大会耗内存高，4k比较合理
 	size := 4 * 1024
 	buf := make([]byte, size)
@@ -266,17 +267,17 @@ func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, err
 				written += int64(nw)
 			}
 			if ew != nil {
-				err = ew
+				err = fmt.Errorf("id#1 %s", ew.Error())
 				break
 			}
 			if nr != nw {
-				err = io.ErrShortWrite
+				err = fmt.Errorf("id#2 %s", io.ErrShortWrite.Error())
 				break
 			}
 		}
 		if er != nil {
 			if er != io.EOF {
-				err = er
+				err = fmt.Errorf("id#3 %s", er.Error())
 			} else {
 				s.logCopyErr(srcname+" read", er)
 				if srcname == "server" {
@@ -292,16 +293,28 @@ func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, err
 			}
 
 			if srcname == "request" {
+				// 客户端已经主动发送了EOF断开, 读取不到内容也算正常
+				if strings.Contains(er.Error(), "use of closed network connection") {
+					err = nil
+				}
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
-				for _, tv := range s.targets {
-					tv.conn.CloseWrite()
+				for tk, tv := range s.targets {
+					cerr := tv.conn.CloseWrite()
+					if cerr != nil { //调试时改为panic也行
+						log.Println("closeWrite", cerr.Error())
+					} else {
+						closeWrite++
+						if *debug >= OUT_DEBUG {
+							log.Println("closeWrite", tk)
+						}
+					}
 				}
 				s.curState = stateClosed
 			}
 			break
 		}
 	}
-	return written, err
+	return written, closeWrite, err
 }
 
 // 错误日志
