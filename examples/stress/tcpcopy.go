@@ -18,8 +18,11 @@ import (
  * 本服务把流量复制N份与目标服务器交互。同时只将一份的返回数据返回给客户端
  * 编译:CGO_ENABLED=0 go build -o /tmp/tcpcopy tcpcopy.go
  *
- * 用curl进行多级HTTP代理测试时为避免http_proxy会有Proxy-Connection: keep-alive
- * 干扰链接断开造成部分请求一直收不到结束标志直到Nginx超时退出，可使用socks5协议测试，示例如下
+ * 注：在测试某Tcp代理程序时 ，部署方式 curl->tcpcopy->某代理->nginx
+ * 用curl进行测试时可能是因为http_proxy会有Proxy-Connection: keep-alive，造成1000个并发总有几个请求会卡住，
+ * 排查tcpcopy有发送closeWrite但是nginx没有收到，所以直到Nginx超时退出则结束。
+ * 后换用socks5协议测试，测试中虽然也有个别请求与结果长度不符，但不会卡住请求。不确认是不是某代理有bug
+ * 示例如下
  * 运行：./tcpcopy -listen 0.0.0.0:10010 -server 127.0.0.1:58813 -num 5000 -debug 1 -ignoreDog
  *      其中58813为另一个程序的socks5代理入口，并且可以访问本地80端口
  * curl --socks5 '127.0.0.1:10010'  http://127.0.0.1/test.html
@@ -181,6 +184,7 @@ func (s *tunnel) transfer() {
 		}
 	}()
 
+	var errLenNum = 0
 	// 加锁防止顺序错乱
 	var wg sync.WaitGroup
 	wg.Add(len(s.targets))
@@ -203,6 +207,7 @@ func (s *tunnel) transfer() {
 						if nr > 0 {
 							if *mustLen > 0 || *panicLen > 0 {
 								last = string(buf[0:nr])
+								//fmt.Println("testlast", last)
 							}
 							c += int64(nr)
 						}
@@ -212,6 +217,7 @@ func (s *tunnel) transfer() {
 									panic(lastlast + string(buf[0:nr]))
 								} else if *mustLen > 0 && c != int64(*mustLen) { //不为指定大小的结果，输出上一次的值
 									fmt.Println("reader", i, "#lastlast#", lastlast, "#this#", string(buf[0:nr]))
+									errLenNum++
 								}
 								s.logReaderClosed("reader closed", i, c, er)
 							}
@@ -228,11 +234,17 @@ func (s *tunnel) transfer() {
 	var err error
 	//取返回结果
 	s.writeSize, _, err = s.copyBuffer(s.targets[0].reader, "server")
-
 	wg.Wait()
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
 	s.logReaderClosed("reader closed", 0, s.writeSize, err)
+
+	if *mustLen > 0 && s.writeSize != int64(*mustLen) {
+		errLenNum++
+	}
+	if errLenNum > 0 {
+		log.Println("read content len error num", errLenNum)
+	}
 }
 
 // copyBuffer 传输数据
