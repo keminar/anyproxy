@@ -14,16 +14,23 @@ import (
 )
 
 /**
- * 用于对tcp服务器的压力测试
- * 外部请求到本服务的监听端口，本服务把流量复制N份与目标服务器交互。同时只将一份的返回数据返回给客户端
+ * 用于对tcp服务器的压力测试, 外部请求到本服务的监听端口
+ * 本服务把流量复制N份与目标服务器交互。同时只将一份的返回数据返回给客户端
+ * 编译:CGO_ENABLED=0 go build -o /tmp/tcpcopy tcpcopy.go
+ *
+ * 用curl进行多级HTTP代理测试时为避免http_proxy会有Proxy-Connection: keep-alive
+ * 干扰链接断开造成部分请求一直收不到结束标志直到Nginx超时退出，可使用socks5协议测试，示例如下
+ * 运行：./tcpcopy -listen 0.0.0.0:10010 -server 127.0.0.1:58813 -num 5000 -debug 1 -ignoreDog
+ *      其中58813为另一个程序的socks5代理入口，并且可以访问本地80端口
+ * curl --socks5 '127.0.0.1:10010'  http://127.0.0.1/test.html
  */
 
 // 定义命令行参数对应的变量
 var listen = flag.String("listen", ":6000", "本地监听端口")
 var server = flag.String("server", ":8000", "目标服务器")
 var num = flag.Int("num", 1, "压力测试数")
-var mustLen = flag.Int("mustLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时输出")
-var panicLen = flag.Int("panicLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时panic")
+var mustLen = flag.Int("mustLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时输出最后一段内容")
+var panicLen = flag.Int("panicLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时显示异常并退出，优先级大于mustLen")
 var ignore = flag.Bool("ignoreDog", false, "忽略127.0.0.1来的请求，防止看门狗的请求被复制")
 var debug = flag.Int("debug", 0, "调试日志级别")
 
@@ -169,7 +176,7 @@ func (s *tunnel) transfer() {
 		s.readSize, closeWrite, err = s.copyBuffer(s.clientReader, "request")
 		s.logCopyErr("read from request", err)
 		if *debug >= OUT_INFO {
-			// fmt方便tee到另一个文件日志查看
+			// 用fmt方便tee到另一个文件日志查看
 			fmt.Println("request body size", s.readSize, "send closeWrite", closeWrite)
 		}
 	}()
@@ -262,6 +269,8 @@ func (s *tunnel) copyBuffer(src *tcp.Reader, srcname string) (written int64, clo
 				wg.Wait()
 			} else {
 				nw, ew = s.clientConn.Write(buf[0:nr])
+				//打印测试服务端返回值
+				//fmt.Println(string(buf[0:nr]))
 			}
 			if nw > 0 {
 				written += int64(nw)
