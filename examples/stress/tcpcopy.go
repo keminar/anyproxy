@@ -32,7 +32,9 @@ import (
 var listen = flag.String("listen", ":6000", "本地监听端口")
 var server = flag.String("server", ":8000", "目标服务器")
 var num = flag.Int("num", 1, "压力测试数")
-var mustLen = flag.Int("mustLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时输出最后一段内容")
+var connTimeout = flag.Int("connTimeout", 5, "连接目标服务器超时")
+var writeTimeout = flag.Int("writeTimeout", 0, "向目标服务器读写超时")
+var mustLen = flag.Int("mustLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时输出最后一段内容, 同时会有一个错误计数器")
 var panicLen = flag.Int("panicLen", 0, "目标服务器返回长度，非此长度的在debug 1以上时显示异常并退出，优先级大于mustLen")
 var ignore = flag.Bool("ignoreDog", false, "忽略127.0.0.1来的请求，防止看门狗的请求被复制")
 var debug = flag.Int("debug", 0, "调试日志级别")
@@ -109,7 +111,7 @@ func conn(rwc *net.TCPConn) {
 	defer func() {
 		rwc.Close()
 	}()
-	connTimeout := time.Duration(5) * time.Second
+	connTimeout := time.Duration(*connTimeout) * time.Second
 	tunnel := newTunnel(rwc)
 	for i := 0; i < *num; i++ {
 		var conn net.Conn
@@ -117,6 +119,9 @@ func conn(rwc *net.TCPConn) {
 		if err != nil {
 			log.Println("connect", i, err)
 			return
+		}
+		if *writeTimeout > 0 {
+			conn.SetDeadline(time.Now().Add(time.Duration(*writeTimeout) * time.Second))
 		}
 		tunnel.addTarget(conn.(*net.TCPConn))
 	}
@@ -220,6 +225,8 @@ func (s *tunnel) transfer() {
 									errLenNum++
 								}
 								s.logReaderClosed("reader closed", i, c, er)
+							} else if *mustLen > 0 && c != int64(*mustLen) {
+								errLenNum++
 							}
 							return
 						}
