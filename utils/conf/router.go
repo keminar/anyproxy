@@ -10,14 +10,20 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+type PortMap struct {
+	From uint16 `yaml:"from"` //原目标地址
+	To   uint16 `yaml:"to"`   //新目标地址
+}
+
 // Host 域名
 type Host struct {
-	Name   string `yaml:"name"`   //域名关键字
-	Match  string `yaml:"match"`  //contain 包含, equal 完全相等, preg 正则
-	Target string `yaml:"target"` //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
-	DNS    string `yaml:"dns"`    //local 当前环境, remote 远程, 仅当target使用remote有效
-	IP     string `yaml:"ip"`     //本地解析ip
-	Proxy  string `yaml:"proxy"`  //指定代理服务器
+	Name   string    `yaml:"name"`   //域名关键字
+	Match  string    `yaml:"match"`  //contain 包含, equal 完全相等, preg 正则
+	Target string    `yaml:"target"` //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
+	DNS    string    `yaml:"dns"`    //local 当前环境, remote 远程, 仅当target使用remote有效
+	IP     string    `yaml:"ip"`     //本地解析ip
+	Port   []PortMap `yaml:"port"`   //目标端口转换
+	Proxy  string    `yaml:"proxy"`  //指定代理服务器
 }
 
 // Log 日志
@@ -51,12 +57,19 @@ type Default struct {
 	TCPTarget string `yaml:"tcpTarget"` //tcp默认访问策略
 }
 
+type TcpCopy struct {
+	Enable bool   `yaml:"enable"` //是否开启
+	IP     string `yaml:"ip"`     //ip
+	Port   uint16 `yaml:"port"`   //新目标地址
+}
+
 // Router 配置文件模型
 type Router struct {
 	Listen    string    `yaml:"listen"`    //监听端口
 	Log       Log       `yaml:"log"`       //日志目录
 	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
 	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
+	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
 	Default   Default   `yaml:"default"`   //默认配置
 	Hosts     []Host    `yaml:"hosts"`     //域名列表
 	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP

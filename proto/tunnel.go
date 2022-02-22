@@ -271,6 +271,14 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		dstIP = host.IP
 	}
 
+	// 检查是否要换端口
+	for _, p := range host.Port {
+		if p.From == dstPort {
+			dstPort = p.To
+			break
+		}
+	}
+
 	if confTarget == "deny" {
 		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
 		return
