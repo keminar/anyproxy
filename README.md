@@ -176,7 +176,7 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~支持proxy时转换端口号~~
 * ~~支持tcpcopy模式，用此转发连mysql~~
 * TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
-* iptables转来的TCP可以转发，但代理设置为socks=却无法转发
+* websocket监听回调的文件上传请求好像会卡住
 
 # 感谢
 
