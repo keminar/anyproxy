@@ -49,6 +49,9 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 
 `本地将https请求到服务器，服务器解证书后增加特定头部转到anyproxy websocket服务端，本地另起一个anyproxy的websocket客户端接收并将http请求转发到Charles`
 
+> 案例4： 解决内网tcp端口给外网访问
+
+`假如本机是192网段，容器内是10网段，在本机启动一个程序监听本机端口同时桥接到容器内的应用的端口，这样就可以通过本机端口访问容器内的tcp服务（配置项是tcpcopy）`
 # 源码编译
 
 > 安装Go环境并设置GOPROXY
@@ -170,8 +173,9 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~与Tunnel功能合并，使用mode区分~~
 * ~~启用ws-listen后的平滑重启问题~~
 * ~~监听配置文件变化重新加载路由~~
+* ~~支持proxy时转换端口号~~
+* ~~支持tcpcopy模式，用此转发连mysql~~
 * TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
-* TCP 转发的mysql的连接请求会一直卡住
 * iptables转来的TCP可以转发，但代理设置为socks=却无法转发
 
 # 感谢

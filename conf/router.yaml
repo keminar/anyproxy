@@ -8,7 +8,15 @@ watcher: true
 # anyproxy 和 tunnel通信密钥, 必须16位长度
 token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
-#allowIP:
+allowIP:
+#  - 172.17.0.12
+
+# 设置此项，进入tcpCopy模式，则配置中的hosts域名代理不再生效
+# tcpcopy模式下allowIP设置有效
+tcpcopy: 
+#  enable: false
+#  ip: 127.0.0.1
+#  port: 3306
 
 # 默认操作，可热加载
 default:
@@ -48,6 +56,9 @@ hosts:
     target: deny
   - name: dev.example.com
     ip: 127.0.0.1
+    port:
+      - from: 80
+        to: 88
 
 #websocket配置
 websocket:

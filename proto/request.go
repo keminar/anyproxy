@@ -55,6 +55,15 @@ func NewRequestWithBuf(ctx context.Context, conn *net.TCPConn, buf []byte) *Requ
 
 // ReadRequest 分析请求内容
 func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
+	//如果启用了tcpcopy 且目标地址也有配置，则进行tcpcopy转发
+	if conf.RouterConfig.TcpCopy.Enable {
+		if conf.RouterConfig.TcpCopy.IP != "" && conf.RouterConfig.TcpCopy.Port > 0 {
+			s := newTCPCopy(that)
+			that.Proto = "tcp"
+			that.Stream = s
+			return s.readRequest(from)
+		}
+	}
 	_, err = that.reader.Peek(1)
 	if err != nil {
 		return false, err
