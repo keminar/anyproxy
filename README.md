@@ -89,6 +89,9 @@ sudo -u anyproxy ./anyproxy
 # 示例5. 启动anyproxy并将请求转给socks5
 ./anyproxy -p 'socks5://127.0.0.1:10000'
 
+# 示例6. 端口转发
+./anyproxy -c conf/tcpcopy.yaml
+
 # 其它帮助
 ./anyproxy -h
 ```
