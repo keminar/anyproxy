@@ -180,6 +180,7 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~支持tcpcopy模式，用此转发连mysql~~
 * TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
 * websocket监听回调的文件上传请求好像会卡住
+* tunel token支持按host配置
 
 # 感谢
 
