@@ -42,7 +42,7 @@ func init() {
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
 	flag.StringVar(&gWebsocketConn, "ws-connect", "", "Websocket Address and port to connect")
 	flag.StringVar(&gMode, "mode", "", "Run mode(proxy, tunnel). proxy mode default")
-	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
+	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2, 3)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
 	flag.BoolVar(&gVersion, "v", false, "Show build version")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
