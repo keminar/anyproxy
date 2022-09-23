@@ -200,8 +200,9 @@ func (srv *Server) ListenAndServe() (err error) {
 		return err
 	}
 
-	if srv.isChild {
-		process, err := os.FindProcess(os.Getppid())
+	ppid := os.Getppid()
+	if srv.isChild && ppid != 1 { //增加一个安全检查
+		process, err := os.FindProcess(ppid)
 		if err != nil {
 			log.Println(os.Getpid(), err)
 			return err
