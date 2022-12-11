@@ -36,7 +36,7 @@ var (
 
 func init() {
 	flag.Usage = help.Usage
-	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
+	flag.StringVar(&gListenAddrPort, "l", "", "listen address of socks5 and http proxy")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")

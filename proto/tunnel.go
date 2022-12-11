@@ -365,7 +365,11 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		}
 	} else {
 		if dstIP != "" {
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d for %s", dstIP, dstPort, dstName))
+			if dstName == "" {
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstIP, dstPort))
+			} else {
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d for %s", dstIP, dstPort, dstName))
+			}
 			err = s.dail(dstIP, dstPort)
 		} else if dstName != "" {
 			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstName, dstPort))

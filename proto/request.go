@@ -70,7 +70,7 @@ func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 	}
 
 	var s stream
-	protos := []string{"http"}
+	protos := []string{"http", "socks5"}
 	for _, v := range protos {
 		switch v {
 		case "http":
@@ -79,6 +79,15 @@ func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 				that.Proto = v
 				break
 			}
+		case "socks5":
+			s = newSocks5Stream(that)
+			if s.validHead() {
+				that.Proto = v
+				break
+			}
+		}
+		if that.Proto != "" {
+			break
 		}
 	}
 	if that.Proto == "" {
