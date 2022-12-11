@@ -153,7 +153,7 @@ func (s *tunnel) transfer(clientUnRead int) {
 		var err error
 		s.readSize, err = s.copyBuffer(s.conn, s.req.reader, "request")
 		s.logCopyErr("request->server", err)
-		if config.DebugLevel >= config.LevelDebug {
+		if config.DebugLevel >= config.LevelLong {
 			log.Println(trace.ID(s.req.ID), "request body size", s.readSize)
 		}
 	}()
@@ -165,7 +165,7 @@ func (s *tunnel) transfer(clientUnRead int) {
 
 	<-done
 	// 不管是不是正常结束，只要server结束了，函数就会返回，然后底层会自动断开与client的连接
-	if config.DebugLevel >= config.LevelDebug {
+	if config.DebugLevel >= config.LevelLong {
 		log.Println(trace.ID(s.req.ID), "transfer finished, response size", s.writeSize)
 	}
 }
@@ -207,7 +207,11 @@ func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
 	if dstName != "" {
 		dstIP, state = cache.ResolveLookup.Lookup(s.req.ID, dstName)
 		if dstIP == "" {
+			s1 := time.Now()
 			upIPs, _ := net.LookupIP(dstName)
+			if time.Since(s1).Seconds() > 1 && config.DebugLevel >= config.LevelLong {
+				log.Println(trace.ID(s.req.ID), "dns look up costtime", time.Since(s1).Seconds())
+			}
 			if len(upIPs) > 0 {
 				dstIP = upIPs[0].String()
 				cache.ResolveLookup.Store(dstName, dstIP, cache.StateNew, time.Duration(10)*time.Minute)
@@ -252,11 +256,9 @@ func getString(val string, def string, def2 string) string {
 // handshake 和server握手
 func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) (err error) {
 	var state cache.DialState
-	if dstName != "" {
-		// http请求,dns解析
-		dstIP, state = s.lookup(dstName, dstIP)
-	}
+	// 先取下配置，再决定要不要走本地dns解析，否则未解析域名DNS解析再超时卡半天，又不会被缓存
 	host := findHost(dstName, dstIP)
+
 	var confTarget string
 	if proto == protoTCP {
 		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
@@ -269,6 +271,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
 	if host.IP != "" {
 		dstIP = host.IP
+	} else if dstName != "" && confDNS != "remote" {
+		// http请求的dns解析
+		dstIP, state = s.lookup(dstName, dstIP)
 	}
 
 	// 检查是否要换端口
@@ -305,12 +310,18 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			if state != cache.StateFail {
 				//local dial成功则返回，走本地网络
 				//auto 只能优化ip ping 不通的情况，能dail通访问不了的需要手动remote
-				err = s.dail(dstIP, dstPort)
+				if dstIP != "" {
+					err = s.dail(dstIP, dstPort)
+				} else if dstName != "" {
+					err = s.dail(dstName, dstPort)
+				}
 				if err == nil {
 					s.curState = stateNew
 					return
 				}
-				cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
+				if dstName != "" && dstIP != "" {
+					cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
+				}
 			}
 			//fail的auto 等于用remote访问，但ip在remote访问可能也是不通的，强制用远程dns
 			//如果又想远程，又想用本地dns请配置中单独指定
@@ -354,7 +365,11 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		}
 	} else {
 		if dstIP != "" {
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d for %s", dstIP, dstPort, dstName))
+			if dstName == "" {
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstIP, dstPort))
+			} else {
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d for %s", dstIP, dstPort, dstName))
+			}
 			err = s.dail(dstIP, dstPort)
 		} else if dstName != "" {
 			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstName, dstPort))

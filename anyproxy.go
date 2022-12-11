@@ -36,13 +36,13 @@ var (
 
 func init() {
 	flag.Usage = help.Usage
-	flag.StringVar(&gListenAddrPort, "l", "", "Address and port to listen on")
+	flag.StringVar(&gListenAddrPort, "l", "", "listen address of socks5 and http proxy")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
 	flag.StringVar(&gWebsocketConn, "ws-connect", "", "Websocket Address and port to connect")
 	flag.StringVar(&gMode, "mode", "", "Run mode(proxy, tunnel). proxy mode default")
-	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2)")
+	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2, 3)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
 	flag.BoolVar(&gVersion, "v", false, "Show build version")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
