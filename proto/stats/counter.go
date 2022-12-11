@@ -2,6 +2,7 @@ package stats
 
 import (
 	"log"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,14 @@ type Counter struct {
 }
 
 func (c *Counter) Add(delta int64) int64 {
+	defer func() {
+		if err := recover(); err != nil {
+			const size = 32 << 10
+			buf := make([]byte, size)
+			buf = buf[:runtime.Stack(buf, false)]
+			log.Printf("panic stats: %v\n%s", err, buf)
+		}
+	}()
 	c.access.Lock()
 	defer c.access.Unlock()
 	tmp := atomic.AddInt64(&c.value, delta)
