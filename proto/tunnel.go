@@ -57,10 +57,11 @@ func init() {
 // 转发实体
 type tunnel struct {
 	req      *Request
-	conn     *net.TCPConn //后端服务
+	conn     *net.TCPConn // 后端服务
+	connAddr string       // 后端地址
 	curState int
 
-	inboundIP string //来源IP
+	inboundIP string // 来源IP
 
 	inbountCounter  *stats.Counter
 	outbountCounter *stats.Counter
@@ -226,27 +227,55 @@ func (s *tunnel) logCopyErr(name string, err error) {
 }
 
 // dail tcp连接
-func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
+func (s *tunnel) dail(network, connAddr string) error {
+	if s.connAddr == connAddr && s.conn != nil {
+		return nil
+	}
 	if config.DebugLevel >= config.LevelLong {
-		log.Printf("%s create a new connection to server %s:%d\n", trace.ID(s.req.ID), dstIP, dstPort)
+		log.Printf("%s create new connection to server %s\n", trace.ID(s.req.ID), connAddr)
 	}
 	connTimeout := time.Duration(5) * time.Second
-	var conn net.Conn
-	if strings.Contains(dstIP, ":") {
-		// tcp6 支持
-		conn, err = net.DialTimeout("tcp6", fmt.Sprintf("[%s]:%d", dstIP, dstPort), connTimeout)
-	} else {
-		conn, err = net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dstIP, dstPort), connTimeout)
-	}
+	conn, err := net.DialTimeout(network, connAddr, connTimeout)
 	if err != nil {
-		return
+		return err
 	}
+	s.connAddr = connAddr
 	s.conn = conn.(*net.TCPConn)
+	return nil
+}
 
-	uplink := fmt.Sprintf("inbound>>>%s>>>%s>>>uplink", s.inboundIP, dstIP)
-	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, dstIP)
+// 注册计数器, 日志地址优先使用域名
+func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
+	// 日志地址优先使用域名
+	var logAddr string
+	if dstName != "" {
+		logAddr = fmt.Sprintf("%s:%d", dstName, dstPort)
+	} else {
+		if strings.Contains(dstIP, ":") {
+			logAddr = fmt.Sprintf("[%s]:%d", dstIP, dstPort)
+		} else {
+			logAddr = fmt.Sprintf("%s:%d", dstIP, dstPort)
+		}
+	}
+	uplink := fmt.Sprintf("inbound>>>%s>>>%s>>>uplink", s.inboundIP, logAddr)
+	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, logAddr)
 	s.inbountCounter = inbound.RegisterCounter(uplink)
 	s.outbountCounter = outbound.RegisterCounter(downlink)
+}
+
+// 连接地址优先使用IP
+func (s *tunnel) buildAddress(dstName, dstIP string, dstPort uint16) (network string, connAddr string) {
+	network = "tcp"
+	if dstIP != "" {
+		if strings.Contains(dstIP, ":") {
+			network = "tcp6"
+			connAddr = fmt.Sprintf("[%s]:%d", dstIP, dstPort)
+		} else {
+			connAddr = fmt.Sprintf("%s:%d", dstIP, dstPort)
+		}
+	} else if dstName != "" {
+		connAddr = fmt.Sprintf("%s:%d", dstName, dstPort)
+	}
 	return
 }
 
@@ -359,14 +388,14 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			if state != cache.StateFail {
 				//local dial成功则返回，走本地网络
 				//auto 只能优化ip ping 不通的情况，能dail通访问不了的需要手动remote
-				if dstIP != "" {
-					err = s.dail(dstIP, dstPort)
-				} else if dstName != "" {
-					err = s.dail(dstName, dstPort)
-				}
-				if err == nil {
-					s.curState = stateNew
-					return
+				//如果最终连的地址是相同的,也会复用
+				network, connAddr := s.buildAddress(dstName, dstIP, dstPort)
+				if connAddr != "" {
+					err = s.dail(network, connAddr)
+					if err == nil {
+						s.curState = stateNew
+						return
+					}
 				}
 				if dstName != "" && dstIP != "" {
 					cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
@@ -378,51 +407,52 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			confDNS = "remote"
 		}
 		// remote 请求
-		var target string
+		var targetAddr string
+		var targetNet string
 		if confDNS == "remote" {
 			if dstName == "" {
 				dstName = dstIP
 			}
-			target = fmt.Sprintf("%s:%d", dstName, dstPort)
+			targetNet, targetAddr = s.buildAddress(dstName, "", dstPort)
 		} else {
-			target = fmt.Sprintf("%s:%d", dstIP, dstPort)
+			targetNet, targetAddr = s.buildAddress("", dstIP, dstPort)
 		}
-		if target[0] == ':' {
+		if targetAddr == "" || targetAddr[0] == ':' {
 			err = errors.New("target host is empty")
 			return
 		}
 
+		network, connAddr := s.buildAddress(proxyServer, "", proxyPort)
+		s.registerCounter(proxyServer, "", proxyPort)
 		switch proxyScheme {
 		case "socks5":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
-			err = s.socks5(target, proxyServer, proxyPort)
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			err = s.socks5(network, connAddr, targetNet, targetAddr)
 		case "tunnel":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
-			err = s.httpConnect(target, proxyServer, proxyPort, true)
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			err = s.httpConnect(network, connAddr, targetAddr, true)
 		case "http":
 			if proto == protoHTTP { //可避免转发到charles显示2次域名，且部分电脑请求出错
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d", proxyServer, proxyPort))
-				err = s.dail(proxyServer, proxyPort)
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s", connAddr))
+				err = s.dail(network, connAddr)
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s:%d for %s", proxyServer, proxyPort, target))
-				err = s.httpConnect(target, proxyServer, proxyPort, false)
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+				err = s.httpConnect(network, connAddr, targetAddr, false)
 			}
 		default:
-			log.Println(trace.ID(s.req.ID), "proxy scheme", proxyScheme, "is error")
-			err = fmt.Errorf("%s is error", proxyScheme)
+			err = fmt.Errorf("proxy scheme %s is error", proxyScheme)
 			return
 		}
 	} else {
-		if dstIP != "" {
+		network, connAddr := s.buildAddress(dstName, dstIP, dstPort)
+		if connAddr != "" {
+			s.registerCounter(dstName, dstIP, dstPort)
 			if dstName == "" {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstIP, dstPort))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s", connAddr))
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d for %s", dstIP, dstPort, dstName))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s", connAddr, dstName))
 			}
-			err = s.dail(dstIP, dstPort)
-		} else if dstName != "" {
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s:%d", dstName, dstPort))
-			err = s.dail(dstName, dstPort)
+			err = s.dail(network, connAddr)
 		} else {
 			err = errors.New("dstName && dstIP is empty")
 		}
@@ -470,17 +500,16 @@ func getProxyServer(proxySpec string) (string, string, uint16, error) {
 }
 
 // socket5代理
-func (s *tunnel) socks5(target string, proxyServer string, proxyPort uint16) (err error) {
-	address := fmt.Sprintf("%s:%d", proxyServer, proxyPort)
+func (s *tunnel) socks5(network, connAddr string, targetNet, targetAddr string) (err error) {
 	var dialProxy proxy.Dialer
-	dialProxy, err = proxy.SOCKS5("tcp", address, nil, proxy.Direct)
+	dialProxy, err = proxy.SOCKS5(network, connAddr, nil, proxy.Direct)
 	if err != nil {
 		log.Println(trace.ID(s.req.ID), "socket5 err", err.Error())
 		return
 	}
 
 	var conn net.Conn
-	conn, err = dialProxy.Dial("tcp", target)
+	conn, err = dialProxy.Dial(targetNet, targetAddr)
 	if err != nil {
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
@@ -490,8 +519,8 @@ func (s *tunnel) socks5(target string, proxyServer string, proxyPort uint16) (er
 }
 
 // http代理
-func (s *tunnel) httpConnect(target string, proxyServer string, proxyPort uint16, encrypt bool) (err error) {
-	err = s.dail(proxyServer, proxyPort)
+func (s *tunnel) httpConnect(network, connAddr string, target string, encrypt bool) (err error) {
+	err = s.dail(network, connAddr)
 	if err != nil {
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return

@@ -35,7 +35,8 @@ func (that *tcpCopy) response() error {
 	that.req.DstIP = conf.RouterConfig.TcpCopy.IP
 	that.req.DstPort = conf.RouterConfig.TcpCopy.Port
 
-	err = tunnel.dail(that.req.DstIP, that.req.DstPort)
+	network, connAddr := tunnel.buildAddress("", that.req.DstIP, that.req.DstPort)
+	err = tunnel.dail(network, connAddr)
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "dail err", err.Error())
 		return err

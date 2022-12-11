@@ -62,7 +62,7 @@ func (that *socks5Stream) response() error {
 	that.showIP()
 	err = tunnel.handshake(protoTCP, that.req.DstName, that.req.DstIP, that.req.DstPort)
 	if err != nil {
-		log.Println(trace.ID(that.req.ID), "dail err", err.Error())
+		log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 		return err
 	}
 
