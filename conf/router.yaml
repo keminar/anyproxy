@@ -50,7 +50,7 @@ hosts:
     dns: remote
   - name: www.baidu.com
     match: equal
-    target: local
+    target: auto
   - name: google
     match: contain
     target: deny
