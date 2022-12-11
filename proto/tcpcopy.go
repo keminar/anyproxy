@@ -35,13 +35,12 @@ func (that *tcpCopy) response() error {
 	that.req.DstIP = conf.RouterConfig.TcpCopy.IP
 	that.req.DstPort = conf.RouterConfig.TcpCopy.Port
 
-	network, connAddr := tunnel.buildAddress("", that.req.DstIP, that.req.DstPort)
+	network, connAddr := tunnel.buildAddress("", that.req.DstIP, that.req.DstPort, true)
 	if connAddr == "" {
 		err = errors.New("target address is empty")
 		return err
 	}
-	tunnel.registerCounter("", that.req.DstIP, that.req.DstPort)
-	err = tunnel.dail(network, connAddr)
+	err = tunnel.dail(network, connAddr, 0)
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "dail err", err.Error())
 		return err
