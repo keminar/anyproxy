@@ -311,11 +311,12 @@ func (that *httpStream) response() error {
 		}
 
 		// 先将请求头部发出
-		tunnel.conn.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
-		that.Header.Write(tunnel.conn)
-		tunnel.conn.Write([]byte("\r\n"))
+		tunnel.Write([]byte(fmt.Sprintf("%s\r\n", that.FirstLine)))
+		that.Header.Write(tunnel)
+		tunnel.Write([]byte("\r\n"))
 		// 多读取的body部分
-		tunnel.conn.Write(that.BodyBuf)
+		tunnel.Write(that.BodyBuf)
+
 		tunnel.transfer(that.clientUnRead)
 	}
 	return nil

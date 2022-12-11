@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/keminar/anyproxy/proto/stats"
+
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/crypto"
 	"github.com/keminar/anyproxy/proto/tcp"
@@ -32,11 +34,36 @@ const protoTCP = "tcp"
 const protoHTTP = "http"
 const protoHTTPS = "https"
 
+// 上行统计
+var inbound *stats.Manager
+
+// 下行统计
+var outbound *stats.Manager
+
+func init() {
+	inbound = stats.NewManager()
+	outbound = stats.NewManager()
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			//log.Println("ticker...")
+			inbound.UnregisterCounter()
+			outbound.UnregisterCounter()
+		}
+	}()
+}
+
 // 转发实体
 type tunnel struct {
 	req      *Request
 	conn     *net.TCPConn //后端服务
 	curState int
+
+	inboundIP string //来源IP
+
+	inbountCounter  *stats.Counter
+	outbountCounter *stats.Counter
 
 	readSize  int64
 	writeSize int64
@@ -51,6 +78,9 @@ func newTunnel(req *Request) *tunnel {
 	s := &tunnel{
 		req: req,
 	}
+
+	ipSplit := strings.Split(req.conn.RemoteAddr().String(), ":")
+	s.inboundIP = ipSplit[0]
 	return s
 }
 
@@ -92,6 +122,11 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
+				if srcname == "request" {
+					s.inbountCounter.Add(int64(nw))
+				} else {
+					s.outbountCounter.Add(int64(nw))
+				}
 			}
 			if ew != nil {
 				err = ew
@@ -170,6 +205,15 @@ func (s *tunnel) transfer(clientUnRead int) {
 	}
 }
 
+// 上行写入
+func (s *tunnel) Write(p []byte) (n int, err error) {
+	n, err = s.conn.Write(p)
+	if s.inbountCounter != nil {
+		s.inbountCounter.Add(int64(n))
+	}
+	return
+}
+
 func (s *tunnel) logCopyErr(name string, err error) {
 	if err == nil {
 		return
@@ -198,6 +242,11 @@ func (s *tunnel) dail(dstIP string, dstPort uint16) (err error) {
 		return
 	}
 	s.conn = conn.(*net.TCPConn)
+
+	uplink := fmt.Sprintf("inbound>>>%s>>>%s>>>uplink", s.inboundIP, dstIP)
+	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, dstIP)
+	s.inbountCounter = inbound.RegisterCounter(uplink)
+	s.outbountCounter = outbound.RegisterCounter(downlink)
 	return
 }
 
@@ -481,12 +530,10 @@ func (s *tunnel) isAllowed() (string, bool) {
 	if len(conf.RouterConfig.AllowIP) == 0 {
 		return "", true
 	}
-	ip := s.req.conn.RemoteAddr().String()
-	ipSplit := strings.Split(ip, ":")
 	for _, p := range conf.RouterConfig.AllowIP {
-		if ipSplit[0] == p {
+		if s.inboundIP == p {
 			return "", true
 		}
 	}
-	return ipSplit[0], false
+	return s.inboundIP, false
 }

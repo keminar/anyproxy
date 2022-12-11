@@ -178,6 +178,8 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~监听配置文件变化重新加载路由~~
 * ~~支持proxy时转换端口号~~
 * ~~支持tcpcopy模式，用此转发连mysql~~
+* ~~支持socks5协议接入~~
+* ~~统计上下行流量~~
 * TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
 * websocket监听回调的文件上传请求好像会卡住
 * tunel token支持按host配置

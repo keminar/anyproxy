@@ -60,7 +60,7 @@ func (that *tcpStream) response() error {
 
 	// 将前面读的字节补上
 	tmpBuf := that.req.reader.UnreadBuf(-1)
-	tunnel.conn.Write(tmpBuf)
+	tunnel.Write(tmpBuf)
 	// 切换为新连接
 	reader := tcp.NewReader(newTCPConn)
 	that.req.reader = reader
