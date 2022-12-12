@@ -29,13 +29,17 @@ func (that *socks5Stream) validHead() bool {
 		return false
 	}
 
-	var buffer [1024]byte
-	n, err := that.req.reader.Read(buffer[:])
+	tmpBuf, err := that.req.reader.Peek(2)
 	if err != nil {
 		return false
 	}
-	tmpBuf := buffer[:n]
-	return len(tmpBuf) >= 2 && tmpBuf[0] == 0x05
+
+	isSocks5 := len(tmpBuf) >= 2 && tmpBuf[0] == 0x05
+	if isSocks5 {
+		// 如果是SOCKS5则把已读信息从缓存区释放掉
+		that.req.reader.UnreadBuf(-1)
+	}
+	return isSocks5
 }
 
 func (that *socks5Stream) readRequest(from string) (canProxy bool, err error) {
