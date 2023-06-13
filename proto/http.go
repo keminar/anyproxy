@@ -142,7 +142,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	if that.URL.Host == "" {
 		that.Host = that.Header.Get("Host")
 		//如果遇到 Charles proxy malformed request url error
-		//解决方法：在Charles 的 proxy 菜单下的 Proxy Settings. 开启选项 enable Transparent proxying.
+		//解决方法：在Charles 的 proxy 菜单下的 Proxy Settings. 开启选项 enable Transparent HTTP proxying.
 		//   或者开启本软件的FixMalformedUrl配置
 		if that.Host != "" && conf.RouterConfig.FixMalformedUrl {
 			that.URL.Host = that.Host
