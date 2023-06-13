@@ -15,6 +15,7 @@ import (
 	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto/http"
 	"github.com/keminar/anyproxy/proto/text"
+	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/trace"
 )
 
@@ -140,6 +141,17 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	that.Host = that.URL.Host
 	if that.URL.Host == "" {
 		that.Host = that.Header.Get("Host")
+		//如果遇到 Charles proxy malformed request url error
+		//解决方法：在Charles 的 proxy 菜单下的 Proxy Settings. 开启选项 enable Transparent proxying.
+		//   或者开启本软件的FixMalformedUrl配置
+		if that.Host != "" && conf.RouterConfig.FixMalformedUrl {
+			that.URL.Host = that.Host
+			if that.URL.Scheme == "" {
+				that.URL.Scheme = "http"
+			}
+			that.RequestURI = that.URL.String()
+			that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
+		}
 	} else if that.Header.Get("Host") != "" {
 		if that.Header.Get("Host") != that.URL.Host {
 			if config.DebugLevel >= config.LevelDebug {

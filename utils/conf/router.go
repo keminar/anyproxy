@@ -65,15 +65,16 @@ type TcpCopy struct {
 
 // Router 配置文件模型
 type Router struct {
-	Listen    string    `yaml:"listen"`    //监听端口
-	Log       Log       `yaml:"log"`       //日志目录
-	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
-	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
-	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
-	Default   Default   `yaml:"default"`   //默认配置
-	Hosts     []Host    `yaml:"hosts"`     //域名列表
-	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP
-	Websocket Websocket `yaml:"websocket"` //会话订阅请求信息
+	Listen          string    `yaml:"listen"`          //监听端口
+	Log             Log       `yaml:"log"`             //日志目录
+	Watcher         bool      `yaml:"watcher"`         //是否监听配置文件变化
+	Token           string    `yaml:"token"`           //加密值, 和tunnel通信密钥, 必须16位长度
+	TcpCopy         TcpCopy   `yaml:"tcpcopy"`         //进行tcp转发模式
+	Default         Default   `yaml:"default"`         //默认配置
+	Hosts           []Host    `yaml:"hosts"`           //域名列表
+	AllowIP         []string  `yaml:"allowIP"`         //可以访问的客户端IP
+	FixMalformedUrl bool      `yaml:"fixMalformedUrl"` //请求首行没有域名用头部域名填充
+	Websocket       Websocket `yaml:"websocket"`       //会话订阅请求信息
 }
 
 // LoadRouterConfig 加载配置
