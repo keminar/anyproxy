@@ -12,6 +12,8 @@ allowIP:
 #  - 172.17.0.12
 # 请求首行没有域名用头部域名填充
 fixMalformedUrl: true
+# http请求首行域名和头部域名相同时删除首行域名
+fixFirstLine: true
 # 设置此项，进入tcpCopy模式，则配置中的hosts域名代理不再生效
 # tcpcopy模式下allowIP设置有效
 tcpcopy: 

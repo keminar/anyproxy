@@ -73,7 +73,8 @@ type Router struct {
 	Default         Default   `yaml:"default"`         //默认配置
 	Hosts           []Host    `yaml:"hosts"`           //域名列表
 	AllowIP         []string  `yaml:"allowIP"`         //可以访问的客户端IP
-	FixMalformedUrl bool      `yaml:"fixMalformedUrl"` //请求首行没有域名用头部域名填充
+	FixMalformedUrl bool      `yaml:"fixMalformedUrl"` //http请求首行没有域名用头部域名填充
+	FixFirstLine    bool      `yaml:"fixFirstLine"`    //http请求首行域名和头部域名相同时删除首行域名
 	Websocket       Websocket `yaml:"websocket"`       //会话订阅请求信息
 }
 

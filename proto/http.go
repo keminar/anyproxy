@@ -141,6 +141,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	that.Host = that.URL.Host
 	if that.URL.Host == "" {
 		that.Host = that.Header.Get("Host")
+		//在通过websocket接收http请求再转发到charles遇到
 		//如果遇到 Charles proxy malformed request url error
 		//解决方法：在Charles 的 proxy 菜单下的 Proxy Settings. 开启选项 enable Transparent HTTP proxying.
 		//   或者开启本软件的FixMalformedUrl配置
@@ -170,6 +171,14 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 				// 去掉拼的http://
 				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI[7:], that.Proto)
 			} else {
+				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
+			}
+		} else {
+			// 在代理部分vue本地开发环境时，有些请求首行带域名反而会404
+			if conf.RouterConfig.FixFirstLine && strings.ToLower(that.URL.Scheme) == "http" {
+				that.URL.Scheme = ""
+				that.URL.Host = ""
+				that.RequestURI = that.URL.String()
 				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
 			}
 		}
