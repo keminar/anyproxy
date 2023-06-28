@@ -63,19 +63,25 @@ type TcpCopy struct {
 	Port   uint16 `yaml:"port"`   //新目标地址
 }
 
+// http首行请求格式，一般vue本地项目要把域名配置为off
+// 注意：custom配置域名和端口中间的冒号改为点，如localhost:5173配置为localhost.5173
+type FirstLine struct {
+	Host   string            `yaml:"host"`   //是否带Host, on带，off不带，默认带
+	Custom map[string]string `yaml:"custom"` //按域名配带Host，on带，off不带,其他用默认
+}
+
 // Router 配置文件模型
 type Router struct {
-	Listen          string    `yaml:"listen"`          //监听端口
-	Log             Log       `yaml:"log"`             //日志目录
-	Watcher         bool      `yaml:"watcher"`         //是否监听配置文件变化
-	Token           string    `yaml:"token"`           //加密值, 和tunnel通信密钥, 必须16位长度
-	TcpCopy         TcpCopy   `yaml:"tcpcopy"`         //进行tcp转发模式
-	Default         Default   `yaml:"default"`         //默认配置
-	Hosts           []Host    `yaml:"hosts"`           //域名列表
-	AllowIP         []string  `yaml:"allowIP"`         //可以访问的客户端IP
-	FixMalformedUrl bool      `yaml:"fixMalformedUrl"` //http请求首行没有域名用头部域名填充
-	FixFirstLine    bool      `yaml:"fixFirstLine"`    //http请求首行域名和头部域名相同时删除首行域名
-	Websocket       Websocket `yaml:"websocket"`       //会话订阅请求信息
+	Listen    string    `yaml:"listen"`    //监听端口
+	Log       Log       `yaml:"log"`       //日志目录
+	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
+	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
+	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
+	Default   Default   `yaml:"default"`   //默认配置
+	Hosts     []Host    `yaml:"hosts"`     //域名列表
+	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP
+	FirstLine FirstLine `yaml:"firstLine"` //http请求首行域名和头部域名相同时删除首行域名
+	Websocket Websocket `yaml:"websocket"` //会话订阅请求信息
 }
 
 // LoadRouterConfig 加载配置

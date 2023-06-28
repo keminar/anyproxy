@@ -10,10 +10,17 @@ token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
 allowIP:
 #  - 172.17.0.12
-# 请求首行没有域名用头部域名填充
-fixMalformedUrl: true
-# http请求首行域名和头部域名相同时删除首行域名
-fixFirstLine: true
+
+# http非CONNECT请求首行域名处理
+firstLine:
+  #是否带Host, on带，off不带，默认带
+  host: on
+  #按域名配带Host，on带，off不带,其他用默认
+  #一般vue本地项目要把域名配置为off
+  #注意：域名和端口中间的冒号改为点，如localhost:5173配置为localhost.5173
+  custom:
+    localhost.5173: off
+    
 # 设置此项，进入tcpCopy模式，则配置中的hosts域名代理不再生效
 # tcpcopy模式下allowIP设置有效
 tcpcopy: 
