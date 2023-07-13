@@ -66,13 +66,15 @@ func NewServer(addr *string) {
 		serveWs(ServerHub, w, r)
 	})
 
-	log.Println(fmt.Sprintf("Listening for websocket connections on %s", *addr))
+	log.Printf("Listening for websocket connections on %s\n", *addr)
 
+	// 延迟启动
+	time.Sleep(2 * time.Second)
 	for i := 0; i < 1000; i++ {
 		// 副服务，出错不退出并定时重试。方便主服务做平滑重启
 		err := http.ListenAndServe(*addr, nil)
 		if err != nil {
-			log.Println(fmt.Sprintf("ListenAndServe: num=%d, err=%v ", i, err))
+			log.Printf("ListenAndServe: num=%d, err=%v ,retry\n", i, err)
 		}
 		time.Sleep(10 * time.Second)
 	}
