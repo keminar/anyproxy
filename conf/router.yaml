@@ -71,6 +71,8 @@ hosts:
         to: 88
 
 #websocket配置
+#对于服务端需要配置 listen, user, pass 三个参数
+#对于客户端未配置connect / user / email 都不发起连接
 websocket:
   # 监听端口
   listen:
@@ -82,7 +84,7 @@ websocket:
   user:
   # 密码
   pass:
-  # Email用于定位用户
+  # Email用于定位用户，不鉴权
   email:
   # 订阅头部信息
   subscribe:

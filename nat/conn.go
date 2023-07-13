@@ -84,7 +84,7 @@ func NewServer(addr *string) {
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		log.Println("serveWs", err)
 		return
 	}
 
@@ -92,34 +92,50 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	var user AuthMessage
 	err = conn.ReadJSON(&user)
 	if err != nil {
-		log.Println(err)
+		// 客户端没配置user, email会主动断开
+		log.Println("serveWs", "maybe client close", err)
+		return
+	}
+	if user.Email == "" { // 增强验证
+		log.Println("serveWs", "client email is empty")
+		conn.WriteMessage(websocket.TextMessage, []byte("email error"))
 		return
 	}
 	xtime := time.Now().Unix()
 	if xtime-user.Xtime > 300 {
+		log.Printf("serveWs client email %s ignore, xtime is error\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("xtime err, please check local time"))
 		return
 	}
 	if user.User != conf.RouterConfig.Websocket.User {
+		log.Printf("serveWs client email %s ignore, user is error\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("user err"))
 		return
 	}
 
 	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, conf.RouterConfig.Websocket.Pass, user.Xtime))
 	if err != nil || user.Token != token {
+		log.Printf("serveWs client email %s ignore, token is error\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
 		return
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
 
 	// 订阅
-	var subscribe []SubscribeMessage
-	err = conn.ReadJSON(&subscribe)
+	var tmpSub []SubscribeMessage
+	err = conn.ReadJSON(&tmpSub)
 	if err != nil {
-		log.Println(err)
+		log.Printf("serveWs client email %s ignore, %v\n", user.Email, err)
 		return
 	}
+	var subscribe []SubscribeMessage
+	for _, sub := range tmpSub {
+		if sub.Key != "" && sub.Val != "" {
+			subscribe = append(subscribe, sub)
+		}
+	}
 	if len(subscribe) == 0 {
+		log.Printf("serveWs client email %s ignore, subscribe is empty\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("subscribe empty err"))
 		return
 	}
@@ -132,7 +148,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 
 	remote := getIPAdress(r, []string{"X-Real-IP"})
-	log.Printf("client email %s ip %s connected, subscribe %v, total client nums %d\n", user.Email, remote, subscribe, clientNum)
+	log.Printf("serveWs client email %s ip %s connected, subscribe %v, total client nums %d\n", user.Email, remote, subscribe, clientNum)
 
 	go client.writePump()
 	go client.serverReadPump()

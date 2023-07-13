@@ -31,6 +31,10 @@ var tempDelay time.Duration
 
 // ConnectServer 连接到websocket服务
 func ConnectServer(addr *string) {
+	if conf.RouterConfig.Websocket.User == "" || conf.RouterConfig.Websocket.Email == "" {
+		log.Println("ws user or email empty, donot connect")
+		return
+	}
 	interruptClose = false
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
@@ -155,12 +159,6 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 
 // auth 认证
 func (h *ClientHandler) auth(user string, pass string, email string) error {
-	if user == "" {
-		return errors.New("user is empty")
-	}
-	if email == "" {
-		return errors.New("email is emtpy")
-	}
 	xtime := time.Now().Unix()
 	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user, pass, xtime))
 	if err != nil {
