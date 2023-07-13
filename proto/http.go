@@ -15,6 +15,7 @@ import (
 	"github.com/keminar/anyproxy/nat"
 	"github.com/keminar/anyproxy/proto/http"
 	"github.com/keminar/anyproxy/proto/text"
+	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/trace"
 )
 
@@ -114,7 +115,7 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 		}
 	}
 	if config.DebugLevel >= config.LevelDebug {
-		fmt.Println(trace.ID(that.req.ID), "rawurl:", rawurl)
+		log.Println(trace.ID(that.req.ID), "rawurl:", rawurl)
 	}
 	justAuthority := that.Method == "CONNECT" && !strings.HasPrefix(rawurl, "/")
 	addedScheme := false
@@ -140,6 +141,12 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	that.Host = that.URL.Host
 	if that.URL.Host == "" {
 		that.Host = that.Header.Get("Host")
+		//在通过本地websocket接收服务端透传http请求再转发到charles遇到
+		//如果遇到 Charles proxy malformed request url error
+		//解决方法：在Charles 的 proxy 菜单下的 Proxy Settings. 开启选项 enable Transparent HTTP proxying.
+		//   或者开启本软件的首行增加域名配置（firstLine.custom)
+		that.URL.Host = that.Host
+		that.URL.Scheme = "http"
 	} else if that.Header.Get("Host") != "" {
 		if that.Header.Get("Host") != that.URL.Host {
 			if config.DebugLevel >= config.LevelDebug {
@@ -153,17 +160,27 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 			}
 			// 赋值回URL来生成RequestURI
 			that.URL.Host = that.Host
-			that.RequestURI = that.URL.String()
-			if addedScheme {
-				// 去掉拼的http://
-				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI[7:], that.Proto)
-			} else {
-				that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
-			}
 		}
 	}
-	//todo Vue的 /sockjs-node/ 请求，走了代理首行GET后面会有域名，服务会响应错的内容
-	//that.Header.Set("Connection", "Close")
+
+	if addedScheme {
+		// 去掉拼的http://, CONNECT请求首行单独处理
+		that.RequestURI = that.URL.String()
+		that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI[7:], that.Proto)
+	} else {
+		// 在代理部分vue本地开发环境时，有些用到websocket技术的请求首行带域名反而会404
+		// 这种情况可以把域名配置在自定义配置里去掉首行域名
+		if strings.ToLower(that.URL.Scheme) == "http" && firstLineHost(that.URL.Host) == "off" {
+			if config.DebugLevel >= config.LevelDebug {
+				log.Println(trace.ID(that.req.ID), "firstline host removed")
+			}
+			that.URL.Scheme = ""
+			that.URL.Host = ""
+		}
+		that.RequestURI = that.URL.String()
+		that.FirstLine = fmt.Sprintf("%s %s %s", that.Method, that.RequestURI, that.Proto)
+	}
+
 	that.readBody()
 	that.getNameIPPort()
 
@@ -176,6 +193,17 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 		fmt.Println(trace.ID(that.req.ID), string(that.BodyBuf))
 	}
 	return true, nil
+}
+
+func firstLineHost(host string) string {
+	host = strings.ReplaceAll(host, ":", ".")
+	if val, ok := conf.RouterConfig.FirstLine.Custom[host]; ok {
+		return val
+	}
+	if conf.RouterConfig.FirstLine.Host == "off" {
+		return "off"
+	}
+	return "on"
 }
 
 func (that *httpStream) readBody() {
@@ -275,7 +303,8 @@ func (that *httpStream) response() error {
 				// 多读取的body部分
 				tunnel.buffer.Write(that.BodyBuf)
 				ok := tunnel.transfer()
-				if ok == true {
+				if ok {
+					that.showIP("WS")
 					return nil
 				}
 				// 请求不成，则走普通转发

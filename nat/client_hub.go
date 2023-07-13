@@ -40,8 +40,9 @@ func (h *Hub) run() {
 			h.clients[client] = true
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
-				delete(h.clients, client)
 				close(client.send)
+				delete(h.clients, client)
+				log.Printf("client email %s disconnected, total client nums %d\n", client.Email, len(h.clients))
 			}
 		case cmessage := <-h.broadcast:
 			if config.DebugLevel >= config.LevelDebug {
@@ -62,9 +63,9 @@ func (h *Hub) run() {
 				case client.send <- cmessage.message:
 					break Exit
 				default: // 当send chan写不进时会走进default，防止某一个send卡着影响整个系统
-					log.Println("net_client_send_chan_full")
 					close(client.send)
 					delete(h.clients, client)
+					log.Printf("net_client_send_chan_full, client email %s disconnected\n", client.Email)
 				}
 			}
 		}
@@ -76,6 +77,7 @@ func (h *Hub) GetClient(header http.Header) *Client {
 	for client := range h.clients {
 		for _, s := range client.Subscribe {
 			val := header.Get(s.Key)
+			//log.Println("debug", client.Email, s.Key, s.Val, val)
 			if val != "" && val == s.Val {
 				return client
 			}

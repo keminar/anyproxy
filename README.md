@@ -128,6 +128,8 @@ sudo useradd -M -s /sbin/nologin anyproxy
 sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner anyproxy -j RETURN
 # 单独指定root账号走代理
 sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m owner --uid-owner 0 --to-port 3000
+# 单独指定root账号走代理,但本地请求不走代理
+sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m owner ! -d 192.168.0.0/24 --uid-owner 0 --to-port 3000
 # 其它用户的tcp请求转发到本地3000端口
 sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
 ```
