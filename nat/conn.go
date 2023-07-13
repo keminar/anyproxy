@@ -125,7 +125,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	clientNum := len(hub.clients)
 	// 注册连接
-	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Subscribe: subscribe}
+	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Email: user.Email, Subscribe: subscribe}
 	client.hub.register <- client
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 

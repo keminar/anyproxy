@@ -303,7 +303,8 @@ func (that *httpStream) response() error {
 				// 多读取的body部分
 				tunnel.buffer.Write(that.BodyBuf)
 				ok := tunnel.transfer()
-				if ok == true {
+				if ok {
+					that.showIP("WS")
 					return nil
 				}
 				// 请求不成，则走普通转发

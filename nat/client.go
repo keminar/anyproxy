@@ -26,6 +26,8 @@ type Client struct {
 	// 用户
 	User string
 
+	Email string
+
 	// 订阅特征
 	Subscribe []SubscribeMessage
 }

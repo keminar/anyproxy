@@ -76,6 +76,7 @@ func (h *Hub) GetClient(header http.Header) *Client {
 	for client := range h.clients {
 		for _, s := range client.Subscribe {
 			val := header.Get(s.Key)
+			//log.Println("debug", client.Email, s.Key, s.Val, val)
 			if val != "" && val == s.Val {
 				return client
 			}
