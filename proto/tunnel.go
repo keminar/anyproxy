@@ -486,8 +486,8 @@ func getProxyServer(proxySpec string) (string, string, uint16, error) {
 		if err == nil {
 			proxyServer = tmp[0]
 			proxyPort = uint16(portInt)
-			// 检查是否可连通
-			connTimeout := time.Duration(100) * time.Millisecond
+			// 检查是否可连通, 内网不好时100毫秒不够，调整到300
+			connTimeout := time.Duration(300) * time.Millisecond
 			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", proxyServer, proxyPort), connTimeout)
 			if err != nil {
 				return "", "", 0, err
