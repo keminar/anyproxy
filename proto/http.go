@@ -318,16 +318,17 @@ func (that *httpStream) response() error {
 		return err
 	}
 	if that.Method == "CONNECT" {
-		_, err := that.req.conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
-		if err != nil {
-			log.Println(trace.ID(that.req.ID), "write err", err.Error())
-			return err
-		}
-
 		that.showIP("CONNECT")
-		err = tunnel.handshake(protoHTTPS, that.req.DstName, "", that.req.DstPort)
+		err := tunnel.handshake(protoHTTPS, that.req.DstName, "", that.req.DstPort)
 		if err != nil {
 			log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
+			return err
+		}
+		// 遇到过后端连不上先输出established导致某手机app闪退
+		// 所以要在能连上后端的情况下再输出
+		_, err = that.req.conn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		if err != nil {
+			log.Println(trace.ID(that.req.ID), "write err", err.Error())
 			return err
 		}
 		tunnel.transfer(-1)
