@@ -1,12 +1,10 @@
 # Any Proxy
 
-anyproxy 是一个部署在Linux系统上的tcp流转发器，可以直接将本地或网络收到的请求发出，也可以将请求转到tunneld或SOCKS或charles等代理。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。经过跨平台编译，如果只做网络包的转发可以在windows等平台使用。
+anyproxy 是一个部署在Linux系统上的tcp流转发器，可以将收到的请求按域名划分链路发本地请求或者转到下一级代理。可以代替Proxifier做Linux下的客户端， 也可以配合Proxifier当它的服务端。经过跨平台编译，如果只做网络包的转发可以在windows等平台使用。
 
 [下载二进制包](http://cloudme.io/)
 
-提醒：请使用浏览器右键的“链接另存为”下载文件
-
-tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用。非anyproxy请求一概拒绝处理
+tunneld 是一个anyproxy的服务端模式，带密钥验证，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用。非anyproxy请求一概拒绝处理
 
 # 路由支持
 
@@ -52,6 +50,7 @@ tunneld 是一个anyproxy的服务端，部署在服务器上接收anyproxy的�
 > 案例4： 解决内网tcp端口给外网访问
 
 `假如本机是192网段，容器内是10网段，在本机启动一个程序监听本机端口同时桥接到容器内的应用的端口，这样就可以通过本机端口访问容器内的tcp服务（配置项是tcpcopy）`
+
 # 源码编译
 
 > 安装Go环境并设置GOPROXY
@@ -126,12 +125,12 @@ docker run  -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 sudo useradd -M -s /sbin/nologin anyproxy
 # uid为anyproxy的tcp请求不转发,并用anyproxy用户启动anyproxy程序
 sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner anyproxy -j RETURN
-# 单独指定root账号走代理
-sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m owner --uid-owner 0 --to-port 3000
-# 单独指定root账号走代理,但本地请求不走代理
-sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m owner ! -d 192.168.0.0/24 --uid-owner 0 --to-port 3000
-# 其它用户的tcp请求转发到本地3000端口
-sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-port 3000
+sudo -u anyproxy ./anyproxy -daemon
+# 指定root账号本地请求不走代理
+sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -d 192.168.0.0/16 -m owner --uid-owner 0 -j RETURN
+sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -d 172.17.0.0/16 -m owner --uid-owner 0 -j RETURN
+# 指定root账号的http/https请求走代理
+sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m multiport --dport 80,443 -m owner --uid-owner 0 --to-port 3000
 ```
 
 > 如果删除全局代理
