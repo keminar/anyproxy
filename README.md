@@ -127,10 +127,10 @@ sudo useradd -M -s /sbin/nologin anyproxy
 sudo iptables -t nat -A OUTPUT -p tcp -m owner --uid-owner anyproxy -j RETURN
 sudo -u anyproxy ./anyproxy -daemon
 # 指定root账号本地请求不走代理
-sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -d 192.168.0.0/16 -m owner --uid-owner 0 -j RETURN
-sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -d 172.17.0.0/16 -m owner --uid-owner 0 -j RETURN
+sudo iptables -t nat -A OUTPUT -p tcp -d 192.168.0.0/16 -m owner --uid-owner 0 -j RETURN
+sudo iptables -t nat -A OUTPUT -p tcp -d 172.17.0.0/16 -m owner --uid-owner 0 -j RETURN
 # 指定root账号的http/https请求走代理
-sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m multiport --dport 80,443 -m owner --uid-owner 0 --to-port 3000
+sudo iptables -t nat -A OUTPUT -p tcp -m multiport --dport 80,443 -m owner --uid-owner 0 -j REDIRECT --to-port 3000
 ```
 
 > 如果删除全局代理

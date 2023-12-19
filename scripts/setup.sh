@@ -20,9 +20,9 @@ if ! (sudo iptables -t nat -L|grep "redir ports $port" > /dev/null); then
     #    如果有本地账号要连mysql等服务，也不要走代理端口,会一直卡住(目前发现mysql协议不兼容)
 
     #指定root账号走代理
-    sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -d 192.168.0.0/16 -m owner --uid-owner 0 -j RETURN
-    sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -d 172.17.0.0/16 -m owner --uid-owner 0 -j RETURN
-    sudo iptables -t nat -A OUTPUT -p tcp -j REDIRECT -m multiport --dport 80,443 -m owner --uid-owner 0 --to-port $port
+    sudo iptables -t nat -A OUTPUT -p tcp -d 192.168.0.0/16 -m owner --uid-owner 0 -j RETURN
+    sudo iptables -t nat -A OUTPUT -p tcp -d 172.17.0.0/16 -m owner --uid-owner 0 -j RETURN
+    sudo iptables -t nat -A OUTPUT -p tcp -m multiport --dport 80,443 -m owner --uid-owner 0 -j REDIRECT --to-port $port
 
     #sudo iptables -t nat -L -n --line-number
     #sudo iptables -t nat -D OUTPUT 3
