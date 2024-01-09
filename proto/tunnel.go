@@ -373,16 +373,28 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	proxyServer := config.ProxyServer
 	proxyPort := config.ProxyPort
 	if host.Proxy != "" { //如果有自定义代理，则走自定义
-		proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(host.Proxy)
-		if err != nil {
-			// 如果自定义代理不可用，confTarget走原来逻辑
-			log.Println(trace.ID(s.req.ID), "host.proxy err", err)
-		} else {
-			proxyScheme = proxyScheme2
-			proxyServer = proxyServer2
-			proxyPort = proxyPort2
-			if confTarget != "remote" { //如果有定制代理，就不能用local 和 auto
-				confTarget = "remote"
+		suffix := " last"
+		// 如果单域名代理配置以" last"结尾，忽略全局的代理
+		if len(host.Proxy) >= len(suffix) && host.Proxy[len(host.Proxy)-len(suffix):] == suffix {
+			proxyServer = ""
+			host.Proxy = host.Proxy[:len(host.Proxy)-len(suffix)]
+		}
+
+		// 支持多代理以逗号分隔，依次找到能用的
+		for _, hostProxy := range strings.Split(host.Proxy, ",") {
+			hostProxy = strings.TrimSpace(hostProxy)
+			proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(hostProxy)
+			if err != nil {
+				// 如果自定义代理不可用，confTarget走原来逻辑
+				log.Println(trace.ID(s.req.ID), "host.proxy err", err)
+			} else {
+				proxyScheme = proxyScheme2
+				proxyServer = proxyServer2
+				proxyPort = proxyPort2
+				if confTarget != "remote" { //如果有定制代理，就不能用local 和 auto
+					confTarget = "remote"
+				}
+				break
 			}
 		}
 	}
