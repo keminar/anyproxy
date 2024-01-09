@@ -373,11 +373,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	proxyServer := config.ProxyServer
 	proxyPort := config.ProxyPort
 	if host.Proxy != "" { //如果有自定义代理，则走自定义
-		suffix := " last"
-		// 如果单域名代理配置以" last"结尾，忽略全局的代理
-		if len(host.Proxy) >= len(suffix) && host.Proxy[len(host.Proxy)-len(suffix):] == suffix {
-			proxyServer = ""
-			host.Proxy = host.Proxy[:len(host.Proxy)-len(suffix)]
+		suffixLen := 5
+		// 如果单域名代理配置以" last"或" deny"结尾，忽略全局的代理,并做相应的动作
+		opIdx := len(host.Proxy) - suffixLen
+		if len(host.Proxy) >= suffixLen && host.Proxy[opIdx:opIdx+1] == " " {
+			proxyServer = host.Proxy[opIdx+1:]
+			host.Proxy = host.Proxy[:opIdx]
 		}
 
 		// 支持多代理以逗号分隔，依次找到能用的
@@ -396,6 +397,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 				}
 				break
 			}
+		}
+		if proxyServer == "last" { //没通的代理，走本地
+			proxyServer = ""
+		} else if proxyServer == "deny" {
+			err = fmt.Errorf("all proxy dail fail %s", host.Proxy)
+			return
 		}
 	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
