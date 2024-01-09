@@ -376,8 +376,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		suffixLen := 5
 		// 如果单域名代理配置以" last"或" deny"结尾，忽略全局的代理,并做相应的动作
 		opIdx := len(host.Proxy) - suffixLen
+		opName := ""
 		if len(host.Proxy) >= suffixLen && host.Proxy[opIdx:opIdx+1] == " " {
-			proxyServer = host.Proxy[opIdx+1:]
+			opName = host.Proxy[opIdx+1:]
 			host.Proxy = host.Proxy[:opIdx]
 		}
 
@@ -398,9 +399,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 				break
 			}
 		}
-		if proxyServer == "last" { //没通的代理，走本地
+		if opName == "last" { //没通的代理，走本地
 			proxyServer = ""
-		} else if proxyServer == "deny" {
+		} else if opName == "deny" {
 			err = fmt.Errorf("all proxy dail fail %s", host.Proxy)
 			return
 		}
