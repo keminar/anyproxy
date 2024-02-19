@@ -73,6 +73,7 @@ type FirstLine struct {
 // Router 配置文件模型
 type Router struct {
 	Listen    string    `yaml:"listen"`    //监听端口
+	Network   string    `yaml:"network"`   //监听协议
 	Log       Log       `yaml:"log"`       //日志目录
 	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
 	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度

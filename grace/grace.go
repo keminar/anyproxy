@@ -89,7 +89,7 @@ func init() {
 }
 
 // NewServer returns a new graceServer.
-func NewServer(addr string, handler ConnHandler) (srv *Server) {
+func NewServer(addr string, handler ConnHandler, network string) (srv *Server) {
 	regLock.Lock()
 	defer regLock.Unlock()
 
@@ -122,7 +122,7 @@ func NewServer(addr string, handler ConnHandler) (srv *Server) {
 			},
 		},
 		state:        StateInit,
-		Network:      "tcp",
+		Network:      network,
 		terminalChan: make(chan error), //no cache channel
 	}
 

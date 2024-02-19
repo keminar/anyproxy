@@ -125,12 +125,20 @@ func main() {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
 		go nat.ConnectServer(&gWebsocketConn)
 	}
+
+	// tcp    自动适配，优先IPv6
+	// tcp4   仅使用IPv4
+	// tcp6   仅使用IPv6
+	network := "tcp"
+	if conf.RouterConfig.Network != "" {
+		network = conf.RouterConfig.Network
+	}
 	// 运行模式
 	if gMode == "tunnel" {
-		server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
+		server := grace.NewServer(gListenAddrPort, proto.ServerHandler, network)
 		server.ListenAndServe()
 	} else {
-		server := grace.NewServer(gListenAddrPort, proto.ClientHandler)
+		server := grace.NewServer(gListenAddrPort, proto.ClientHandler, network)
 		server.ListenAndServe()
 	}
 }

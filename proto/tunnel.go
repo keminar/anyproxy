@@ -19,6 +19,7 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/cache"
 	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/tools"
 	"github.com/keminar/anyproxy/utils/trace"
 	"golang.org/x/net/proxy"
 )
@@ -79,8 +80,7 @@ func newTunnel(req *Request) *tunnel {
 		req: req,
 	}
 
-	ipSplit := strings.Split(req.conn.RemoteAddr().String(), ":")
-	s.inboundIP = ipSplit[0]
+	s.inboundIP = tools.GetRemoteIp(req.conn.RemoteAddr().String())
 	return s
 }
 
