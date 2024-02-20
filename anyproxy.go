@@ -126,9 +126,9 @@ func main() {
 		go nat.ConnectServer(&gWebsocketConn)
 	}
 
-	// tcp    自动适配，优先IPv6
-	// tcp4   仅使用IPv4
-	// tcp6   仅使用IPv6
+	// tcp   同是监听IPv4 和 IPv6
+	// tcp4  仅监听使用IPv4
+	// tcp6  仅监听使用IPv6
 	network := "tcp"
 	if conf.RouterConfig.Network != "" {
 		network = conf.RouterConfig.Network
