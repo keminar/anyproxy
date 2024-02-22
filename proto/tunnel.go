@@ -396,6 +396,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 				if confTarget != "remote" { //如果有定制代理，就不能用local 和 auto
 					confTarget = "remote"
 				}
+				opName = ""
 				break
 			}
 		}
