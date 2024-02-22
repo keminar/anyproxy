@@ -17,6 +17,16 @@ func GetPort(addr string) string {
 	return ""
 }
 
+// GetIp 从 127.0.0.1:3000 结构中取出127.0.0.1
+func GetRemoteIp(addr string) string {
+	for i := len(addr) - 1; i >= 1; i-- {
+		if addr[i] == ':' {
+			return addr[0:i]
+		}
+	}
+	return addr
+}
+
 func Md5Str(str string) (string, error) {
 	h := md5.New()
 	h.Write([]byte(str))

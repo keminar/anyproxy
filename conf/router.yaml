@@ -53,7 +53,9 @@ hosts:
     # 参考全局localDns 
     dns: remote
     # 支持 http:// , tunnel:// , socks5:// 三种协议，默认 tunnel://
-    proxy:  http://127.0.0.1:8888
+    #proxy:  http://127.0.0.1:8888
+    # 支持多代理，支持忽略全局代理并执行 last 或 deny 2种逻辑
+    proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 last
   - name: golang.org
     match: contain
     target: auto

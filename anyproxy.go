@@ -125,12 +125,20 @@ func main() {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
 		go nat.ConnectServer(&gWebsocketConn)
 	}
+
+	// tcp   同是监听IPv4 和 IPv6
+	// tcp4  仅监听使用IPv4
+	// tcp6  仅监听使用IPv6
+	network := "tcp"
+	if conf.RouterConfig.Network != "" {
+		network = conf.RouterConfig.Network
+	}
 	// 运行模式
 	if gMode == "tunnel" {
-		server := grace.NewServer(gListenAddrPort, proto.ServerHandler)
+		server := grace.NewServer(gListenAddrPort, proto.ServerHandler, network)
 		server.ListenAndServe()
 	} else {
-		server := grace.NewServer(gListenAddrPort, proto.ClientHandler)
+		server := grace.NewServer(gListenAddrPort, proto.ClientHandler, network)
 		server.ListenAndServe()
 	}
 }
