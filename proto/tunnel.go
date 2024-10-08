@@ -339,7 +339,10 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	var state cache.DialState
 	// 先取下配置，再决定要不要走本地dns解析，否则未解析域名DNS解析再超时卡半天，又不会被缓存
 	host := findHost(dstName, dstIP)
-
+	if ip, ok := s.isAllowed(host.AllowIP); !ok {
+		err = fmt.Errorf("%s is not allowed", ip)
+		return err
+	}
 	var confTarget string
 	if proto == protoTCP {
 		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
@@ -486,7 +489,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	return
 }
 
-//  getProxyServer 解析代理服务器
+// getProxyServer 解析代理服务器
 func getProxyServer(proxySpec string) (string, string, uint16, error) {
 	if proxySpec == "" {
 		return "", "", 0, errors.New("proxy 长度为空")
@@ -577,11 +580,12 @@ func (s *tunnel) httpConnect(network, connAddr string, target string, encrypt bo
 }
 
 // IP限制
-func (s *tunnel) isAllowed() (string, bool) {
-	if len(conf.RouterConfig.AllowIP) == 0 {
+func (s *tunnel) isAllowed(allows []string) (string, bool) {
+	allows = append(allows, conf.RouterConfig.AllowIP...)
+	if len(allows) == 0 {
 		return "", true
 	}
-	for _, p := range conf.RouterConfig.AllowIP {
+	for _, p := range allows {
 		if s.inboundIP == p {
 			return "", true
 		}

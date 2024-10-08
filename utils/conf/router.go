@@ -17,13 +17,14 @@ type PortMap struct {
 
 // Host 域名
 type Host struct {
-	Name   string    `yaml:"name"`   //域名关键字
-	Match  string    `yaml:"match"`  //contain 包含, equal 完全相等, preg 正则
-	Target string    `yaml:"target"` //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
-	DNS    string    `yaml:"dns"`    //local 当前环境, remote 远程, 仅当target使用remote有效
-	IP     string    `yaml:"ip"`     //本地解析ip
-	Port   []PortMap `yaml:"port"`   //目标端口转换
-	Proxy  string    `yaml:"proxy"`  //指定代理服务器
+	Name    string    `yaml:"name"`    //域名关键字
+	Match   string    `yaml:"match"`   //contain 包含, equal 完全相等, preg 正则
+	Target  string    `yaml:"target"`  //local 当前环境, remote 远程, deny 禁止, auto根据dial选择
+	DNS     string    `yaml:"dns"`     //local 当前环境, remote 远程, 仅当target使用remote有效
+	IP      string    `yaml:"ip"`      //本地解析ip
+	Port    []PortMap `yaml:"port"`    //目标端口转换
+	Proxy   string    `yaml:"proxy"`   //指定代理服务器
+	AllowIP []string  `yaml:"allowIP"` //可以访问的客户端IP
 }
 
 // Log 日志
