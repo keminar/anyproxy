@@ -99,21 +99,27 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 		if nr > 0 {
 			// 如果为HTTP/1.1的Keep-alive情况下
 			if srcname == "request" && s.clientUnRead >= 0 {
-				// 之前已读完，说明要建新链接
+				// 之前已读完，说明要建新链接 或是 升级为长链接
 				if s.clientUnRead == 0 {
-					// 关闭与旧的服务器的连接的写
-					s.conn.CloseWrite()
-					// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
-					s.curState = stateIdle
+					// 如果包是http协议则认为http复用
+					if isKeepAliveHttp(s.req.ctx, s.req.conn, buf[0:nr]) {
+						// 关闭与旧的服务器的连接的写
+						s.conn.CloseWrite()
+						// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
+						s.curState = stateIdle
 
-					//todo 如果域名不同跳出交换数据, 因为这个逻辑会出现N次，应该在http.go实现
-					//fmt.Println(string(buf[0:nr]))
-					s.buf = make([]byte, nr)
-					copy(s.buf, buf[0:nr])
-					break
+						//todo 如果域名不同跳出交换数据, 因为这个逻辑会出现N次，应该在http.go实现
+						//fmt.Println(string(buf[0:nr]))
+						s.buf = make([]byte, nr)
+						copy(s.buf, buf[0:nr])
+						break
+					} else {
+						//可能是http upgrade为websocket, 不做任何事，保持交换数据
+					}
+				} else {
+					// 未读完
+					s.clientUnRead -= nr
 				}
-				// 未读完
-				s.clientUnRead -= nr
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)

@@ -181,6 +181,7 @@ sudo iptables -t nat -D OUTPUT 2
 * ~~支持tcpcopy模式，用此转发连mysql~~
 * ~~支持socks5协议接入~~
 * ~~统计上下行流量~~
+* ~~修复不支持http upgrade socket的问题~~
 * TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
 * tunel token支持按host配置
 
