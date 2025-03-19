@@ -114,7 +114,8 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 						copy(s.buf, buf[0:nr])
 						break
 					} else {
-						//可能是http upgrade为websocket, 不做任何事，保持交换数据
+						//可能是http upgrade为websocket, 保持交换数据
+						//比如经过nginx proxy -> 本程序 -> 旧版本的centrifugo
 						s.clientUnRead = -1
 					}
 				} else {
