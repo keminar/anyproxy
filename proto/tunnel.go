@@ -115,6 +115,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 						break
 					} else {
 						//可能是http upgrade为websocket, 不做任何事，保持交换数据
+						s.clientUnRead = -1
 					}
 				} else {
 					// 未读完
