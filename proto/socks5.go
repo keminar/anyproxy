@@ -51,9 +51,6 @@ func (that *socks5Stream) readRequest(from string) (canProxy bool, err error) {
 
 func (that *socks5Stream) response() error {
 	tunnel := newTunnel(that.req)
-	if ip, ok := tunnel.isAllowed(); !ok {
-		return errors.New(ip + " is not allowed")
-	}
 
 	var err error
 	// 发送socks5应答

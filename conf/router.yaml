@@ -71,6 +71,8 @@ hosts:
     port:
       - from: 80
         to: 88
+    allowIP:
+     # - 172.17.0.12
 
 #websocket配置
 #对于服务端需要配置 listen, user, pass 三个参数

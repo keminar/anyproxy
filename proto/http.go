@@ -3,7 +3,6 @@ package proto
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -312,11 +311,6 @@ func (that *httpStream) response() error {
 		}
 	}
 	tunnel := newTunnel(that.req)
-	if ip, ok := tunnel.isAllowed(); !ok {
-		err := errors.New(ip + " is not allowed")
-		that.badRequest(err)
-		return err
-	}
 	if that.Method == "CONNECT" {
 		that.showIP("CONNECT")
 		err := tunnel.handshake(protoHTTPS, that.req.DstName, "", that.req.DstPort)

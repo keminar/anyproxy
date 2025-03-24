@@ -28,7 +28,7 @@ func (that *tcpCopy) readRequest(from string) (canProxy bool, err error) {
 
 func (that *tcpCopy) response() error {
 	tunnel := newTunnel(that.req)
-	if ip, ok := tunnel.isAllowed(); !ok {
+	if ip, ok := tunnel.isAllowed([]string{}); !ok {
 		return errors.New(ip + " is not allowed")
 	}
 	var err error

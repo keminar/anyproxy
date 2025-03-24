@@ -1,7 +1,6 @@
 package proto
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -39,9 +38,6 @@ func (that *tcpStream) readRequest(from string) (canProxy bool, err error) {
 // 处理iptables转发的流量
 func (that *tcpStream) response() error {
 	tunnel := newTunnel(that.req)
-	if ip, ok := tunnel.isAllowed(); !ok {
-		return errors.New(ip + " is not allowed")
-	}
 	var err error
 	var newTCPConn *net.TCPConn
 	that.req.DstIP, that.req.DstPort, newTCPConn, err = GetOriginalDstAddr(that.req.conn)

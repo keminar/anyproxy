@@ -99,21 +99,29 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 		if nr > 0 {
 			// 如果为HTTP/1.1的Keep-alive情况下
 			if srcname == "request" && s.clientUnRead >= 0 {
-				// 之前已读完，说明要建新链接
+				// 之前已读完，说明要建新链接 或是 升级为长链接
 				if s.clientUnRead == 0 {
-					// 关闭与旧的服务器的连接的写
-					s.conn.CloseWrite()
-					// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
-					s.curState = stateIdle
+					// 如果包是http协议则认为http复用
+					if isKeepAliveHttp(s.req.ctx, s.req.conn, buf[0:nr]) {
+						// 关闭与旧的服务器的连接的写
+						s.conn.CloseWrite()
+						// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
+						s.curState = stateIdle
 
-					//todo 如果域名不同跳出交换数据, 因为这个逻辑会出现N次，应该在http.go实现
-					//fmt.Println(string(buf[0:nr]))
-					s.buf = make([]byte, nr)
-					copy(s.buf, buf[0:nr])
-					break
+						//todo 如果域名不同跳出交换数据, 因为这个逻辑会出现N次，应该在http.go实现
+						//fmt.Println(string(buf[0:nr]))
+						s.buf = make([]byte, nr)
+						copy(s.buf, buf[0:nr])
+						break
+					} else {
+						//可能是http upgrade为websocket, 保持交换数据
+						//比如经过nginx proxy -> 本程序 -> 旧版本的centrifugo
+						s.clientUnRead = -1
+					}
+				} else {
+					// 未读完
+					s.clientUnRead -= nr
 				}
-				// 未读完
-				s.clientUnRead -= nr
 			}
 			if config.DebugLevel >= config.LevelDebugBody {
 				log.Printf("%s receive from %s, n=%d, data len: %d\n", trace.ID(s.req.ID), srcname, i, nr)
@@ -339,7 +347,10 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	var state cache.DialState
 	// 先取下配置，再决定要不要走本地dns解析，否则未解析域名DNS解析再超时卡半天，又不会被缓存
 	host := findHost(dstName, dstIP)
-
+	if ip, ok := s.isAllowed(host.AllowIP); !ok {
+		err = fmt.Errorf("%s is not allowed", ip)
+		return err
+	}
 	var confTarget string
 	if proto == protoTCP {
 		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
@@ -486,7 +497,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	return
 }
 
-//  getProxyServer 解析代理服务器
+// getProxyServer 解析代理服务器
 func getProxyServer(proxySpec string) (string, string, uint16, error) {
 	if proxySpec == "" {
 		return "", "", 0, errors.New("proxy 长度为空")
@@ -577,14 +588,28 @@ func (s *tunnel) httpConnect(network, connAddr string, target string, encrypt bo
 }
 
 // IP限制
-func (s *tunnel) isAllowed() (string, bool) {
-	if len(conf.RouterConfig.AllowIP) == 0 {
+func (s *tunnel) isAllowed(allows []string) (string, bool) {
+	allows = append(allows, conf.RouterConfig.AllowIP...)
+	if len(allows) == 0 {
 		return "", true
 	}
-	for _, p := range conf.RouterConfig.AllowIP {
-		if s.inboundIP == p {
+
+	userIP := net.ParseIP(s.inboundIP)
+	for _, p := range allows {
+		if iPInCIDR(userIP, p) {
 			return "", true
 		}
 	}
 	return s.inboundIP, false
+}
+
+// iPInCIDR 判断IP地址是否在指定的CIDR范围内,支持ipv4和ipv6
+// cidr 示例 "192.168.1.0/24" "2001:db8:1234:5678::/64"
+func iPInCIDR(ip net.IP, cidr string) bool {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		// 可能cidr是一个单ip的情况
+		return ip.String() == cidr
+	}
+	return ipNet.Contains(ip)
 }
