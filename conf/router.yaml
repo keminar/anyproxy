@@ -9,6 +9,7 @@ watcher: true
 token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
 allowIP:
+# 支持CIDR
 #  - 172.17.0.12
 
 # http非CONNECT请求首行域名处理
