@@ -593,10 +593,23 @@ func (s *tunnel) isAllowed(allows []string) (string, bool) {
 	if len(allows) == 0 {
 		return "", true
 	}
+
+	userIP := net.ParseIP(s.inboundIP)
 	for _, p := range allows {
-		if s.inboundIP == p {
+		if iPInCIDR(userIP, p) {
 			return "", true
 		}
 	}
 	return s.inboundIP, false
+}
+
+// iPInCIDR 判断IP地址是否在指定的CIDR范围内,支持ipv4和ipv6
+// cidr 示例 "192.168.1.0/24" "2001:db8:1234:5678::/64"
+func iPInCIDR(ip net.IP, cidr string) bool {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		// 可能cidr是一个单ip的情况
+		return ip.String() == cidr
+	}
+	return ipNet.Contains(ip)
 }
