@@ -46,7 +46,7 @@ func init() {
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
 	flag.StringVar(&gWebsocketConn, "ws-connect", "", "Websocket Address and port to connect")
-	flag.StringVar(&gMode, "mode", "", "Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN)")
+	flag.StringVar(&gMode, "mode", "", "Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN) | tcpcopy (forward every connection to tcpcopy.ip:port)")
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2, 3)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
 	flag.BoolVar(&gVersion, "v", false, "Show build version")

@@ -20,4 +20,5 @@
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治、`loopGuard` 熔断器兜底、平台差异。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。
 - [windows-winDivert.md](windows-winDivert.md) — Windows WinDivert 运行依赖：`WinDivert.dll`/`.sys` 放置、管理员权限、路径含空格/中文的驱动加载问题、bypass 模式在 Windows 无效。
+- [todo.md](todo.md) — 待办/待确认：PR #22 审查中暂留未处理的项（透明代理嗅探 `Peek(1)` 无超时 + 实现分叉、`HostBlocksUDP` 热路径线性扫描）。
 - [windows-windivert-redirect.md](windows-windivert-redirect.md) — Windows WinDivert 重定向原理：数据包捕获→NAT 改写→本地代理→恢复目的地转发的完整链路；NAT 表、dual-stack 监听、环路防护。

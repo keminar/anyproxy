@@ -24,7 +24,7 @@ const sniffTimeout = 200 * time.Millisecond
 // 以覆盖浏览器预连接(preconnect)——TCP 建好后先静默，真正导航时才发请求。
 // 正常连接一发数据就立即返回，不会真等到上限；只有静默连接才等满。
 // 客户端若在此期间放弃预连接(关闭)，Read 立即返回错误，上层据此提前结束。
-const sniffTimeoutHTTP = 15 * time.Second
+const sniffTimeoutHTTP = 5 * time.Second
 
 // ForwardTCP 处理来自TUN虚拟网卡(用户态协议栈)的原始TCP流量。
 // 目标地址已由用户态协议栈解析得到，这里直接复用 tunnel 的路由/代理逻辑
