@@ -25,6 +25,7 @@ type Request struct {
 	DstName string //目标域名
 	DstIP   string //目标ip
 	DstPort uint16 //目标端口
+	TUN     bool   // 来自 TUN 设备，DstIP 已由内核路由确定，无需本地 DNS 重解析
 }
 
 // NewRequest 请求类

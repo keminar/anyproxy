@@ -61,7 +61,7 @@ func dialProxy() net.Conn {
 	connTimeout := time.Duration(5) * time.Second
 	var err error
 	localProxy := fmt.Sprintf("%s:%d", "127.0.0.1", config.ListenPort)
-	proxyConn, err := net.DialTimeout("tcp", localProxy, connTimeout)
+	proxyConn, err := bypassDial("tcp", localProxy, connTimeout)
 	if err != nil {
 		log.Println("dial local proxy", err)
 	}
@@ -78,9 +78,13 @@ func connect(addr *string, interrupt chan os.Signal) {
 	if conf.RouterConfig.Websocket.Host != "" {
 		h.Add("Host", conf.RouterConfig.Websocket.Host)
 	}
-	c, _, err := websocket.DefaultDialer.Dial(u.String(), h)
+	wsDialer := &websocket.Dialer{
+		NetDial:          func(network, addr string) (net.Conn, error) { return bypassDial(network, addr, 30*time.Second) },
+		HandshakeTimeout: 45 * time.Second,
+	}
+	c, _, err := wsDialer.Dial(u.String(), h)
 	if err != nil {
-		log.Println("dial:", err)
+		log.Println("ws connect err:", err)
 		time.Sleep(time.Duration(3) * time.Second)
 		return
 	}

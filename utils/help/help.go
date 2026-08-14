@@ -29,7 +29,7 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  -ws-listen       Websocket address and port to listen on\n")
 	fmt.Fprintf(os.Stdout, "  -ws-connect      Websocket Address and port to connect\n")
 	fmt.Fprintf(os.Stdout, "  -daemon          Run as a Unix daemon\n")
-	fmt.Fprintf(os.Stdout, "  -mode            Run mode(proxy, tunnel). proxy mode default\n")
+	fmt.Fprintf(os.Stdout, "  -mode            Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN)\n")
 	fmt.Fprintf(os.Stdout, "  -debug           Debug mode (0, 1, 2, 3)\n")
 	fmt.Fprintf(os.Stdout, "  -pprof           Pprof port, disable if empty\n")
 	fmt.Fprintf(os.Stdout, "  -v               Show build version\n\n")

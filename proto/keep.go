@@ -25,15 +25,22 @@ func KeepHandler(ctx context.Context, tcpConn *net.TCPConn, buf []byte) error {
 
 	// 和client.go统一代码好维护
 	ok, err := req.ReadRequest("client")
-	if err != nil && ok == false {
-		log.Println("req err", err.Error())
+	if err != nil && !ok {
+		log.Println(trace.ID(req.ID), "req err", err.Error())
 		return err
 	}
 	// 增加一个协议判断的日志
 	if req.Proto != "http" {
-		err = fmt.Errorf("is not http request: %s", string(buf))
-		log.Println(err.Error())
+		err = fmt.Errorf("is not http request %s: %s", req.Proto, string(buf))
+		log.Println(trace.ID(req.ID), err.Error())
 		return err
 	}
 	return req.Stream.response()
+}
+
+// 预判后面的包是不是http链接
+func isKeepAliveHttp(ctx context.Context, tcpConn *net.TCPConn, buf []byte) bool {
+	req := NewRequestWithBuf(ctx, tcpConn, buf)
+	req.ReadRequest("client")
+	return req.Proto == "http"
 }
