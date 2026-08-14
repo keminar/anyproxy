@@ -9,14 +9,16 @@ QUIC(UDP443) 拦截、UDP 转发行为，以及 `target`/`proxy` 的优先级。
 
 | 平台 | 实现 | 说明 |
 |------|------|------|
-| Linux | `/dev/net/tun`（`IFF_TUN\|IFF_NO_PI`）| 读写纯 IP 包 |
-| Windows | wintun | 需 `wintun.dll` |
-| macOS | 原生 utun（`AF_SYSTEM` 控制 socket）| 自实现，不引入外部依赖 |
+| Linux | `/dev/net/tun`（`IFF_TUN\|IFF_NO_PI`）+ gVisor 用户态栈 | 读写纯 IP 包 |
+| macOS | 原生 utun（`AF_SYSTEM` 控制 socket）+ gVisor 用户态栈 | 自实现，不引入外部依赖 |
+| Windows | **WinDivert** 网络层重定向（**非虚拟网卡、非 gVisor**）| 需 `WinDivert.dll` + `WinDivert64.sys`，见 [windows-winDivert.md](windows-winDivert.md) |
 
-- macOS 通过 `Socket(AF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` + `IoctlCtlInfo` 打开 utun，
-  网卡名形如 `utun4`（配 `tun.name: utunN` 可指定单元，留空由内核自选）。
-- utun 每包带 4 字节地址族头，Device 层读写时自动剥/补，对上层 gVisor 协议栈透明。
-- 三平台共用同一套 gVisor 用户态栈和代理转发逻辑，行为一致。
+- **Linux/macOS**：建 TUN 虚拟网卡，包进 gVisor 用户态协议栈解析出 TCP 再复用代理逻辑。
+  macOS 通过 `Socket(AF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL)` + `IoctlCtlInfo` 打开 utun，
+  网卡名形如 `utun4`（配 `tun.name: utunN` 可指定单元，留空由内核自选）；utun 每包带 4 字节
+  地址族头，Device 层读写时自动剥/补，对上层 gVisor 透明。两者共用同一套 gVisor 栈，行为一致。
+- **Windows**：不建虚拟网卡，用 WinDivert 在网络层捕获出站 TCP 80/443 并 NAT 重定向到本地监听端口，
+  再复用同一套代理路由逻辑。因此 `tun.name/addr/mtu/autoRoute` 等虚拟网卡参数在 Windows 上被忽略。
 
 启动（三平台一致，需管理员/root）：
 ```

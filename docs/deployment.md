@@ -73,10 +73,10 @@ docker run -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 
 ## Windows 注意事项
 
-- **TUN 模式需管理员权限**，且需 `wintun.dll`（https://www.wintun.net/ ）：放程序同目录（同架构），或按架构放到 `wintun\<arch>\wintun.dll`（arch: amd64/arm64/x86/arm）。
+- **`mode: tun` 需管理员权限**。Windows **不建虚拟网卡**，改用 **WinDivert** 在网络层劫持数据包（取代旧的 wintun）。需把 `WinDivert.dll` + `WinDivert64.sys`（32 位系统另需 `WinDivert32.sys`）与 `anyproxy.exe` 放**同一目录**（路径含空格/中文可能导致驱动加载失败）。详见 [windows-winDivert.md](windows-winDivert.md)。
 - `ensureEagerRSS()` 在 Windows 是空操作，**不会 re-exec**。
 - **进程管理要盯住真实 PID**：`-daemon` 下父进程 fork 出子进程后立即退出，真正在跑的是子进程（新 PID）。用外部程序（如托盘 UI）启停 anyproxy 时，若按启动时拿到的父 PID 或"按 exe 名扫描"去杀，可能杀错对象、导致"杀不掉"。建议以实际监听进程的 PID 为准，或不加 `-daemon`（交给外部程序做后台隐藏）。
-- **优雅停止**：在程序自己的控制台里 `Ctrl+C`（`SIGINT`）能触发 TUN 路由/网卡清理；`taskkill /F` 是强杀，不清理。
+- **停止**：Windows 的 WinDivert 模型不改路由表、不建网卡，退出时关闭 WinDivert 句柄即停止重定向，无路由/网卡残留（与 Linux/macOS 的 TUN 路由清理不同）。
 
 ## 性能调优
 

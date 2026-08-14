@@ -60,16 +60,17 @@ anyproxy 是一个跨平台的 TCP 流量转发器 / 代理。它按域名把每
 
 ## 运行模式总览
 
-模式由单个 `-mode`（或配置 `mode`）决定，四个取值互斥：
+模式由单个 `-mode`（或配置 `mode`）决定，五个取值互斥：
 
 | 取值 | 含义 |
 |------|------|
 | `proxy`（默认） | 客户端/代理模式，仅按监听端口收流 |
 | `tunnel` | 服务端 tunneld，带 token 验证，只处理 anyproxy 请求 |
-| `tun` | 建 TUN 虚拟网卡做全局代理（需管理员/root） |
+| `tun` | 建 TUN 虚拟网卡做全局代理（Windows 用 WinDivert；需管理员/root） |
 | `bypass` | 不建网卡，仅把出向连接绑定物理网卡（逃出同机另一实例的 TUN） |
+| `tcpcopy` | 端口转发，每个连接改投到 `tcpcopy.ip:port`（开启后 hosts 规则失效） |
 
-另有两个独立开关：`tcpcopy`（端口转发模式，开启后 hosts 规则失效）与 `websocket`（内网穿透），见 [modes.md](modes.md)。
+另有一个独立开关 `websocket`（内网穿透），可与上述模式共存，见 [modes.md](modes.md)。
 
 ## 进程模型（重要）
 
@@ -77,4 +78,4 @@ anyproxy 是一个跨平台的 TCP 流量转发器 / 代理。它按域名把每
 - **后台化 `-daemon`**：程序会 fork 一个子进程、父进程立即退出，真正干活的是**子进程（新 PID）**。用外部程序管理 anyproxy 时要注意：`-daemon` 下父进程 PID 转瞬即逝，须以实际运行的子进程 PID 为准。
 - **平滑重启（Linux）**：`kill -HUP <pid>` 会 fork 新进程接管监听 fd，老进程 drain 后退出。
 - **TUN 清理**：TUN 模式下收到 `SIGINT/SIGTERM` 会先取消 context、关闭虚拟网卡并回收 `0.0.0.0/1`、`128.0.0.0/1` 路由，再退出。**强杀（`kill -9` / `taskkill /F`）不会触发清理**，会残留路由/网卡。
-- **Windows**：`ensureEagerRSS()` 为空操作（不 re-exec）；TUN 需管理员权限与 `wintun.dll`。进程停止相关注意事项见 [deployment.md](deployment.md)。
+- **Windows**：`ensureEagerRSS()` 为空操作（不 re-exec）；`mode: tun` 用 **WinDivert**（非虚拟网卡），需管理员权限与 `WinDivert.dll`/`.sys`。进程停止相关注意事项见 [deployment.md](deployment.md)、[windows-winDivert.md](windows-winDivert.md)。

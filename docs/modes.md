@@ -29,7 +29,7 @@ anyproxy 的运行模式由单个 `-mode` 决定，四个取值互斥：`proxy`�
 
 ## tun 模式（TUN 全局代理）
 
-建 TUN 虚拟网卡接管全局流量，内部用 gVisor 用户态协议栈解析 TCP 再走代理规则，等价 tun2socks。需管理员/root，Windows 另需 `wintun.dll`。跨平台特性、autoRoute、QUIC 拦截、UDP 行为详见 [tun-features.md](tun-features.md)。
+Linux/macOS 建 TUN 虚拟网卡接管全局流量，内部用 gVisor 用户态协议栈解析 TCP 再走代理规则，等价 tun2socks。**Windows 例外**：不建虚拟网卡，改用 **WinDivert** 在网络层劫持重定向，需 `WinDivert.dll` + `WinDivert64.sys`（见 [windows-winDivert.md](windows-winDivert.md)）。均需管理员/root。跨平台特性、autoRoute、QUIC 拦截、UDP 行为详见 [tun-features.md](tun-features.md)。
 
 ```bash
 sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'

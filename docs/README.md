@@ -3,6 +3,7 @@
 ## 入门与总览
 
 - [overview.md](overview.md) — 概述与架构：能做什么、数据链路、一条连接的处理流程、运行模式总览、进程模型。
+- [usage.md](usage.md) — 客户端接入与使用：同端口自动识别 HTTP+SOCKS5 代理、透明代理、全局(TUN/WinDivert)三种接入方式，及怎么把客户端指过来。
 
 ## 参考手册
 
@@ -16,6 +17,7 @@
 
 ## 专题
 
+- [caching.md](caching.md) — 三个进程内缓存：DNS 解析缓存(10min)、上游代理连通性缓存(20s，跳过挂掉的代理)、嗅探域名缓存(10min，救预连接场景的按域名匹配)。
 - [tun-features.md](tun-features.md) — TUN 全局代理特性：跨平台(Linux/Windows/macOS utun)、自动路由 `autoRoute`、QUIC(UDP443) 拦截 `blockQUIC`、UDP 转发行为、`target`/`proxy` 优先级。
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治、`loopGuard` 熔断器兜底、平台差异。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。

@@ -120,9 +120,10 @@ docker run  -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 
 # TUN 虚拟网卡全局代理
 
-除了Linux下用iptables转发外，anyproxy 还支持创建 TUN 虚拟网卡实现跨平台(Windows/Linux/macOS)全局代理。
-其原理是创建一块虚拟网卡，把系统流量路由进来，内部用 gVisor 用户态协议栈解析出TCP连接，
+除了Linux下用iptables转发外，anyproxy 还支持跨平台(Windows/Linux/macOS)全局代理。
+Linux/macOS 创建一块 TUN 虚拟网卡，把系统流量路由进来，内部用 gVisor 用户态协议栈解析出TCP连接，
 再复用 anyproxy 已有的代理路由(direct/tunnel/socks5/hosts规则)转发出去，等价于 tun2socks。
+Windows 不建虚拟网卡，改用 WinDivert 在网络层捕获并重定向出站 TCP，再复用同一套代理逻辑。
 
 > 特性与规则详解（跨平台 utun、autoRoute、QUIC 拦截、target/proxy 优先级）见 [docs/tun-features.md](docs/tun-features.md)
 
@@ -131,10 +132,8 @@ docker run  -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 * 支持按域名配置不同代理: TUN 只拿得到目标IP，程序会从首包嗅探 TLS SNI / HTTP Host 还原域名，让 `hosts.name` 的域名规则生效；嗅探不到(如服务端先说话的协议)则回退按IP匹配
 * 目前只代理 TCP 流量，UDP(含DNS)暂不走隧道。全量接管路由时要给 DNS 服务器加直连例外，否则无法解析域名(或改用 DoH/DoT 这类走TCP的DNS)
 * 需要管理员/root 权限运行
-* Windows 需要 `wintun.dll`(官网 https://www.wintun.net/ )。放置方式二选一:
-  * 放程序同目录(与程序同架构)
-  * 按架构放到程序同级的 `wintun\<arch>\wintun.dll`(arch: amd64/arm64/x86/arm),程序会按当前架构自动加载,找不到再回退到同目录/System32
-* 程序负责创建网卡、分配接口IP并启用；路由采用半自动方式，启动时会打印所需路由命令供确认后执行
+* Windows 用 WinDivert：把 `WinDivert.dll` + `WinDivert64.sys`(32位系统另需 `WinDivert32.sys`)与 `anyproxy.exe` 放同一目录(路径含空格/中文可能导致驱动加载失败)。详见 [docs/windows-winDivert.md](docs/windows-winDivert.md)
+* Linux/macOS 程序负责创建网卡、分配接口IP并启用；路由采用半自动方式，启动时会打印所需路由命令供确认后执行
 
 > 启动
 
