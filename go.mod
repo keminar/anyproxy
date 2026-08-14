@@ -19,3 +19,5 @@ require (
 	github.com/google/btree v1.1.2 // indirect
 	golang.org/x/time v0.12.0 // indirect
 )
+
+require golang.org/x/sys v0.30.0 // indirect
