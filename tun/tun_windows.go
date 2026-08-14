@@ -24,6 +24,14 @@ import (
 // cfg 的 Name/Addr/MTU/AutoRoute 属于 wintun 模型, 在 Windows 上忽略。
 // cfg.ExcludeProcs / cfg.BypassIPs 逃逸参数来自 tun.windows 配置。
 func Run(ctx context.Context, cfg Config) error {
+	// 若配置了 windivertDir, 从该目录预加载 WinDivert.dll(.sys 也在该目录被找到),
+	// 可把驱动放到无空格/中文的干净路径, 而 exe 原地不动。失败不直接返回, 交给下面
+	// Preflight 给出更明确的缺文件提示。
+	if cfg.WindivertDir != "" {
+		if err := windivert.SetSearchDir(cfg.WindivertDir); err != nil {
+			log.Printf("tun(windivert): 预加载 %s\\WinDivert.dll 失败: %v", cfg.WindivertDir, err)
+		}
+	}
 	if err := windivert.Preflight(); err != nil {
 		return err
 	}

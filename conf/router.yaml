@@ -69,6 +69,8 @@ tun:
 #  # ===== Windows (WinDivert 重定向, 无虚拟网卡) =====
 #  windows:
 #    blockQUIC: true
+#    windivertDir: C:\wd     # WinDivert.dll+WinDivert64.sys 所在目录; 空=exe同目录。
+#                            # 可把驱动放到无空格/中文的干净路径, exe 原地不动, 绕开驱动加载失败
 #    bypassIPs:               # 这些目标"排除捕获"直连, 填上级代理/VPN服务器IP
 #      - 203.0.113.10
 #    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)

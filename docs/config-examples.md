@@ -36,7 +36,7 @@ tun:
     bypassIPs: [<上级代理IP>]           # Windows 上 bypassIPs = 排除捕获(直连)
 ```
 
-> 上级代理若是域名或与本机不同网段，务必把它的 IP 放进 `bypassIPs`，让 anyproxy 到上级的连接直连、不被自己的 TUN 再抓走。
+> 以 **IP** 指定的上级代理（`-p`/`default.proxy`/`hosts[].proxy`）**会自动并入 `bypassIPs`**，上面示例里手动写 `bypassIPs: [<上级代理IP>]` 只是为了直观，可省略。若上级代理是**域名**，程序无法在此确定其 IP，仍需手动把 IP 填进 `bypassIPs`（或改用 IP 指定代理）。
 
 ---
 

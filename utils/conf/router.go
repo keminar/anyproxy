@@ -137,6 +137,7 @@ type TunOS struct {
 	BlockQUIC    *bool    `yaml:"blockQUIC"`    //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
 	ExcludeProcs []string `yaml:"excludeProcs"` //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
 	InboundPorts []int    `yaml:"inboundPorts"` //仅darwin: 需pf放行回包的入站TCP端口(如22)
+	WindivertDir string   `yaml:"windivertDir"` //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
 }
 
 // Tun 虚拟网卡全局代理。

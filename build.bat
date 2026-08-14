@@ -13,7 +13,8 @@ set https_proxy=http://127.0.0.1:3000
 if not exist dist mkdir dist
 
 echo building dist\anyproxy-windows-amd64.exe ...
-go build -o dist\anyproxy-windows-amd64.exe .
+rem -trimpath 去掉二进制里嵌入的本机源码绝对路径(否则会带上 GOPATH 全路径)
+go build -trimpath -o dist\anyproxy-windows-amd64.exe .
 if %ERRORLEVEL% neq 0 (
     echo build failed
     exit /b %ERRORLEVEL%

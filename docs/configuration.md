@@ -131,10 +131,11 @@ tun:
 | `addr` | `10.9.0.1/24` | Linux/macOS | 接口地址 CIDR；Windows 忽略 |
 | `mtu` | 1500 | Linux/macOS | MTU；Windows 忽略 |
 | `autoRoute` | **true** | Linux/macOS | 自动加/清理路由；`false` 只打印命令；Windows 忽略 |
-| `bypassIPs` | 空 | 三平台 | 这些目标直连（Linux/macOS 加 `/32` 路由；Windows 排除捕获）。含上级代理/VPN 服务器 IP |
+| `bypassIPs` | 空 | 三平台 | 这些目标直连（Linux/macOS 加 `/32` 路由；Windows 排除捕获）。**以 IP 指定的上级代理（`-p`/`default.proxy`/`hosts[].proxy`）会自动并入，无需手动填**；只有域名指定的代理或 VPN 服务器 IP 等才需要在此手动列出 |
 | `blockQUIC` | **true** | 三平台 | drop 命中 hosts(配 ip) 域名的 UDP443，逼 QUIC 回退 TCP |
 | `excludeProcs` | 空 | **仅 Windows** | 这些进程(exe 名)出向不重定向，逃同机隧道(如 `openvpn.exe`)死循环 |
 | `inboundPorts` | 空 | **仅 macOS** | pf reply-to 放行入站服务回包(如外网 SSH 22)。Linux 自动、Windows 无需 |
+| `windivertDir` | 空(exe 同目录) | **仅 Windows** | `WinDivert.dll`+`WinDivert64.sys` 所在目录。可把驱动放到无空格/中文的干净路径(如 `C:\wd`)，exe 原地不动，绕开中文/空格路径导致的驱动加载失败 |
 
 详见 [tun-features.md](tun-features.md)、VPN 共存见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
 

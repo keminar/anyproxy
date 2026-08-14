@@ -13,6 +13,7 @@ type Config struct {
 	BypassIPs    []string // 走物理网卡的IP列表（直连例外）。Windows(WinDivert)下亦作排除捕获的目的IP
 	ExcludeProcs []string // 仅 Windows(WinDivert): 这些进程(exe名)的出向不重定向，用于逃出同机隧道(如openvpn.exe)
 	InboundPorts []int    // 仅 macOS: 需放行回包的入站 TCP 端口(如 22)，用 pf reply-to 让回包原路返回
+	WindivertDir string   // 仅 Windows: WinDivert.dll+WinDivert64.sys 所在目录，空=exe同目录
 }
 
 // BypassConfig bypass 模式运行参数(跨平台)。

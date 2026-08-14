@@ -39,8 +39,9 @@ sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
 
 三平台均已实现（Linux `ip route` / Windows `route add if` / macOS `route add -interface`）。
 
-> 默认 true 意味着开 `mode=tun` 就会接管默认路由。**务必先给上级代理出口 IP 配直连例外**
-> （`tun.bypassIPs` 填上级代理 IP，autoRoute 会自动加 `/32` 直连路由），否则会环路断网。
+> 默认 true 意味着开 `mode=tun` 就会接管默认路由。上级代理必须直连、不能走 TUN，否则环路断网。
+> **以 IP 指定的上级代理会自动加入直连例外**（`tun.bypassIPs`，autoRoute 加 `/32` 直连路由）；
+> 只有**域名指定**的上级代理需手动把其 IP 填进 `tun.bypassIPs`。
 
 ## 3. QUIC(UDP 443) 拦截 blockQUIC（默认开启）
 
@@ -163,5 +164,5 @@ hosts:
 | `mode` | `proxy` | `tun` 建虚拟网卡全局代理（三平台）|
 | `tun.name` | 平台默认 | Linux `anytun0` / Windows `AnyProxy` / macOS `utunN`(内核自选) |
 | `tun.autoRoute` | **true** | 不配置即自动加路由；`false` 只打印命令 |
-| `tun.bypassIPs` | 空 | 直连例外（务必含上级代理 IP）|
+| `tun.bypassIPs` | 空 | 直连例外（以 IP 指定的上级代理自动并入；域名代理需手动填 IP）|
 | `tun.blockQUIC` | **true** | drop 配了 ip 的域名的 UDP443，逼 QUIC 回退 TCP；`false` 关闭 |

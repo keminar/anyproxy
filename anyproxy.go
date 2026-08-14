@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -156,9 +158,12 @@ func main() {
 			Addr:         conf.RouterConfig.Tun.Addr,
 			MTU:          conf.RouterConfig.Tun.MTU,
 			AutoRoute:    autoRoute,
-			BypassIPs:    conf.RouterConfig.Tun.BypassIPs,
 			ExcludeProcs: conf.RouterConfig.Tun.ExcludeProcs,
 			InboundPorts: conf.RouterConfig.Tun.InboundPorts,
+			WindivertDir: conf.RouterConfig.Tun.WindivertDir,
+			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
+			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
+			BypassIPs: withProxyBypassIPs(conf.RouterConfig.Tun.BypassIPs),
 		}
 		tunWG.Add(1)
 		go func() {
@@ -173,7 +178,7 @@ func main() {
 			ExcludeNics:  conf.RouterConfig.Bypass.ExcludeNics,
 			Device:       conf.RouterConfig.Bypass.Device,
 			ExcludeProcs: conf.RouterConfig.Bypass.ExcludeProcs,
-			BypassIPs:    conf.RouterConfig.Bypass.BypassIPs,
+			BypassIPs:    withProxyBypassIPs(conf.RouterConfig.Bypass.BypassIPs),
 		})
 		// 退出/平滑重启前清理 bypass 加的 /32 例外路由(复用 tunCtx 取消信号 + tunWG 等待)
 		tunWG.Add(1)
@@ -226,4 +231,57 @@ func registerTUNCleanup(server *grace.Server, cancel context.CancelFunc, wg *syn
 	server.RegisterSignalHook(grace.PreSignal, syscall.SIGHUP, cleanup)
 	server.RegisterSignalHook(grace.PreSignal, syscall.SIGINT, cleanup)
 	server.RegisterSignalHook(grace.PreSignal, syscall.SIGTERM, cleanup)
+}
+
+// withProxyBypassIPs 把「所有以 IP 字面量指定的上级代理」并入 base(bypassIPs)后返回。
+// 覆盖全局代理(-p / default.proxy, 取 config.ProxyServer)与各 hosts[].proxy(支持多代理
+// 逗号分隔及 " last"/" deny" 后缀)。只收 IPv4 字面量; 域名指定的代理无法在此确定 IP, 跳过。
+// 目的: 让 anyproxy 到上级代理的连接默认直连(不被自己的 TUN/WinDivert 抓走成环路)。
+func withProxyBypassIPs(base []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(base))
+	for _, s := range base {
+		s = strings.TrimSpace(s)
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	add := func(host string) {
+		host = strings.TrimSpace(host)
+		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && !seen[host] {
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	// 全局代理(命令行 -p / default.proxy 解析后的服务器地址)
+	add(config.ProxyServer)
+	// 各 host 的自定义代理
+	for _, h := range conf.RouterConfig.Hosts {
+		p := strings.TrimSpace(h.Proxy)
+		if p == "" {
+			continue
+		}
+		// 去掉尾部 " last" / " deny" 操作后缀
+		if i := strings.LastIndex(p, " "); i >= 0 {
+			if suf := p[i+1:]; suf == "last" || suf == "deny" {
+				p = p[:i]
+			}
+		}
+		for _, spec := range strings.Split(p, ",") {
+			spec = strings.TrimSpace(spec)
+			if spec == "" {
+				continue
+			}
+			if j := strings.Index(spec, "://"); j >= 0 { // 去 scheme
+				spec = spec[j+3:]
+			}
+			host := spec
+			if k := strings.LastIndex(spec, ":"); k >= 0 { // 去端口(IPv6 字面量会解析失败被跳过)
+				host = spec[:k]
+			}
+			add(host)
+		}
+	}
+	return out
 }
