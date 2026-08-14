@@ -10,6 +10,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/keminar/anyproxy/proto/stats"
@@ -34,6 +35,22 @@ const (
 const protoTCP = "tcp"
 const protoHTTP = "http"
 const protoHTTPS = "https"
+
+// proxyFailTTL 上级代理探测失败后, 标记为不可用的缓存时长。
+// 有效期内对该代理直接跳过 300ms 拨号探测; 过期后再探测一次以便及时发现其恢复。
+// 取值权衡: 太短则频繁重探浪费时间, 太长则代理恢复后要等更久才被重新使用。
+const proxyFailTTL = 20 * time.Second
+
+// autoDirectFailTTL 是 auto 模式下「直连失败」的缓存时长: 有效期内后续请求跳过直连、
+// 直接走代理, 只为省掉一次页面并发请求里的重复直连。刻意取短(而非缓存很久), 避免一次偶发
+// 直连失败就把该域名长时间钉死在代理上; 过期后会再尝试直连以便及时恢复。
+const autoDirectFailTTL = 20 * time.Second
+
+// autoDirectSec 是 auto 模式先本地直连的超时(秒), 也是「连不通的目标」首个请求的等待延迟。
+// 正常可达 TCP 握手多在几百毫秒内、跨境也少超过 1s; 被静默丢包的目标(如被墙站点)才会等满。
+// 取 2s: 既容忍慢握手不误判, 又尽快把连不通目标切去代理(之后由 autoDirectFailTTL 兜住)。
+// 复用连接不重连, 成功即用这条; 单列常量避免动到 s.dail 默认 5s(那用于真实直连/代理连接)。
+const autoDirectSec = 2
 
 // 上行统计
 var inbound *stats.Manager
@@ -72,6 +89,8 @@ type tunnel struct {
 	clientUnRead int
 
 	buf []byte
+
+	guardKey string // loopguard 目标键(host:port), handshake 通过后设置, 供 transfer 计数
 }
 
 // newTunnel 实例
@@ -130,11 +149,11 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
-				if srcname == "request" {
-					s.inbountCounter.Add(int64(nw))
-				} else {
-					s.outbountCounter.Add(int64(nw))
-				}
+			if srcname == "request" {
+				s.inbountCounter.Add(s.req.ID, int64(nw))
+			} else {
+				s.outbountCounter.Add(s.req.ID, int64(nw))
+			}
 			}
 			if ew != nil {
 				err = ew
@@ -183,6 +202,9 @@ func (s *tunnel) transfer(clientUnRead int) {
 	if config.DebugLevel >= config.LevelLong {
 		log.Println(trace.ID(s.req.ID), "transfer start")
 	}
+	// 计入 loopguard 在传连接, 结束时释放(key 为空则跳过, 如 tcpcopy)
+	guard.enter(s.guardKey)
+	defer guard.leave(s.guardKey)
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
 	done := make(chan struct{})
@@ -217,7 +239,7 @@ func (s *tunnel) transfer(clientUnRead int) {
 func (s *tunnel) Write(p []byte) (n int, err error) {
 	n, err = s.conn.Write(p)
 	if s.inbountCounter != nil {
-		s.inbountCounter.Add(int64(n))
+		s.inbountCounter.Add(s.req.ID, int64(n))
 	}
 	return
 }
@@ -243,11 +265,16 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 	if second > 0 {
 		connTimeout = time.Duration(second) * time.Second
 	}
-	conn, err := net.DialTimeout(network, connAddr, connTimeout)
+	conn, err := tunDial(network, connAddr, connTimeout)
 	if err != nil {
 		return err
 	}
 	s.conn = conn.(*net.TCPConn)
+	// 出向本地址(实际 egress)是排查 TUN 环路的关键证据: 若它落在 TUN 网段
+	// (如 10.9.0.x)而非物理网卡 IP, 说明出向没能逃出 TUN, 就是环路根因。
+	if config.DebugLevel >= config.LevelLong {
+		log.Printf("%s dialed %s via local %s\n", trace.ID(s.req.ID), connAddr, s.conn.LocalAddr())
+	}
 	return nil
 }
 
@@ -311,21 +338,30 @@ func (s *tunnel) lookup(dstName, dstIP string) (string, cache.DialState) {
 	return dstIP, state
 }
 
+// defaultLocalPorts 是 localport 模式未配置 default.localPort 时的默认本地端口: ftp(21)/ssh(22)。
+var defaultLocalPorts = []int{21, 22}
+
+// isLocalTCPPort 判断端口在 localport 模式下是否走本地直连。
+// 未配置 default.localPort 时用默认的 21/22；一旦配置则完全以配置为准(覆盖而非追加)。
+func isLocalTCPPort(port uint16) bool {
+	ports := conf.RouterConfig.Default.LocalPort
+	if len(ports) == 0 {
+		ports = defaultLocalPorts
+	}
+	for _, p := range ports {
+		if p == int(port) {
+			return true
+		}
+	}
+	return false
+}
+
 // 查询配置
 func findHost(dstName, dstIP string) conf.Host {
+	defMatch := conf.RouterConfig.Default.Match
 	for _, h := range conf.RouterConfig.Hosts {
-		confMatch := getString(h.Match, conf.RouterConfig.Default.Match, "equal")
-		switch confMatch {
-		case "equal":
-			if h.Name == dstName || h.Name == dstIP {
-				return h
-			}
-		case "contain":
-			if strings.Contains(dstName, h.Name) || strings.Contains(dstIP, h.Name) {
-				return h
-			}
-		default:
-			//todo
+		if h.Matched(dstName, defMatch) || h.Matched(dstIP, defMatch) {
+			return h
 		}
 	}
 	return conf.Host{}
@@ -344,12 +380,31 @@ func getString(val string, def string, def2 string) string {
 
 // handshake 和server握手
 func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) (err error) {
+	// 死循环兜底: 同机 A(TUN)+B(bypass) 若 bypass 未生效, 句柄会堆积且都指向同一目标,
+	// 全局在传连接冲高后某目标占比过大即判为环路, 拒绝其新连接以解开环路。
+	// 正常应由 mode=bypass 根治, 此为最后防线。
+	guardKey := dstName
+	if guardKey == "" {
+		guardKey = dstIP
+	}
+	guardKey = fmt.Sprintf("%s:%d", guardKey, dstPort)
+	if ok, tripped, keyActive, total := guard.allow(guardKey); !ok {
+		if tripped {
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("loopguard: circuit open for %s (in-flight %d/%d, suspected proxy loop)", guardKey, keyActive, total))
+		}
+		return fmt.Errorf("loopguard: %s dominates in-flight connections", guardKey)
+	}
+	s.guardKey = guardKey
+
 	var state cache.DialState
 	// 先取下配置，再决定要不要走本地dns解析，否则未解析域名DNS解析再超时卡半天，又不会被缓存
 	host := findHost(dstName, dstIP)
-	if ip, ok := s.isAllowed(host.AllowIP); !ok {
-		err = fmt.Errorf("%s is not allowed", ip)
-		return err
+	// TUN 流量来自本机虚拟网卡，属受信任的本地流量，跳过 allowIP 检查
+	if !s.req.TUN {
+		if ip, ok := s.isAllowed(host.AllowIP); !ok {
+			err = fmt.Errorf("%s is not allowed", ip)
+			return err
+		}
 	}
 	var confTarget string
 	if proto == protoTCP {
@@ -357,14 +412,22 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	} else {
 		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
 	}
+	// localport: 命中的端口走本地直连，其余走代理。内置 21/22/3306(ftp/ssh/mysql)，可在配置追加。
+	if confTarget == "localport" {
+		if isLocalTCPPort(dstPort) {
+			confTarget = "local"
+		} else {
+			confTarget = "remote"
+		}
+	}
 	confDNS := getString(host.DNS, conf.RouterConfig.Default.DNS, "local")
 
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
 	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
 	if host.IP != "" {
 		dstIP = host.IP
-	} else if dstName != "" && confDNS != "remote" {
-		// http请求的dns解析
+	} else if dstName != "" && confDNS != "remote" && !s.req.TUN {
+		// http请求的dns解析；TUN 连接的目标 IP 已由内核路由确定，无需重新解析
 		dstIP, state = s.lookup(dstName, dstIP)
 	}
 
@@ -380,68 +443,107 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		err = fmt.Errorf("deny visit %s (%s)", dstName, dstIP)
 		return
 	}
-	proxyScheme := config.ProxyScheme
-	proxyServer := config.ProxyServer
-	proxyPort := config.ProxyPort
-	if host.Proxy != "" { //如果有自定义代理，则走自定义
-		suffixLen := 5
-		// 如果单域名代理配置以" last"或" deny"结尾，忽略全局的代理,并做相应的动作
-		opIdx := len(host.Proxy) - suffixLen
-		opName := ""
-		if len(host.Proxy) >= suffixLen && host.Proxy[opIdx:opIdx+1] == " " {
-			opName = host.Proxy[opIdx+1:]
-			host.Proxy = host.Proxy[:opIdx]
-		}
 
-		// 支持多代理以逗号分隔，依次找到能用的
-		for _, hostProxy := range strings.Split(host.Proxy, ",") {
-			hostProxy = strings.TrimSpace(hostProxy)
-			proxyScheme2, proxyServer2, proxyPort2, err := getProxyServer(hostProxy)
-			if err != nil {
-				// 如果自定义代理不可用，confTarget走原来逻辑
-				log.Println(trace.ID(s.req.ID), "host.proxy err", err)
-			} else {
-				proxyScheme = proxyScheme2
-				proxyServer = proxyServer2
-				proxyPort = proxyPort2
-				if confTarget != "remote" { //如果有定制代理，就不能用local 和 auto
-					confTarget = "remote"
+	// target=auto: 本地优先, 先做一次「真正的直连」(非静默探测, 成功即复用该连接)。
+	// 直连成功即结束, 完全不碰代理; 直连失败才降级为 remote 走代理, 并强制远程 DNS。
+	// 记 autoDirectFailed: 直连既已失败, 后面即便代理也挂了也不再重试同一直连(直接失败)。
+	autoDirectFailed := false
+	if confTarget == "auto" {
+		if state == cache.StateFail {
+			// 近期直连已失败(短缓存内): 跳过重复直连, 直接走代理; 且标记直连不可用
+			autoDirectFailed = true
+		} else {
+			network, connAddr := s.buildAddress(dstName, dstIP, dstPort, true)
+			if connAddr != "" {
+				forName := ""
+				if dstName != "" {
+					forName = " for " + dstName
 				}
-				opName = ""
-				break
+				if e := s.dail(network, connAddr, autoDirectSec); e == nil {
+					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s", connAddr, forName))
+					s.curState = stateNew
+					return
+				} else {
+					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto direct %s%s fail: %v, fallback to proxy", connAddr, forName, e))
+					autoDirectFailed = true
+					if dstName != "" && dstIP != "" {
+						cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, autoDirectFailTTL)
+					}
+				}
 			}
 		}
-		if opName == "last" { //没通的代理，走本地
-			proxyServer = ""
-		} else if opName == "deny" {
-			err = fmt.Errorf("all proxy dail fail %s", host.Proxy)
+		// 直连不通 -> 降级为 remote 走代理。有一种 ip 能 dail 通但收不到数据的情况 auto 判断不了,
+		// 需在规则里显式写 remote。
+		confTarget = "remote"
+		confDNS = "remote"
+	}
+
+	proxyScheme := config.ProxyScheme
+	var proxyServer string
+	var proxyPort uint16
+	// target=local 不需要代理, 跳过整个代理解析: 既省去无谓探测, 也避免被全局代理的 deny 后缀
+	// 误伤(local 应始终直连)。proxyServer 保持空, 下方走 else 分支直连。
+	if confTarget != "local" {
+		// 全局代理实时取值以支持热加载: 命令行 -p(固定) 优先于配置 default.proxy(可热改)。
+		globalSpec := config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig.Default.Proxy, "")
+		proxyConfigured := host.Proxy != "" || globalSpec != ""
+		// localFallback: 链路上出现过 " local" 后缀, 代理都不通时「显式允许」走本地直连。
+		localFallback := false
+		// useGlobal 惰性解析全局代理, 仅在「无单域名代理」或「单域名代理都不可用且无 local/deny 后缀」
+		// 时作为回退调用——保证 host.proxy 先于全局代理尝试, 且 host.proxy 命中时不白探测全局。
+		// 返回 true 表示全局代理带 deny 后缀且都不可用, 应拒绝请求。
+		useGlobal := func() (denied bool) {
+			if globalSpec == "" {
+				return false
+			}
+			if sc, sv, pt, opName, ok := resolveGlobalProxy(s.req.ID, globalSpec); ok {
+				proxyScheme, proxyServer, proxyPort = sc, sv, pt
+			} else if opName == "local" {
+				localFallback = true
+			} else if opName == "deny" {
+				return true
+			}
+			return false
+		}
+		// 优先单域名 host.proxy; 失败再按后缀决定本地直连/拒绝/回退全局代理。
+		if host.Proxy != "" {
+			if sc, sv, pt, opName, ok := resolveProxySpec(s.req.ID, host.Proxy); ok {
+				proxyScheme, proxyServer, proxyPort = sc, sv, pt
+			} else if opName == "local" { //host 代理带 local 后缀且都不可用, 允许走本地直连
+				localFallback = true
+			} else if opName == "deny" { //host 代理都不可用, 拒绝请求
+				err = fmt.Errorf("all proxy dail fail %s", host.Proxy)
+				return
+			} else if useGlobal() { //无后缀且都不可用: 回退全局代理
+				err = fmt.Errorf("all proxy dail fail %s", globalSpec)
+				return
+			}
+		} else if useGlobal() { //无单域名代理: 用全局代理
+			err = fmt.Errorf("all proxy dail fail %s", globalSpec)
+			return
+		}
+		// 配了代理但都不可用, 又没有 local 后缀允许直连: 本次要求走代理(remote/proxy, auto 也已
+		// 降级为 remote), 不能静默直连出去, 报错。
+		if proxyServer == "" && proxyConfigured && !localFallback {
+			err = fmt.Errorf("all proxy unavailable and no local fallback for %s", dstName)
+			return
+		}
+		// auto 场景: 直连已经失败过, 才降级来走代理; 若代理也都不可用而想靠 local 后缀退回直连,
+		// 那是重试同一个刚失败的直连, 没有意义, 直接判失败(避免多等一次 5s 超时)。
+		if proxyServer == "" && localFallback && autoDirectFailed {
+			err = fmt.Errorf("auto: direct and all proxy failed for %s", dstName)
 			return
 		}
 	}
+	// 上游代理若指向本进程自己的监听地址(回环/本机IP + 监听端口), 代理请求会打回自己
+	// 的监听器被再次转发, 形成应用层死循环(现象: PROXY 127.0.0.1:<监听端口> 反复出现)。
+	// 当作无代理处理, 走直连(TUN 模式下由出向 socket 的 IP_UNICAST_IF 逃出), 避免空转; 并限流告警提示改配置。
+	if proxyServer != "" && proxyPort > 0 && isSelfProxy(proxyServer, proxyPort) {
+		logSelfProxy(s.req.ID, proxyServer, proxyPort)
+		proxyServer, proxyPort = "", 0
+	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
-		if confTarget == "auto" {
-			if state != cache.StateFail {
-				//local dial成功则返回，走本地网络
-				//auto 只能优化ip ping 不通的情况，能dail通访问不了的需要手动remote
-				network, connAddr := s.buildAddress(dstName, dstIP, dstPort, true)
-				if connAddr != "" {
-					err = s.dail(network, connAddr, 1)
-					if err == nil {
-						log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s", connAddr))
-						s.curState = stateNew
-						return
-					}
-				}
-				if dstName != "" && dstIP != "" {
-					cache.ResolveLookup.Store(dstName, dstIP, cache.StateFail, time.Duration(1)*time.Hour)
-				}
-			}
-			//fail的auto 等于用remote访问，但ip在remote访问可能也是不通的，强制用远程dns
-			//如果又想远程，又想用本地dns请配置中单独指定
-			//有一种情况是ip能dail通，auto模式就是会用local，但是transfer时接不到数据包，这种也要配置中单独指定remote
-			confDNS = "remote"
-		}
-		// remote 请求
+		// remote 请求(auto 的直连探测已在前面完成, 到这里说明要走代理)
 		var targetAddr string
 		var targetNet string
 		if confDNS == "remote" {
@@ -466,7 +568,10 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
 			err = s.httpConnect(network, connAddr, targetAddr, true)
 		case "http":
-			if proto == protoHTTP { //可避免转发到charles显示2次域名，且部分电脑请求出错
+			// 直发原始请求这条分支要求请求已被 http.go 解析改写成绝对形式(absolute-form)，
+			// 仅适用于监听入口的 HTTP 流。TUN 是原始字节转发(origin-form: GET /path)，
+			// http 代理不认，故 TUN 的 http 也必须用 CONNECT 隧道。
+			if proto == protoHTTP && !s.req.TUN { //可避免转发到charles显示2次域名，且部分电脑请求出错
 				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s", connAddr))
 				err = s.dail(network, connAddr, 0)
 			} else {
@@ -497,45 +602,160 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	return
 }
 
-// getProxyServer 解析代理服务器
-func getProxyServer(proxySpec string) (string, string, uint16, error) {
+// isSelfProxy 判断配置的上游代理是否就是本进程自己的监听地址(回环/本机IP + 监听端口)。
+// 是则代理请求会打回自己的监听器、被再次转发, 形成应用层死循环。
+func isSelfProxy(server string, port uint16) bool {
+	if config.ListenPort == 0 || port != config.ListenPort {
+		return false
+	}
+	ip := net.ParseIP(server)
+	if ip == nil {
+		// 域名形式只挡最常见的 localhost
+		return strings.EqualFold(server, "localhost")
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	// 指向本机物理网卡 IP / TUN 自身 IP + 监听端口, 同样会回到自己的监听器
+	return server == config.TUNBypassIP || server == config.TUNSelfIP
+}
+
+// 自代理告警限流: 每秒最多一条, 附被抑制条数, 避免每连接刷屏。
+var (
+	selfProxyMu   sync.Mutex
+	selfProxyLast time.Time
+	selfProxySkip int
+)
+
+func logSelfProxy(id uint, server string, port uint16) {
+	selfProxyMu.Lock()
+	now := time.Now()
+	if !selfProxyLast.IsZero() && now.Sub(selfProxyLast) < time.Second {
+		selfProxySkip++
+		selfProxyMu.Unlock()
+		return
+	}
+	skipped := selfProxySkip
+	selfProxySkip = 0
+	selfProxyLast = now
+	selfProxyMu.Unlock()
+	log.Println(trace.ID(id), fmt.Sprintf("proxy %s:%d is my own listen address; ignoring to avoid self-loop, going direct. Set a real upstream proxy (+%d suppressed)", server, port, skipped))
+}
+
+// resolveProxySpec 解析支持「逗号分隔多代理 + 末尾 local/deny 后缀」的代理配置,
+// 单域名 host.proxy 与全局 default.proxy 共用同一套逻辑。
+// 依次对每个代理做连通性探测(getProxyServer 内含 300ms 拨号), 返回第一个能连通的;
+// 都不可用时 ok=false, opName 指示兜底动作:
+//   "local": 忽略代理走本地直连(调用方把 proxyServer 置空)
+//   "deny" : 拒绝请求
+//   ""     : 无后缀, 由调用方决定(host 情况回退全局代理)
+func resolveProxySpec(id uint, spec string) (scheme, server string, port uint16, opName string, ok bool) {
+	switch {
+	case strings.HasSuffix(spec, " local"):
+		opName = "local"
+		spec = strings.TrimSpace(strings.TrimSuffix(spec, " local"))
+	case strings.HasSuffix(spec, " deny"):
+		opName = "deny"
+		spec = strings.TrimSpace(strings.TrimSuffix(spec, " deny"))
+	}
+	for _, one := range strings.Split(spec, ",") {
+		one = strings.TrimSpace(one)
+		if one == "" {
+			continue
+		}
+		sc, sv, pt, err := getProxyServer(one)
+		if err != nil {
+			// 该代理不可用, 记录后尝试下一个
+			log.Println(trace.ID(id), "proxy err", err)
+			continue
+		}
+		return sc, sv, pt, "", true
+	}
+	return "", "", 0, opName, false
+}
+
+// isMultiProxySpec 判断代理配置是否为「多代理或带 local/deny 后缀」,
+// 需要按请求逐个探测挑选; 否则是简单单代理, 走无探测快路径。
+func isMultiProxySpec(spec string) bool {
+	return strings.Contains(spec, ",") ||
+		strings.HasSuffix(spec, " local") ||
+		strings.HasSuffix(spec, " deny")
+}
+
+// resolveGlobalProxy 解析全局代理(default.proxy / -p)。
+// 简单单代理直接解析、不做连通性探测(保持快路径, 不给每个请求加 300ms);
+// 多代理/带后缀则复用 resolveProxySpec 逐个探测挑选并返回 local/deny 兜底。
+func resolveGlobalProxy(id uint, spec string) (scheme, server string, port uint16, opName string, ok bool) {
+	if isMultiProxySpec(spec) {
+		return resolveProxySpec(id, spec)
+	}
+	sc, sv, pt, err := parseProxyServer(spec)
+	if err != nil {
+		log.Println(trace.ID(id), "global proxy err", err)
+		return "", "", 0, "", false
+	}
+	return sc, sv, pt, "", true
+}
+
+// parseProxyServer 仅解析 scheme/host/port, 不做连通性探测。
+func parseProxyServer(proxySpec string) (scheme, server string, port uint16, err error) {
 	if proxySpec == "" {
 		return "", "", 0, errors.New("proxy 长度为空")
 	}
-	proxyScheme := "tunnel"
-	var proxyServer string
-	var proxyPort uint16
+	scheme = "tunnel"
 	// 先检查协议
-	tmp := strings.Split(proxySpec, "://")
-	if len(tmp) == 2 {
-		proxyScheme = tmp[0]
+	if tmp := strings.SplitN(proxySpec, "://", 2); len(tmp) == 2 {
+		scheme = tmp[0]
 		proxySpec = tmp[1]
 	}
 	// 检查端口，和上面的顺序不能反
-	tmp = strings.Split(proxySpec, ":")
-	if len(tmp) == 2 {
-		portInt, err := strconv.Atoi(tmp[1])
-		if err == nil {
-			proxyServer = tmp[0]
-			proxyPort = uint16(portInt)
-			// 检查是否可连通, 内网不好时100毫秒不够，调整到300
-			connTimeout := time.Duration(300) * time.Millisecond
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", proxyServer, proxyPort), connTimeout)
-			if err != nil {
-				return "", "", 0, err
-			}
-			conn.Close()
-			return proxyScheme, proxyServer, proxyPort, nil
-		}
+	tmp := strings.SplitN(proxySpec, ":", 2)
+	if len(tmp) != 2 {
+		return "", "", 0, errors.New("proxy 格式不对")
+	}
+	portInt, err := strconv.Atoi(tmp[1])
+	if err != nil {
 		return "", "", 0, err
 	}
-	return "", "", 0, errors.New("proxy 格式不对")
+	return scheme, tmp[0], uint16(portInt), nil
+}
+
+// getProxyServer 解析代理并做连通性探测(含不可用缓存), 供多代理挑选用。
+func getProxyServer(proxySpec string) (string, string, uint16, error) {
+	proxyScheme, proxyServer, proxyPort, err := parseProxyServer(proxySpec)
+	if err != nil {
+		return "", "", 0, err
+	}
+	key := fmt.Sprintf("%s:%d", proxyServer, proxyPort)
+	// 不可用缓存: 有效期内直接判失败, 跳过 300ms 拨号探测, 不浪费时间在挂掉的代理上
+	if cache.ProxyDial.Bad(key) {
+		return "", "", 0, fmt.Errorf("proxy %s unavailable (cached)", key)
+	}
+	// 检查是否可连通, 内网不好时100毫秒不够，调整到300
+	connTimeout := time.Duration(300) * time.Millisecond
+	conn, err := tunDial("tcp", key, connTimeout)
+	if err != nil {
+		// 探测失败, 记入不可用缓存, 有效期内后续请求直接跳过
+		cache.ProxyDial.MarkBad(key, proxyFailTTL)
+		return "", "", 0, err
+	}
+	conn.Close()
+	// 探测成功, 清除可能存在的旧失败标记, 让恢复的代理立即可用
+	cache.ProxyDial.Clear(key)
+	return proxyScheme, proxyServer, proxyPort, nil
+}
+
+// tunProxyDialer 实现 proxy.Dialer，用 tunDial 建连以绕过 TUN 路由。
+type tunProxyDialer struct{}
+
+func (tunProxyDialer) Dial(network, addr string) (net.Conn, error) {
+	return tunDial(network, addr, 5*time.Second)
 }
 
 // socket5代理
 func (s *tunnel) socks5(network, connAddr string, targetNet, targetAddr string) (err error) {
 	var dialProxy proxy.Dialer
-	dialProxy, err = proxy.SOCKS5(network, connAddr, nil, proxy.Direct)
+	dialProxy, err = proxy.SOCKS5(network, connAddr, nil, tunProxyDialer{})
 	if err != nil {
 		log.Println(trace.ID(s.req.ID), "socket5 err", err.Error())
 		return
@@ -572,7 +792,7 @@ func (s *tunnel) httpConnect(network, connAddr string, target string, encrypt bo
 	} else {
 		connectString = fmt.Sprintf("CONNECT %s HTTP/1.1\r\n\r\n", target)
 	}
-	fmt.Fprintf(s.conn, connectString)
+	fmt.Fprint(s.conn, connectString)
 	var status string
 	status, err = bufio.NewReader(s.conn).ReadString('\n')
 	if err != nil {
@@ -589,6 +809,16 @@ func (s *tunnel) httpConnect(network, connAddr string, target string, encrypt bo
 
 // IP限制
 func (s *tunnel) isAllowed(allows []string) (string, bool) {
+	// 本机流量默认放行，无需列入 allowIP:
+	//   - 回环地址(127.0.0.1/::1): 一定来自本机
+	//   - TUN 网卡自身 IP: 本机经 TUN 出来的流量(如 iptables 把 TUN 流量重定向回监听端口)
+	if ip := net.ParseIP(s.inboundIP); ip != nil && ip.IsLoopback() {
+		return "", true
+	}
+	if config.TUNSelfIP != "" && s.inboundIP == config.TUNSelfIP {
+		return "", true
+	}
+
 	allows = append(allows, conf.RouterConfig.AllowIP...)
 	if len(allows) == 0 {
 		return "", true

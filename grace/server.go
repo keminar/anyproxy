@@ -381,6 +381,7 @@ func (srv *Server) fork() (err error) {
 	if err != nil {
 		log.Fatalf("Restart: Failed to launch, error: %v", err)
 	}
+	go cmd.Wait()
 
 	return
 }

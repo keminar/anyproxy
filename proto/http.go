@@ -282,7 +282,7 @@ func (that *httpStream) badRequest(err error) {
 		publicErr = "400 Bad Request" + ": " + err.Error()
 	}
 
-	fmt.Fprintf(that.req.conn, "HTTP/1.1 "+publicErr+errorHeaders+publicErr)
+	fmt.Fprint(that.req.conn, "HTTP/1.1 "+publicErr+errorHeaders+publicErr)
 }
 
 func (that *httpStream) response() error {

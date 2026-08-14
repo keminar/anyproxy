@@ -9,3 +9,7 @@ anyproxy-windows.exe
 tunneld
 tunneld-alpine
 tunnel/logs/
+.idea
+.workbuddy/
+.codebuddy/
+anyproxy.exe

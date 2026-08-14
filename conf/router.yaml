@@ -9,6 +9,7 @@ watcher: true
 token: anyproxyproxyany
 # 可访问的客户端IP，为空不限制
 allowIP:
+# 支持CIDR
 #  - 172.17.0.12
 
 # http非CONNECT请求首行域名处理
@@ -21,12 +22,98 @@ firstLine:
   custom:
     localhost.5173: off
     
-# 设置此项，进入tcpCopy模式，则配置中的hosts域名代理不再生效
-# tcpcopy模式下allowIP设置有效
-tcpcopy: 
-#  enable: false
+# tcpcopy 端口转发的目标地址(配合 mode: tcpcopy)。开启后 hosts 域名代理不再生效,
+# allowIP 仍有效。ip/port 为转发目标。(enable 为旧写法, 等价 mode: tcpcopy, 仍兼容)
+tcpcopy:
 #  ip: 127.0.0.1
 #  port: 3306
+
+# 运行模式, 优先级低于启动传参 -mode。各取值互斥(单一取值天然互斥)
+#   proxy   : 客户端/代理模式(默认, 留空即此)
+#   tunnel  : 服务端 tunneld, 带 token 验证, 只处理 anyproxy 请求
+#   tun     : 建TUN虚拟网卡做全局代理(需管理员/root; windows 用 WinDivert, 需 WinDivert.dll/.sys)
+#   bypass  : 不建网卡, 仅把出向连接绑定物理网卡绕行
+#             用于本机已有另一个 anyproxy TUN 进程时, 让本进程 target=local 的请求
+#             逃出对方 TUN 的 0/1 路由, 避免被再次劫持成死循环
+#   tcpcopy : 端口转发, 每个连接改投到上面 tcpcopy.ip:port
+mode:
+
+# mode=tun 时生效: TUN虚拟网卡全局代理
+# 启用后被路由到网卡的TCP流量会走 default/hosts 的代理规则
+#
+# 推荐「按系统分块」写法: tun.linux / tun.darwin / tun.windows 各只填本系统用得到的
+# 字段, 程序按当前系统取对应块。这样每块里不会出现"本平台无效"的字段, 一目了然。
+# 程序按当前系统取对应块的整组配置。
+tun:
+#  # ===== Linux (gVisor 虚拟网卡) =====
+#  linux:
+#    name: anytun0            # 网卡名, 默认 anytun0
+#    addr: 10.9.0.1/24        # 接口地址CIDR
+#    mtu: 1500
+#    autoRoute: true          # 默认 true 自动加路由; false 只打印命令
+#    blockQUIC: true          # 默认 true: drop 命中hosts(配ip)域名的UDP443, 逼QUIC回退TCP
+#    bypassIPs:               # 这些目标直连(自动加 /32 路由), 填上级代理/VPN服务器IP
+#      - 192.168.199.1
+#    # 说明: 外网SSH等入站服务的回包由内置源策略路由(ip rule)自动放行, 无需配置。
+#
+#  # ===== macOS (gVisor utun) =====
+#  darwin:
+#    addr: 10.9.0.1/24
+#    autoRoute: true
+#    blockQUIC: true
+#    bypassIPs:
+#      - 192.168.199.1
+#    inboundPorts:            # 需放行回包的入站TCP端口(如外网SSH 22), 用 pf reply-to; 需 root
+#      - 22
+#
+#  # ===== Windows (WinDivert 重定向, 无虚拟网卡) =====
+#  windows:
+#    blockQUIC: true
+#    windivertDir: C:\wd     # WinDivert.dll+WinDivert64.sys 所在目录; 空=exe同目录。
+#                            # 可把驱动放到无空格/中文的干净路径, exe 原地不动, 绕开驱动加载失败
+#    bypassIPs:               # 这些目标"排除捕获"直连, 填上级代理/VPN服务器IP
+#      - 203.0.113.10
+#    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)
+#      - openvpn.exe
+
+# mode=bypass 时生效: 物理网卡绕行
+# 推荐「按系统分块」写法: bypass.linux / bypass.darwin / bypass.windows 各只填本系统
+# 用得到的字段, 程序按当前系统取对应块。
+bypass:
+#  # ===== Linux (绑定物理网卡逃逸 0/1 路由) =====
+#  linux:
+#    excludeNics:              # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
+#      - anytun0
+#    device:                   # 手动指定物理网卡名, 留空则自动探测默认路由网卡
+#      # eth0
+#
+#  # ===== macOS (IP_BOUND_IF 绑物理网卡逃逸 0/1 路由) =====
+#  darwin:
+#    excludeNics:
+#      - utun0
+#    device:                   # 留空则自动探测, 如 en0
+#      # en0
+#
+#  # ===== Windows (bypass 模式仅记录, 实际逃逸请配在 TUN 进程的 tun.windows 下) =====
+#  windows:
+#    excludeProcs:             # 记录用, 实际逃逸配在 tun.windows
+#      - openvpn.exe
+#    bypassIPs:                # 记录用, 实际逃逸配在 tun.windows
+#      - 203.0.113.10
+
+# 死循环兜底熔断器(最后防线, 非主方案)。
+# 同机 A(mode=tun)+B(mode=bypass) 部署时, 正常应由 bypass 从路由层根治环路;
+# 若 bypass 未生效, 句柄会堆积且都指向同一目标。判定: 全局在传连接数达到 minActive
+# (闸门)后, 若某个 host:port 占用的在传连接超过 total*ratio%, 判为环路并拒绝其新连接。
+# 常态(总连接数低于闸门)只做一次 int 比较, 无额外开销。
+# 注意: 环路会在总连接数刚过 minActive 时被切断, 每条连接约占 2 个文件描述符,
+#       故 minActive*2 必须远小于 ulimit -n(anyproxy 建议 ulimit -n 65535), 否则进程会
+#       先撞 too many open files, 熔断器来不及触发。低 ulimit 环境请调小 minActive。
+loopGuard:
+#  # 全局在传连接数达到此值才启用占比检查; 0=用内置默认(1000,默认开启); <0=关闭
+#  minActive: 1000
+#  # 单目标占全局在传连接的百分比阈值(如80=80%); <=0 用默认80
+#  ratio: 80
 
 # 默认操作，可热加载
 default:
@@ -34,35 +121,48 @@ default:
   dns: local
   # 默认环境，local 当前环境, remote 远程, deny 禁止
   # auto根据dial选择，local dial失败则remote
-  target: auto  
-  # tcp 请求环境，local 当前环境, remote 远程, deny 禁止  
+  target: auto
+  # tcp 请求环境，local 当前环境, remote 远程, deny 禁止
+  # localport 按端口分流：命中端口走本地直连，其余走代理(remote)
   tcpTarget: remote
-  # 默认域名比对方案,contain 包含,equal 完全相等, preg 正则
+  # tcpTarget=localport 时生效：这些端口走本地直连、其余走代理
+  # 不配置则默认 21(ftp)/22(ssh) 走本地；一旦配置则完全以此为准(覆盖默认)
+  #localPort:
+  #  - 22
+  #  - 21
+  #  - 3306
+  # 默认域名比对方案(仅当 name 无星号且未显式配 match 时生效): contain 包含, equal 完全相等
   match: equal
-  # 全局代理服务器, 优先级低于启动传参
+  # 全局代理服务器, 优先级低于启动传参 -p。
+  # 与单域名 proxy 一样支持: 逗号分隔多代理(依次取第一个能连通的) + 末尾 local/deny 后缀
+  # (全部代理都连不通时: local 走本地直连, deny 拒绝)。例:
+  #   proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 local
   proxy:
 
 # 域名，可热加载
+# name 支持首/尾 * 通配，无需再配 match(去掉星号的部分记为 X)：
+#   name: google.com     精确匹配      → 仅 google.com
+#   name: "*google.com"  末尾一致(后缀) → www.google.com 命中，www.google.com.hk 不命中
+#   name: "google.com*"  开头一致(前缀) → google.com/google.com.hk 命中，www.google.com 不命中
+#   name: "*google.com*" 子串包含       → 含 google.com 的任意位置都命中
+# yaml 中以 * 开头的值需加引号；显式配 match 时仍以 match 为准(兼容旧配置)
 hosts:
-  - name: github
-    # contain 包含,equal 完全相等, preg 正则
-    match: contain
-    # 参考全局target 
+  - name: "*github*"
+    # 参考全局target
     # 如果有用proxy自定义代理可用，target强制当remote使用，proxy代理不可用，target按原逻辑处理
     target: remote
     # 参考全局localDns 
     dns: remote
     # 支持 http:// , tunnel:// , socks5:// 三种协议，默认 tunnel://
     #proxy:  http://127.0.0.1:8888
-    # 支持多代理，支持忽略全局代理并执行 last 或 deny 2种逻辑
-    proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 last
-  - name: golang.org
-    match: contain
+    # 支持多代理，支持忽略全局代理并执行 local 或 deny 2种逻辑
+    proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 local
+  - name: "*golang.org"
     target: auto
     dns: remote
   - name: www.baidu.com
-    match: equal
     target: auto
+  # 旧写法(显式 match)仍兼容
   - name: google
     match: contain
     target: deny

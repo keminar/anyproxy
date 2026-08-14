@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -96,7 +95,7 @@ func (l *TimeWriter) rotate() error {
 }
 
 func (l *TimeWriter) oldLogFiles() ([]logInfo, error) {
-	files, err := ioutil.ReadDir(l.Dir)
+	entries, err := os.ReadDir(l.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("can't read log file directory: %s", err)
 	}
@@ -104,8 +103,13 @@ func (l *TimeWriter) oldLogFiles() ([]logInfo, error) {
 
 	prefix, ext := l.prefixAndExt()
 
-	for _, f := range files {
-		if f.IsDir() {
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		// os.ReadDir 返回 DirEntry，转成 FileInfo 以填充 logInfo(内嵌 os.FileInfo)
+		f, err := entry.Info()
+		if err != nil {
 			continue
 		}
 		if f.Name() == filepath.Base(l.curFilename) {

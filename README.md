@@ -6,6 +6,8 @@ anyproxy 是一个部署在Linux系统上的tcp流转发器，可以将收到的
 
 tunneld 是一个anyproxy的服务端模式，带密钥验证，部署在服务器上接收anyproxy的请求，并代理发出请求或是转到下一个tunneld。用于跨内网访问资源使用。非anyproxy请求一概拒绝处理
 
+> 📖 完整文档见 [docs/](docs/README.md)：[概述与架构](docs/overview.md)、[命令行参数](docs/cli.md)、[配置参考](docs/configuration.md)、[路由规则](docs/routing.md)、[运行模式](docs/modes.md)、[部署运维](docs/deployment.md)。
+
 # 路由支持
 
 ```
@@ -116,6 +118,96 @@ docker run anyproxy:latest
 docker run  -p 3000:3000 anyproxy:latest -p '127.0.0.1:3001'
 ```
 
+# TUN 虚拟网卡全局代理
+
+除了Linux下用iptables转发外，anyproxy 还支持跨平台(Windows/Linux/macOS)全局代理。
+Linux/macOS 创建一块 TUN 虚拟网卡，把系统流量路由进来，内部用 gVisor 用户态协议栈解析出TCP连接，
+再复用 anyproxy 已有的代理路由(direct/tunnel/socks5/hosts规则)转发出去，等价于 tun2socks。
+Windows 不建虚拟网卡，改用 WinDivert 在网络层捕获并重定向出站 TCP，再复用同一套代理逻辑。
+
+> 特性与规则详解（跨平台 utun、autoRoute、QUIC 拦截、target/proxy 优先级）见 [docs/tun-features.md](docs/tun-features.md)
+
+> 说明
+* 复用配置文件里 `default` / `hosts` 的全部代理规则(direct/tunnel/socks5/换IP/换端口等)，用法和旧的透明代理一致
+* 支持按域名配置不同代理: TUN 只拿得到目标IP，程序会从首包嗅探 TLS SNI / HTTP Host 还原域名，让 `hosts.name` 的域名规则生效；嗅探不到(如服务端先说话的协议)则回退按IP匹配
+* 目前只代理 TCP 流量，UDP(含DNS)暂不走隧道。全量接管路由时要给 DNS 服务器加直连例外，否则无法解析域名(或改用 DoH/DoT 这类走TCP的DNS)
+* 需要管理员/root 权限运行
+* Windows 用 WinDivert：把 `WinDivert.dll` + `WinDivert64.sys`(32位系统另需 `WinDivert32.sys`)与 `anyproxy.exe` 放同一目录(路径含空格/中文可能导致驱动加载失败)。详见 [docs/windows-winDivert.md](docs/windows-winDivert.md)
+* Linux/macOS 程序负责创建网卡、分配接口IP并启用；路由采用半自动方式，启动时会打印所需路由命令供确认后执行
+
+> 启动
+
+```
+# 命令行开启(配IP默认 10.9.0.1/24)
+sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
+
+# 网卡名和接口地址通过配置 tun.name / tun.addr 指定
+sudo ./anyproxy -mode tun
+
+# 或在 conf/router.yaml 中配置 tun.enable: true 后直接启动
+sudo ./anyproxy
+```
+
+> 配置全局路由(启动后按打印提示执行, 需管理员/root)
+
+```
+# Linux: 接管默认路由前，务必先给上级代理出口IP加直连例外，否则会环路断网
+sudo ip route add <上级代理IP>/32 via <原网关> dev <原网卡>
+sudo ip route add 0.0.0.0/1 dev anytun0
+sudo ip route add 128.0.0.0/1 dev anytun0
+
+# Windows: 同样先给上级代理IP加直连例外
+route add <上级代理IP> mask 255.255.255.255 <原网关>
+route add 0.0.0.0 mask 128.0.0.0 10.9.0.1
+route add 128.0.0.0 mask 128.0.0.0 10.9.0.1
+```
+
+# 同机多实例的死循环防护
+
+> 各平台差异（尤其 Mac 需手动填 `bypass.device`）详见 [docs/multi-instance-loop.md](docs/multi-instance-loop.md)
+
+同机部署两套 anyproxy：A 开 `mode=tun` 做全局代理并把请求转给上游 B，B 普通模式作为出口。
+A 的 TUN 会把 `0.0.0.0/1`、`128.0.0.0/1` 全量流量吸进来；A 自己的出向已用 `SO_BINDTODEVICE`
+绑物理网卡逃出 TUN，但 **B 的出向没逃**，会被 A 的 TUN 再次抓走 → A → B → …… 形成死循环。
+
+## 根治：B 用 mode=bypass
+
+让 B 以 `mode=bypass` 运行，B 的出向连接会绑定物理网卡、逃出 A 的 TUN 路由，从路由层根治环路。
+同机源 IP 相同，无法用「源 IP=B」或 `ip rule from` 区分，故 bypass 是同机唯一的确定性根治手段。
+
+```
+# B 的 conf/router.yaml
+mode: bypass
+bypass:
+  # 自动探测不到物理网卡时(启动日志 bypass-only: device="")手动指定
+  device: eth0
+```
+
+* **务必检查 B 的启动日志** `bypass-only: device="..." ip="..."`：`device`(Linux)或 `ip`(Windows/Mac) 非空才算 bypass 生效。
+  若为空说明 `defaultRoute()` 自动探测失败，bypass 会静默退回普通拨号而失效，此时用 `bypass.device` 手动指定网卡名。
+
+## 兜底：loopGuard 熔断器
+
+作为最后防线，防止 bypass 失效时把机器句柄打爆。判定逻辑基于**在传连接占比**而非每秒请求数：
+
+* 便宜的闸门：仅当整个进程的在传连接数达到 `minActive` 时才启用检查，常态下只做一次 `int` 比较，零额外开销
+* 占比判定：闸门开启后，若某个 `host:port` 占用的在传连接超过 `total * ratio%`（句柄都堆在一个目标上＝环路特征），拒绝其新连接
+* 自愈：拒绝新连接后，上游 B 对该目标的连接被 A 拒绝而失败，环路解开，存量连接 drain，闸门自动重新放开，无需熔断计时
+
+```
+# 默认开启, minActive=1000, ratio=80%; 关闭用 minActive: -1
+loopGuard:
+  minActive: 1000  # 全局在传连接达到此值才启用占比检查; 0=默认1000; <0=关闭
+  ratio: 80        # 单目标占全局在传连接的百分比阈值
+```
+
+> 环路会在总连接数刚过 `minActive` 时被切断，每条连接约占 2 个文件描述符，故 `minActive*2` 必须
+> 远小于 `ulimit -n`（anyproxy 建议 `ulimit -n 65535`），否则进程会先撞 `too many open files`、
+> 熔断器来不及触发。低 ulimit 环境请调小 `minActive`。
+
+触发时日志形如：`loopguard: circuit open for <host>:<port> (in-flight 960/1000, suspected proxy loop)`。
+loopGuard 是兜底，不是主方案——环路的根治仍靠 B 的 `mode=bypass` 真正生效。
+
 # 代理设置
 
 * 防火墙全局代理
@@ -153,37 +245,6 @@ sudo iptables -t nat -D OUTPUT 2
 * 浏览器 [Chrome设置](https://zhidao.baidu.com/question/204679423955769445.html)
 * 手机端 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
 
-# Todo
-
-> ~~划线~~ 部分为已实现功能
-* ~~可将请求转发到Tunnel服务~~
-* ~~对域名支持加Host绑定~~
-* ~~对域名配置请求出口~~
-* ~~增加全局默认出口配置~~
-* ~~配置文件支持~~
-* ~~服务间通信增加token验证可配~~
-* ~~日志信息完善~~
-* ~~DNS解析增加cache~~
-* ~~自动路由模式下可设置检测时间和cache~~
-* ~~可以自定义代理server，如果不可用则用全局的~~
-* ~~server多级转发~~
-* ~~加域名黑名单功能，不给请求~~
-* ~~支持转发到socket5服务~~
-* ~~支持HTTP/1.1 keep-alive 一外链接多次请求不同域名~~
-* ~~修复iptables转发后百度贴吧无法访问的问题~~
-* ~~支持windows平台使用~~
-* ~~通过websocket实现内网穿透(必须为http的非CONNECT请求)~~
-* ~~订阅增加邮箱标识，用于辨别在线用户~~
-* ~~与Tunnel功能合并，使用mode区分~~
-* ~~启用ws-listen后的平滑重启问题~~
-* ~~监听配置文件变化重新加载路由~~
-* ~~支持proxy时转换端口号~~
-* ~~支持tcpcopy模式，用此转发连mysql~~
-* ~~支持socks5协议接入~~
-* ~~统计上下行流量~~
-* ~~修复不支持http upgrade socket的问题~~
-* TCP 增加更多协议解析支持，如rtmp，ftp, socks5, https(SNI)等
-* tunel token支持按host配置
 
 # 感谢
 

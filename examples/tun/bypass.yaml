@@ -1,0 +1,15 @@
+listen: 3001
+watcher: true
+default:
+  dns: remote
+  target: remote
+  tcpTarget: remote
+  match: equal
+
+mode: bypass
+
+# 域名
+hosts:
+  - name: 126.com
+    match: contain
+    target: local

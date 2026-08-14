@@ -1,0 +1,20 @@
+listen: 3000
+watcher: true
+default:
+  dns: remote
+  target: deny
+  tcpTarget: remote
+  match: equal
+
+mode: tun
+loopGuard:
+  minActive: 100 
+
+hosts:
+  - name: baidu.com
+    match: contain
+    target: local
+  - name: 126.com
+    match: contain
+    target: remote
+    proxy: http://127.0.0.1:3001
