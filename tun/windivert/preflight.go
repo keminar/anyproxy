@@ -3,9 +3,11 @@
 package windivert
 
 import (
+	"debug/pe"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -68,13 +70,73 @@ func Preflight() error {
 		missing = append(missing, sys64+" (or WinDivert32.sys on 32-bit Windows)")
 	}
 
-	if len(missing) == 0 {
+	if len(missing) != 0 {
+		return fmt.Errorf(
+			"missing WinDivert file(s):\n  - %s\nput WinDivert.dll and the matching .sys "+
+				"(64-bit Windows => WinDivert64.sys) in this folder:\n  %s",
+			strings.Join(missing, "\n  - "), dir)
+	}
+
+	// 文件齐全, 再校验 DLL 架构是否与本进程一致。错架构的 WinDivert.dll 能通过
+	// 上面的存在性检查, 却会让 LoadLibrary 以 ERROR_BAD_EXE_FORMAT(193,
+	// "%1 不是有效的 Win32 应用程序") 在 procOpen.Call 处直接 panic, 绕过所有
+	// error 处理。提前在这里拦下, 给出可读的换文件提示。
+	return checkDLLArch(dll)
+}
+
+// peMachineArch 把 PE 头的 Machine 字段映射到对应的 Go GOARCH。
+var peMachineArch = map[uint16]string{
+	pe.IMAGE_FILE_MACHINE_I386:  "386",
+	pe.IMAGE_FILE_MACHINE_AMD64: "amd64",
+	pe.IMAGE_FILE_MACHINE_ARM64: "arm64",
+	pe.IMAGE_FILE_MACHINE_ARMNT: "arm",
+}
+
+// checkDLLArch 读取 WinDivert.dll 的 PE Machine 字段, 与本进程架构 (runtime.GOARCH)
+// 比对。不一致直接返回明确错误, 避免后续 Open 时以 193 panic。读不出机器类型或类型
+// 未知时不阻塞启动 (返回 nil), 把判断交给后续 Open/Diagnose。
+func checkDLLArch(dllPath string) error {
+	mach, err := peMachine(dllPath)
+	if err != nil {
+		return nil // 读不出就别拦, 保持 best-effort
+	}
+	arch, known := peMachineArch[mach]
+	if !known || arch == runtime.GOARCH {
 		return nil
 	}
 	return fmt.Errorf(
-		"missing WinDivert file(s):\n  - %s\nput WinDivert.dll and the matching .sys "+
-			"(64-bit Windows => WinDivert64.sys) in this folder:\n  %s",
-		strings.Join(missing, "\n  - "), dir)
+		"WinDivert.dll 架构不匹配: DLL 是 %s, 本程序是 %s\n  %s\n"+
+			"请换用 WinDivert 官方包中与本程序架构一致的文件 (.dll 和 .sys 要成套):\n"+
+			"  amd64 -> x86_64 目录 (WinDivert.dll + WinDivert64.sys)\n"+
+			"  386   -> i386 目录   (WinDivert.dll + WinDivert32.sys)\n"+
+			"  arm64 -> ARM64 目录  (WinDivert.dll + WinDivert64.sys)",
+		archLabel(arch), archLabel(runtime.GOARCH), dllPath)
+}
+
+// peMachine 返回 PE 文件 (exe/dll) 头部的 Machine 字段。
+func peMachine(path string) (uint16, error) {
+	f, err := pe.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.Machine, nil
+}
+
+// archLabel 把 GOARCH 转成更直观的说明。
+func archLabel(goarch string) string {
+	switch goarch {
+	case "386":
+		return "32 位 x86 (i386)"
+	case "amd64":
+		return "64 位 x64 (x86_64)"
+	case "arm64":
+		return "ARM64"
+	case "arm":
+		return "32 位 ARM"
+	default:
+		return goarch
+	}
 }
 
 func fileExists(p string) bool {

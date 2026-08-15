@@ -38,10 +38,20 @@ if [ "$1" == "all" ] || [ "$1" == "mac" ] ;then
 fi
 
 if [ "$1" == "all" ] || [ "$1" == "windows" ] ;then
-    echo "  for windows"
-    CGO_ENABLED=0 GOOS=windows GOARCH=${ARCH} ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-windows-${ARCH}-${VER}.exe .
-    # WinDivert 运行时(需与 exe 同目录, 或用 tun.windows.windivertDir 指定)
-    cp -f WinDivert-2.2.2-A/* dist/ 2>/dev/null || true
+    # 每个架构打成独立成套的包目录 dist/<BIN>-windows-<arch>-<VER>/:
+    # exe 与它自己的 WinDivert 运行时放在一起。WinDivert.dll 是固定文件名且
+    # 64/32 位内容不同, 若都拷进同一扁平目录会互相覆盖, 故按架构分目录隔离。
+    # "arch:windivert子目录" 映射: amd64 用 x64, 386 用 x86。
+    for pair in "amd64:x64" "386:x86"; do
+        warch=${pair%%:*}
+        wddir=${pair##*:}
+        echo "  for windows/${warch} -> ${BIN}-windows-${warch}-${VER}.exe"
+        out="dist/${BIN}-windows-${warch}-${VER}"
+        mkdir -p "${out}"
+        CGO_ENABLED=0 GOOS=windows GOARCH=${warch} ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o "${out}/${BIN}-windows-${warch}-${VER}.exe" .
+        # WinDivert 运行时(需与 exe 同目录, 或用 tun.windows.windivertDir 指定)。
+        cp -f WinDivert-2.2.2-A/${wddir}/* "${out}/" 2>/dev/null || true
+    done
 fi
 
 if [ "$1" == "all" ] || [ "$1" == "alpine" ] ;then
