@@ -23,8 +23,10 @@ import (
 	"github.com/keminar/anyproxy/tun"
 	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/daemon"
+	"github.com/keminar/anyproxy/utils/geo"
 	"github.com/keminar/anyproxy/utils/help"
 	"github.com/keminar/anyproxy/utils/rss"
+	"github.com/keminar/anyproxy/utils/systune"
 	"github.com/keminar/anyproxy/utils/tools"
 )
 
@@ -39,6 +41,12 @@ var (
 	gDebug           int
 	gPprof           string
 	gVersion         bool
+	gGeoExtract      bool
+	gGeoIn           string
+	gGeoCat          string
+	gGeoOut          string
+	gCheck           bool
+	gCheckFix        bool
 )
 
 func init() {
@@ -53,6 +61,15 @@ func init() {
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
 	flag.BoolVar(&gVersion, "v", false, "Show build version")
 	flag.BoolVar(&gHelp, "h", false, "This usage message")
+	// geo 数据集离线提取(提取完即退出, 不启代理): 从全量 geoip.dat/geosite.dat 提取
+	// 指定类别成小文件随发布携带。geoip 与 geosite 外层格式一致, 同一命令通用。
+	flag.BoolVar(&gGeoExtract, "geo-extract", false, "Extract categories from a geoip.dat/geosite.dat and exit")
+	flag.StringVar(&gGeoIn, "geo-in", "", "geo-extract: source geoip.dat/geosite.dat")
+	flag.StringVar(&gGeoCat, "geo-cat", "", "geo-extract: comma-separated categories to keep, e.g. cn,google")
+	flag.StringVar(&gGeoOut, "geo-out", "", "geo-extract: output .dat path")
+	// 系统调优检查/应用(仅 Linux): 对照建议的 sysctl/ulimit 报告, 或一键写入并应用。
+	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
+	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
 }
 
 func main() {
@@ -67,6 +84,26 @@ func main() {
 	}
 	if gVersion {
 		help.ShowVersion()
+		return
+	}
+	// geo 数据集离线提取: 生成精简 .dat 后退出, 不启动代理。
+	if gGeoExtract {
+		if gGeoIn == "" || gGeoCat == "" || gGeoOut == "" {
+			log.Fatalln("geo-extract 需要 -geo-in -geo-cat -geo-out")
+		}
+		if err := geo.Extract(gGeoIn, strings.Split(gGeoCat, ","), gGeoOut); err != nil {
+			log.Fatalln("geo-extract:", err)
+		}
+		fmt.Printf("geo-extract: 已从 %s 提取类别 [%s] 写入 %s\n", gGeoIn, gGeoCat, gGeoOut)
+		return
+	}
+	// 系统调优检查/一键应用(仅 Linux), 完成即退出。
+	if gCheckFix {
+		systune.Apply()
+		return
+	}
+	if gCheck {
+		systune.Check()
 		return
 	}
 
@@ -110,6 +147,9 @@ func main() {
 	config.ProxyCmdline = gProxyServerSpec
 	// 启动时按「-p > default.proxy」解析首个代理, 供 tun_windows 排除捕获与日志用
 	config.SetProxyServer(config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig.Default.Proxy, ""))
+
+	// 加载 geoip/geosite 数据集(配了才加载, 供 hosts 的 geoip:/geosite: 匹配)
+	loadGeo()
 
 	// 调试模式
 	if len(gPprof) > 0 {
@@ -284,4 +324,37 @@ func withProxyBypassIPs(base []string) []string {
 		}
 	}
 	return out
+}
+
+// loadGeo 按配置加载 geoip/geosite 数据集(配了才加载)。加载失败只记日志、不中断启动;
+// 若 hosts 用了 geoip:/geosite: 但对应数据没配/没加载, 该规则永不命中, 给出提示。
+func loadGeo() {
+	for cat, path := range conf.RouterConfig.Geo.IP {
+		if path = strings.TrimSpace(path); path == "" {
+			continue
+		}
+		if err := geo.LoadIP(cat, path); err != nil {
+			log.Printf("geo: 加载 geoip:%s <- %s 失败: %v", cat, path, err)
+		}
+	}
+	for cat, path := range conf.RouterConfig.Geo.Site {
+		if path = strings.TrimSpace(path); path == "" {
+			continue
+		}
+		if err := geo.LoadSite(cat, path); err != nil {
+			log.Printf("geo: 加载 geosite:%s <- %s 失败: %v", cat, path, err)
+		}
+	}
+	if ic, sc := geo.Stat(); ic > 0 || sc > 0 {
+		log.Printf("geo: 已加载 geoip 类别数=%d, geosite 类别数=%d", ic, sc)
+	}
+	// 用了 geoip:/geosite: 规则但数据未就绪时提示
+	for _, h := range conf.RouterConfig.Hosts {
+		if strings.HasPrefix(h.Name, "geoip:") && !geo.HasIP() {
+			log.Printf("geo: 规则 %q 需要 geo.ip 加载 geoip.dat, 当前未加载, 该规则不会命中", h.Name)
+		}
+		if strings.HasPrefix(h.Name, "geosite:") && !geo.HasSite() {
+			log.Printf("geo: 规则 %q 需要 geo.site 加载 geosite.dat, 当前未加载, 该规则不会命中", h.Name)
+		}
+	}
 }

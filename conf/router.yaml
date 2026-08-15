@@ -115,6 +115,22 @@ loopGuard:
 #  # 单目标占全局在传连接的百分比阈值(如80=80%); <=0 用默认80
 #  ratio: 80
 
+# geoip/geosite 数据集, 按「类别 -> 文件」配置(每类别一个文件), 配了才启用 hosts 的
+# geoip:/geosite: 匹配。文件按扩展名区分:
+#   .dat : protobuf 数据集(一个文件多类别), 取与配置键同名的类别;
+#   其它 : 纯文本列表(整个文件即该类别)。geoip 每行 CIDR/IP; geosite 每行域名,
+#          支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀), # 注释,
+#          keyword/regexp 当国外丢弃。如域名列表 direct-list.txt。
+# .dat 可先用命令离线提取所需类别成小文件随发布携带(运行时只读小文件):
+#   anyproxy -geo-extract -geo-in geosite.dat -geo-cat cn,google -geo-out geosite-cn.dat
+geo:
+#  ip:
+#    cn: ./geoip-cn.dat        # .dat: 取其中的 cn 类别
+#    # cn: ./china-cidr.txt    # 或文本 CIDR 列表(整文件=cn)
+#  site:
+#    cn: ./direct-list.txt     # 文本域名列表(整文件=cn)
+#    google: ./geosite.dat     # .dat: 取其中的 google 类别
+
 # 默认操作，可热加载
 default:
   # 使用的DNS服务器 local 当前环境， remote远程, 仅当target使用remote有效
@@ -146,6 +162,11 @@ default:
 #   name: "google.com*"  开头一致(前缀) → google.com/google.com.hk 命中，www.google.com 不命中
 #   name: "*google.com*" 子串包含       → 含 google.com 的任意位置都命中
 # yaml 中以 * 开头的值需加引号；显式配 match 时仍以 match 为准(兼容旧配置)
+# name 还支持 geoip:xx / geosite:xx 按 geo 数据集匹配(需配上面的 geo.ip / geo.site):
+#   - name: geoip:cn      # 目标 IP 命中 geoip 类别 cn → target 生效(如 local 直连)
+#     target: local
+#   - name: geosite:cn    # 目标域名命中 geosite 类别 cn → target 生效
+#     target: local
 hosts:
   - name: "*github*"
     # 参考全局target

@@ -13,6 +13,8 @@
 | `-daemon` | 后台守护进程运行（fork 子进程，父进程退出） | — | — |
 | `-debug` | 调试级别 `0/1/2/3`，越大日志越详细 | — | — |
 | `-pprof` | pprof 端口，留空关闭；浏览器访问 `http://<port>/debug/pprof/` | — | — |
+| `-geo-extract` | 从 `.dat` 提取类别成小文件后退出，配 `-geo-in`/`-geo-cat`/`-geo-out`（见 [geo.md](geo.md)） | — | — |
+| `-geo-in` / `-geo-cat` / `-geo-out` | geo-extract 的源 `.dat` / 类别(逗号分隔) / 输出路径 | — | — |
 | `-v` | 显示编译版本信息 | — | — |
 | `-h` | 显示帮助 | — | — |
 

@@ -11,7 +11,7 @@ import (
 )
 
 // socksGuard breaks the transparent-proxy capture loop that occurs with a local,
-// rule-based proxy (clash/mihomo/v2ray/…): for destinations it routes "direct",
+// rule-based proxy: for destinations it routes "direct",
 // it opens its own outbound TCP connection from this same host. That connection
 // is outbound :443/etc., so the redirector would capture it and fold it back into
 // the proxy — which egresses again, ad infinitum, until the port pools exhaust

@@ -22,6 +22,13 @@
 
 > YAML 中以 `*` 开头的值需加引号，如 `name: "*google.com"`。
 
+`name` 还支持按 **geo 数据集**匹配（需配 `geo.ip` / `geo.site` 加载 `.dat`，详见 [geo.md](geo.md)）：
+
+| `name` 写法 | 含义 |
+|----|------|
+| `geoip:cn` | 目标 **IP** 命中 geoip 类别 `cn` |
+| `geosite:cn` | 目标**域名**命中 geosite 类别 `cn`（只用 Domain 后缀 + Full 精确，丢 keyword/regex）|
+
 也可显式写 `match`（旧写法，`name` 原样不解析星号，兼容存量配置）：
 
 | `match` | 含义 |

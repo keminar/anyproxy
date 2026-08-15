@@ -14,9 +14,11 @@
 - [proxy-decision.md](proxy-decision.md) — 代理决策逻辑详解：`target`(local/remote/auto/deny) × `proxy`(多代理 + local/deny 后缀) 的完整判定顺序、host/全局回退链、热加载、不可用缓存。
 - [modes.md](modes.md) — 运行模式：proxy / tunnel(tunneld) / bypass / tcpcopy 端口转发 / websocket 内网穿透。
 - [deployment.md](deployment.md) — 部署运维：编译、后台、平滑重启、iptables 全局代理、Docker、Windows 注意事项、性能调优。
+- [build.md](build.md) — 构建与交叉编译：`build.sh`/`build.bat` 各目标、路由器 MIPS(大端/小端、softfloat)、Windows 的 WinDivert、手动交叉编译(ARM 等)。
 
 ## 专题
 
+- [geo.md](geo.md) — geoip/geosite 分流：用 `geoip.dat`/`geosite.dat`(protobuf) 或文本列表按国家 IP 段/域名类别匹配（`name: geoip:cn` / `geosite:cn`），`-geo-extract` 离线提取小文件、零依赖 protobuf 解析、只用 Domain+Full。
 - [caching.md](caching.md) — 三个进程内缓存：DNS 解析缓存(10min)、上游代理连通性缓存(20s，跳过挂掉的代理)、嗅探域名缓存(10min，救预连接场景的按域名匹配)。
 - [tun-features.md](tun-features.md) — TUN 全局代理特性：跨平台(Linux/Windows/macOS utun)、自动路由 `autoRoute`、QUIC(UDP443) 拦截 `blockQUIC`、UDP 转发行为、`target`/`proxy` 优先级。
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治、`loopGuard` 熔断器兜底、平台差异。

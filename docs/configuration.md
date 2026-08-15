@@ -57,6 +57,28 @@ tcpcopy:
   port: 3306
 ```
 
+## geo（geoip/geosite 数据集）
+
+按「类别 → 文件」配置，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，取同名类别）或纯文本列表（整文件即该类别）。详见 [geo.md](geo.md)。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `geo.ip` | map[类别]文件 | 每个类别一个 geoip 文件（`.dat` 或 CIDR 文本列表） |
+| `geo.site` | map[类别]文件 | 每个类别一个 geosite 文件（`.dat` 或域名文本列表，如 `direct-list.txt`） |
+
+```yaml
+geo:
+  ip:
+    cn: ./geoip-cn.dat        # .dat 取 cn 类别; 也可 ./china-cidr.txt(文本)
+  site:
+    cn: ./direct-list.txt     # 文本域名列表; 也可 ./geosite-cn.dat
+hosts:
+  - name: geoip:cn
+    target: local        # 国内 IP 直连
+  - name: geosite:cn
+    target: local        # 国内域名直连
+```
+
 ## default（默认路由，可热加载）
 
 未命中任何 `hosts` 条目时使用。
