@@ -289,10 +289,14 @@ func withProxyBypassIPs(base []string) []string {
 	}
 	add := func(host string) {
 		host = strings.TrimSpace(host)
-		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && !seen[host] {
-			seen[host] = true
-			out = append(out, host)
+		ip := net.ParseIP(host)
+		// 回环上级代理无需并入: WinDivert 对 loopback 一律直连, linux/darwin 的
+		// /32 直连路由对 127.x 也无意义, 加进去只是冗余噪音。
+		if ip == nil || ip.To4() == nil || ip.IsLoopback() || seen[host] {
+			return
 		}
+		seen[host] = true
+		out = append(out, host)
 	}
 	// 全局代理(命令行 -p / default.proxy 解析后的服务器地址)
 	add(config.ProxyServer)
