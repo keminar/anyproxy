@@ -98,6 +98,29 @@ tun:
 
 原理与排查见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
 
+### 3.1 Windows：访问虚拟机 / 内网主机
+
+Windows 上 `tun.windows.bypassPrivate` **不配默认 `true`**：私网/LAN/链路本地（含 VirtualBox/VMware/Hyper-V/WSL2 网段）一律直连、不进引擎，所以访问虚拟机/内网主机**默认就直连**，通常无需额外配置。
+
+只有两种情况才需要动它：
+
+```yaml
+mode: tun
+tun:
+  windows:
+    # 想让某个私网目标改按 router 规则走代理时，关掉一刀切直连：
+    bypassPrivate: false
+    # 再用 bypassIPs 精确放行仍要直连的网段（其余私网则进引擎按规则）：
+    bypassIPs:
+      - 192.168.56.0/24      # 例：VirtualBox host-only 网段直连
+```
+
+- 默认（`bypassPrivate: true`）：整段私网直连，最省心；
+- 想**代理某个私网目标**：`bypassPrivate: false`（私网 80/443 进引擎按规则）；
+- 想**只精确放行某几段**、其余私网仍按规则：`bypassPrivate: false` + `bypassIPs` 列出要直连的网段。
+
+判定细节见 [windows-windivert-redirect.md](windows-windivert-redirect.md) 的「两条连接与直连判定」。
+
 ---
 
 ## 4. macOS：这台 Mac 要能被外网 SSH 登录
