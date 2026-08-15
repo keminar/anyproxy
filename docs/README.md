@@ -19,7 +19,7 @@
 ## 专题
 
 - [geo.md](geo.md) — geoip/geosite 分流：用 `geoip.dat`/`geosite.dat`(protobuf) 或文本列表按国家 IP 段/域名类别匹配（`name: geoip:cn` / `geosite:cn`），`-geo-extract` 离线提取小文件、零依赖 protobuf 解析、只用 Domain+Full。
-- [caching.md](caching.md) — 三个进程内缓存：DNS 解析缓存(10min)、上游代理连通性缓存(20s，跳过挂掉的代理)、嗅探域名缓存(10min，救预连接场景的按域名匹配)。
+- [caching.md](caching.md) — 进程内缓存：DNS 解析缓存(10min，配了 `ip` 的域名不吃缓存)、auto 直连失败缓存(20s)、嗅探域名缓存(10min，救预连接场景的按域名匹配)；上级代理连通性缓存已移除(改每次实探)。
 - [tun-features.md](tun-features.md) — TUN 全局代理特性：跨平台(Linux/Windows/macOS utun)、自动路由 `autoRoute`、QUIC(UDP443) 拦截 `blockQUIC`、UDP 转发行为、`target`/`proxy` 优先级。
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治(仅Linux)、`loopGuard` 熔断器兜底、macOS/Windows 替代方案。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。
