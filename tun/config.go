@@ -17,17 +17,8 @@ type Config struct {
 	WindivertDir  string   // 仅 Windows: WinDivert.dll+WinDivert64.sys 所在目录，空=exe同目录
 }
 
-// BypassConfig bypass 模式运行参数(跨平台)。
-//
-// 各字段生效平台:
-//
-//	ExcludeNics  仅 linux/darwin: 采集直连子网时排除的网卡名
-//	Device       仅 linux/darwin: 手动指定物理网卡名
-//	ExcludeProcs 仅 windows: 这些进程的出向不被WinDivert捕获(配合TUN进程使用)
-//	BypassIPs    仅 windows: 这些目标IP排除WinDivert捕获(直连)
+// BypassConfig bypass 模式运行参数(仅 Linux 支持; macOS/Windows 已移除该模式)。
 type BypassConfig struct {
-	ExcludeNics  []string
-	Device       string
-	ExcludeProcs []string
-	BypassIPs    []string
+	ExcludeNics []string // 采集直连子网时排除的网卡名
+	Device      string   // 手动指定物理网卡名
 }

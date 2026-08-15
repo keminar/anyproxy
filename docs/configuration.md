@@ -15,7 +15,7 @@
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
-| `mode` | string | `proxy` | 运行模式：`proxy` / `tunnel` / `tun` / `bypass`，优先级低于 `-mode` |
+| `mode` | string | `proxy` | 运行模式：`proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux），优先级低于 `-mode` |
 
 ## log
 
@@ -162,18 +162,21 @@ tun:
 
 详见 [tun-features.md](tun-features.md)、VPN 共存见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
 
-## bypass（mode=bypass 时生效）
+## bypassLinux（mode=bypass 时生效，仅 Linux）
+
+配置 key 为 `bypassLinux`，与 `mode=bypass` 配套。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `bypass.device` | 空(自动探测) | 手动指定绑定的物理网卡名；**macOS 必填**（如 `en0`） |
-| `bypass.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
+| `bypassLinux.device` | 空(自动探测) | 手动指定绑定的物理网卡名（如 `eth0`） |
+| `bypassLinux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
 
-详见 [multi-instance-loop.md](multi-instance-loop.md)。
+macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`；Windows 逃逸靠
+`tun.windows.excludeProcs`/`bypassIPs`。详见 [multi-instance-loop.md](multi-instance-loop.md)。
 
 ## loopGuard（死循环兜底熔断器）
 
-同机 A(tun)+B(bypass) 场景下，bypass 失效时的最后防线。默认开启。
+同机 A(tun)+B(bypass, 仅Linux) 场景下，bypass 失效时的最后防线。默认开启。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|

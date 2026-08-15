@@ -207,9 +207,10 @@ websocket:
 
 ---
 
-## 9. 同机双实例：A 开 TUN + B 作出口（防死循环）
+## 9. 同机双实例：A 开 TUN + B 作出口（防死循环，Linux）
 
-A 做全局代理并转给同机 B，B 普通模式出口。**B 必须 `mode=bypass`** 逃出 A 的 TUN，否则死循环。
+A 做全局代理并转给同机 B，B 普通模式出口。**B 必须 `mode=bypass` 逃出 A 的 TUN**，否则死循环。
+bypass 模式仅 Linux 支持（macOS/Windows 已移除）。
 
 ```yaml
 # A: conf/a.yaml —— 全局代理，转发给同机 B
@@ -222,11 +223,11 @@ default:
 ```
 
 ```yaml
-# B: conf/b.yaml —— 出口，绑物理网卡逃出 A 的 TUN
+# B: conf/b.yaml —— 出口，绑物理网卡逃出 A 的 TUN（仅 Linux）
 listen: :11000
 mode: bypass
-bypass:
-  device: eth0                        # macOS 必填(如 en0)；Linux 通常可自动探测
+bypassLinux:
+  device: eth0                        # 留空则自动探测默认路由网卡
 loopGuard:
   minActive: 1000                     # 兜底熔断器，默认已开
   ratio: 80

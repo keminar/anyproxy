@@ -67,7 +67,7 @@ anyproxy 是一个跨平台的 TCP 流量转发器 / 代理。它按域名把每
 | `proxy`（默认） | 客户端/代理模式，仅按监听端口收流 |
 | `tunnel` | 服务端 tunneld，带 token 验证，只处理 anyproxy 请求 |
 | `tun` | 建 TUN 虚拟网卡做全局代理（Windows 用 WinDivert；需管理员/root） |
-| `bypass` | 不建网卡，仅把出向连接绑定物理网卡（逃出同机另一实例的 TUN） |
+| `bypass` | 不建网卡，仅把出向连接绑定物理网卡（逃出同机另一实例的 TUN；**仅 Linux**） |
 | `tcpcopy` | 端口转发，每个连接改投到 `tcpcopy.ip:port`（开启后 hosts 规则失效） |
 
 另有一个独立开关 `websocket`（内网穿透），可与上述模式共存，见 [modes.md](modes.md)。

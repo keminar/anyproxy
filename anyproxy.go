@@ -216,13 +216,16 @@ func main() {
 			}
 		}()
 	case "bypass":
-		// 仅初始化物理网卡绕行参数，不建TUN网卡；Windows 下会启用 /32 例外路由(逃他机TUN)
-		tun.InitBypassOnly(tun.BypassConfig{
-			ExcludeNics:  conf.RouterConfig.Bypass.ExcludeNics,
-			Device:       conf.RouterConfig.Bypass.Device,
-			ExcludeProcs: conf.RouterConfig.Bypass.ExcludeProcs,
-			BypassIPs:    withProxyBypassIPs(conf.RouterConfig.Bypass.BypassIPs),
-		})
+		// 仅 Linux 支持: 绑定物理网卡绕行, 逃出同机另一个 TUN 进程的 0/1 路由。
+		// macOS/Windows 已移除该模式(见 tun/bypass_other.go)。
+		if err := tun.InitBypassOnly(tun.BypassConfig{
+			ExcludeNics: conf.RouterConfig.Bypass.ExcludeNics,
+			Device:      conf.RouterConfig.Bypass.Device,
+		}); err != nil {
+			log.Printf("mode=bypass unsupported: %v; fallback proxy", err)
+			mode = "proxy"
+			break
+		}
 		// 退出/平滑重启前清理 bypass 加的 /32 例外路由(复用 tunCtx 取消信号 + tunWG 等待)
 		tunWG.Add(1)
 		go func() {

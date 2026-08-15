@@ -50,7 +50,7 @@ Windows 路由是**最长前缀匹配优先**，`/32` 永远压过 anyproxy 的 
    ```
    anyproxy 只要不被喂到这个包，就天然正确。
 
-2. **代码级兜住 VPN 段（待实现，方案 B）**：新增「按目标网段绑定到指定接口 ifindex」的 bypass 配置，TCP `tunDial` 与 UDP `listenUDP` 命中时把 `IP_UNICAST_IF` 指向 **TAP 的索引**（而非物理网卡），让 anyproxy 即使没有系统 /32 也能主动把 VPN 内网流量（含 DNS）送回 TAP：
+2. **代码级兜住 VPN 段（待实现，方案 B）**：新增「按目标网段绑定到指定接口 ifindex」的直连例外配置（`tun.bypassRoutes`，与 mode=bypass 无关），TCP `tunDial` 与 UDP `listenUDP` 命中时把 `IP_UNICAST_IF` 指向 **TAP 的索引**（而非物理网卡），让 anyproxy 即使没有系统 /32 也能主动把 VPN 内网流量（含 DNS）送回 TAP：
    ```yaml
    tun:
      bypassRoutes:

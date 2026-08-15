@@ -130,10 +130,10 @@ tun:
 	}
 }
 
-// TestBypassFlatConfig 确认旧的扁平写法(向后兼容)仍能正确解析到内嵌 BypassOS 字段。
-func TestBypassFlatConfig(t *testing.T) {
+// TestBypassConfig 确认 bypass 配置能正确解析(仅 Linux 支持, key=bypassLinux, 扁平字段)。
+func TestBypassConfig(t *testing.T) {
 	y := `
-bypass:
+bypassLinux:
   excludeNics:
     - anytun0
   device: eth0
@@ -142,65 +142,10 @@ bypass:
 	if err := yaml.Unmarshal([]byte(y), &r); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	r.Bypass.applyOS("linux") // 无系统块, 应保持扁平值不变
 	if len(r.Bypass.ExcludeNics) != 1 || r.Bypass.ExcludeNics[0] != "anytun0" {
-		t.Fatalf("flat excludeNics lost: %v", r.Bypass.ExcludeNics)
+		t.Fatalf("excludeNics lost: %v", r.Bypass.ExcludeNics)
 	}
 	if r.Bypass.Device != "eth0" {
-		t.Fatalf("flat device lost: %q", r.Bypass.Device)
-	}
-}
-
-// TestBypassPerOSConfig 确认按系统分块 + applyOS 整块覆盖生效。
-func TestBypassPerOSConfig(t *testing.T) {
-	y := `
-bypass:
-  device: en0               # 扁平默认(无对应系统块时才用)
-  linux:
-    excludeNics:
-      - anytun0
-    device: eth0
-  windows:
-    excludeProcs:
-      - openvpn.exe
-    bypassIPs:
-      - 203.0.113.10
-`
-	load := func() Router {
-		var r Router
-		if err := yaml.Unmarshal([]byte(y), &r); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		return r
-	}
-
-	// linux: 取 linux 块
-	rl := load()
-	rl.Bypass.applyOS("linux")
-	if len(rl.Bypass.ExcludeNics) != 1 || rl.Bypass.ExcludeNics[0] != "anytun0" {
-		t.Fatalf("linux excludeNics: %v", rl.Bypass.ExcludeNics)
-	}
-	if rl.Bypass.Device != "eth0" {
-		t.Fatalf("linux device: %q", rl.Bypass.Device)
-	}
-
-	// windows: 取 windows 块(不含 device, 整块覆盖后 device 应为空, 非扁平的 en0)
-	rw := load()
-	rw.Bypass.applyOS("windows")
-	if rw.Bypass.Device != "" {
-		t.Fatalf("windows block should fully replace flat; device=%q", rw.Bypass.Device)
-	}
-	if len(rw.Bypass.ExcludeProcs) != 1 || rw.Bypass.ExcludeProcs[0] != "openvpn.exe" {
-		t.Fatalf("windows excludeProcs: %v", rw.Bypass.ExcludeProcs)
-	}
-	if len(rw.Bypass.BypassIPs) != 1 || rw.Bypass.BypassIPs[0] != "203.0.113.10" {
-		t.Fatalf("windows bypassIPs: %v", rw.Bypass.BypassIPs)
-	}
-
-	// darwin: 无 darwin 块, 回退扁平默认
-	rd := load()
-	rd.Bypass.applyOS("darwin")
-	if rd.Bypass.Device != "en0" {
-		t.Fatalf("darwin should fall back to flat; device=%q", rd.Bypass.Device)
+		t.Fatalf("device lost: %q", r.Bypass.Device)
 	}
 }

@@ -375,7 +375,7 @@ func getString(val string, def string, def2 string) string {
 
 // handshake 和server握手
 func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) (err error) {
-	// 死循环兜底: 同机 A(TUN)+B(bypass) 若 bypass 未生效, 句柄会堆积且都指向同一目标,
+	// 死循环兜底: 同机 A(TUN)+B(bypass, 仅Linux) 若 bypass 未生效, 句柄会堆积且都指向同一目标,
 	// 全局在传连接冲高后某目标占比过大即判为环路, 拒绝其新连接以解开环路。
 	// 正常应由 mode=bypass 根治, 此为最后防线。
 	guardKey := dstName

@@ -1,6 +1,6 @@
-# 同机多实例死循环防护（跨平台说明）
+# 同机多实例死循环防护
 
-本文档说明同机部署两套 anyproxy 时的死循环成因、根治与兜底方案，以及各操作系统平台的差异。
+本文档说明同机部署两套 anyproxy 时的死循环成因、根治与兜底方案。
 
 ## 场景与成因
 
@@ -21,15 +21,16 @@ TUN，但 **B 的出向流量没逃**，被 A 的 TUN 再次抓走 → A → B �
 > 同机源 IP 相同，无法用「源 IP=B」或 `ip rule from` 区分 B 的流量；HTTPS/CONNECT 又无法塞
 > loop-detection 头部。因此同机场景只能靠下面两层手段。
 
-## 第一层（根治）：B 用 mode=bypass
+## 第一层（根治）：B 用 mode=bypass（仅 Linux）
 
 让 B 以 `mode=bypass` 运行，B 的出向连接会绑定物理网卡、逃出 A 的 TUN 路由，从路由层根治环路。
+**bypass 模式仅 Linux 支持**；macOS/Windows 已移除（见文末「平台差异」）。
 
 ```yaml
 # B 的 conf/router.yaml
 mode: bypass
-bypass:
-  # 自动探测不到物理网卡时手动指定(见下方平台差异表)
+bypassLinux:
+  # 自动探测不到物理网卡时手动指定
   device: eth0
 ```
 
@@ -39,8 +40,8 @@ bypass:
 bypass-only: device="eth0" ip="192.168.1.10" exclude=[...]
 ```
 
-`device`（Linux）或 `ip`（Windows/Mac）非空才算 bypass 生效。若为空，说明自动探测失败、bypass 会
-**静默退回普通拨号而失效**，此时必须用 `bypass.device` 手动指定网卡名。
+`device` 与 `ip` 非空才算 bypass 生效。若为空，说明自动探测失败、bypass 会**静默退回普通拨号而失效**，
+此时必须用 `bypassLinux.device` 手动指定网卡名。
 
 ## 第二层（兜底）：loopGuard 熔断器
 
@@ -88,33 +89,24 @@ Linux 行为完全相同、默认同样开启。
 （`transferConn` 是 TUN 路径，Mac 不支持建 TUN 网卡故不会走到；但普通代理路径 `transfer` 照常计数，
 loopGuard 在 Mac 依然有效。）
 
-### bypass.device —— 三平台都生效，但底层绑定机制不同
+### bypass —— 仅 Linux；macOS/Windows 已移除
 
-| 平台 | 绑定方式 | 自动探测网卡 | 手动 `bypass.device` |
-|------|----------|----------------|-------------------|
-| **Linux** | `SO_BINDTODEVICE`（按网卡名硬绑，最可靠） | `ip route show default` 通常可用 | 直接用作绑定网卡名，可选 |
-| **Windows** | `LocalAddr` 绑物理网卡 IP | 已实现，通常可用 | 由网卡名解析出该网卡 IP 再绑，可选 |
-| **Mac(darwin)** | `LocalAddr` 绑物理网卡 IP | **返回空（不支持自动探测）** | **必填**：靠它解析出网卡 IP，否则 bypass 失效 |
+| 平台 | bypass 模式 | 替代方案 |
+|------|------------|----------|
+| **Linux** | ✅ 支持。`SO_BINDTODEVICE` 按网卡名硬绑，最可靠；自动探测 `ip route show default` | — |
+| **macOS** | ❌ 已移除 | 入站服务回包被 TUN 吸走 → `mode=tun` + `tun.inboundPorts`（pf reply-to） |
+| **Windows** | ❌ 已移除 | WinDivert 模型无 0/1 路由概念；逃逸靠 TUN 进程的 `tun.windows.excludeProcs`/`bypassIPs` + egress 源端口段（见 [windows-windivert-escape.md](windows-windivert-escape.md)） |
 
-要点：
-
-- **Mac 上 `bypass.device` 基本是必填**（如 `device: en0`）。否则自动探测为空 → 绑定 IP 为空 → 出向退回普通
-  拨号 → bypass 无效。
-- Windows/Mac 用 `LocalAddr` 绑 IP，是「引导系统路由优选物理网卡」，不是 Linux 那种硬设备绑定，
-  **保证性弱一些**，因此在 Win/Mac 上 loopGuard 兜底更重要。
-
-### 场景适用平台
-
-**「A(tun)+B(bypass) 同机死循环」场景在 Linux / Windows / macOS 都可能出现**：三平台均支持
-`mode=tun`（macOS 通过原生 utun 实现，见 [tun-features.md](tun-features.md)）。任一平台上
-A 起 tun 全局代理、B 作为上游普通模式时，都需要 B 用 `mode=bypass` 逃出 A 的 tun。
+> Linux 上若自动探测失败（`bypass-only: device=""`），用 `bypassLinux.device` 手动指定网卡名。
+> 另外，Windows/macOS 上 B（anyproxy 进程）的出向仍会被 A 的捕获/路由接管：macOS 无 0/1 路由时不适用；
+> Windows 上 B 出向靠 egress 源端口段被 A 天然放行（同为 anyproxy 时），无需 bypass 模式。
 
 ## 配置速查
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
-| `mode` | `proxy` | `proxy` / `tunnel` / `tun` / `bypass`；同机 A 用 tun、B 用 bypass |
-| `bypass.device` | 空(自动探测) | 手动指定物理网卡名；**Mac 必填** |
-| `bypass.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名 |
+| `mode` | `proxy` | `proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux）；同机 A 用 tun、B 用 bypass |
+| `bypassLinux.device` | 空(自动探测) | 手动指定物理网卡名（仅 Linux） |
+| `bypassLinux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（仅 Linux） |
 | `loopGuard.minActive` | 1000 | 在传连接闸门；`<0` 关闭 |
 | `loopGuard.ratio` | 80 | 单目标占比阈值(%) |

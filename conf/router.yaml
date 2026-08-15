@@ -32,9 +32,11 @@ tcpcopy:
 #   proxy   : 客户端/代理模式(默认, 留空即此)
 #   tunnel  : 服务端 tunneld, 带 token 验证, 只处理 anyproxy 请求
 #   tun     : 建TUN虚拟网卡做全局代理(需管理员/root; windows 用 WinDivert, 需 WinDivert.dll/.sys)
-#   bypass  : 不建网卡, 仅把出向连接绑定物理网卡绕行
+#   bypass  : 不建网卡, 仅把出向连接绑定物理网卡绕行(仅 Linux 支持)
 #             用于本机已有另一个 anyproxy TUN 进程时, 让本进程 target=local 的请求
 #             逃出对方 TUN 的 0/1 路由, 避免被再次劫持成死循环
+#             macOS/Windows 已移除该模式: macOS 入站回包用 tun.inboundPorts,
+#             Windows 用 WinDivert 的 tun.windows.excludeProcs/bypassIPs
 #   tcpcopy : 端口转发, 每个连接改投到上面 tcpcopy.ip:port
 mode:
 
@@ -76,33 +78,16 @@ tun:
 #    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)
 #      - openvpn.exe
 
-# mode=bypass 时生效: 物理网卡绕行
-# 推荐「按系统分块」写法: bypass.linux / bypass.darwin / bypass.windows 各只填本系统
-# 用得到的字段, 程序按当前系统取对应块。
-bypass:
-#  # ===== Linux (绑定物理网卡逃逸 0/1 路由) =====
-#  linux:
-#    excludeNics:              # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
-#      - anytun0
-#    device:                   # 手动指定物理网卡名, 留空则自动探测默认路由网卡
-#      # eth0
-#
-#  # ===== macOS (IP_BOUND_IF 绑物理网卡逃逸 0/1 路由) =====
-#  darwin:
-#    excludeNics:
-#      - utun0
-#    device:                   # 留空则自动探测, 如 en0
-#      # en0
-#
-#  # ===== Windows (bypass 模式仅记录, 实际逃逸请配在 TUN 进程的 tun.windows 下) =====
-#  windows:
-#    excludeProcs:             # 记录用, 实际逃逸配在 tun.windows
-#      - openvpn.exe
-#    bypassIPs:                # 记录用, 实际逃逸配在 tun.windows
-#      - 203.0.113.10
+# mode=bypass 时生效: 物理网卡绕行(仅 Linux 支持; macOS/Windows 已移除该模式)
+# 配置 key 为 bypassLinux, 与 mode=bypass 配套
+bypassLinux:
+#  excludeNics:              # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
+#    - anytun0
+#  device:                   # 手动指定物理网卡名, 留空则自动探测默认路由网卡
+#    # eth0
 
 # 死循环兜底熔断器(最后防线, 非主方案)。
-# 同机 A(mode=tun)+B(mode=bypass) 部署时, 正常应由 bypass 从路由层根治环路;
+# 同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署时, 正常应由 bypass 从路由层根治环路;
 # 若 bypass 未生效, 句柄会堆积且都指向同一目标。判定: 全局在传连接数达到 minActive
 # (闸门)后, 若某个 host:port 占用的在传连接超过 total*ratio%, 判为环路并拒绝其新连接。
 # 常态(总连接数低于闸门)只做一次 int 比较, 无额外开销。

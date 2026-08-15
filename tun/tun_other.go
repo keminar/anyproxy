@@ -15,42 +15,6 @@ import (
 	"github.com/keminar/anyproxy/config"
 )
 
-// InitBypassOnly 只初始化物理网卡绕行参数，不创建 TUN 设备、不加路由。
-// 用于本机存在另一个 anyproxy TUN 进程时：让本进程的出向连接(tunDial)绑定
-// 物理网卡，逃出对方 TUN 的 0/1 路由，避免 target=local 请求被再次劫持成死循环。
-// 与 Run 互斥——本进程若自身开 TUN 则已在 Run 内完成同样的初始化，无需再调用。
-// cfg.ExcludeNics: 采集直连子网时要排除的网卡名(通常是另一进程的 TUN 网卡名)。
-// 为空时默认排除本平台默认 TUN 网卡名(linux anytun0 / windows AnyProxy)。
-// cfg.Device: 手动指定用于绑定的物理网卡名; 为空则回退 defaultRoute 自动探测,
-// 兜住探测失败(device="")时 tunDial 静默退回普通 Dial 导致 bypass 形同虚设的情况。
-func InitBypassOnly(cfg BypassConfig) {
-	excludeNics := cfg.ExcludeNics
-	device := cfg.Device
-	if len(excludeNics) == 0 && defaultTunName != "" {
-		excludeNics = []string{defaultTunName}
-	}
-	gw, autoDev := defaultRoute()
-	if device == "" {
-		device = autoDev
-	}
-	config.TUNBypassDev = device
-	config.TUNBypassIP = defaultLocalIP(device)
-	config.TUNBypassIfIndex = bypassIfIndex(device)
-	config.TUNBypassGW = gw
-	initBypassNets(excludeNics...)
-	log.Printf("bypass-only: device=%q ip=%q ifIndex=%d gw=%q exclude=%v\n", device, config.TUNBypassIP, config.TUNBypassIfIndex, gw, excludeNics)
-	// bypass 的用途是逃出「他机 TUN 进程」(如同机 A 的 TUN)的 0/1 路由。Windows 上
-	// IP_UNICAST_IF 对 TCP 压不过更精确的 0/1(见 proto/dialer_windows.go 实测), 因此
-	// bypass 直连出向也要靠 /32 物理网关例外路由才能真正逃出。gw 为空则不启用。
-	bypassEnableDirectRoutes(gw)
-}
-
-// CleanupBypass 清理 bypass 模式添加的 /32 例外路由(仅 Windows 有实体, 其它平台空操作)。
-// 进程退出/平滑重启前调用, 避免残留路由(非持久路由, 漏删也随重启消失)。
-func CleanupBypass() {
-	bypassCleanupDirectRoutes()
-}
-
 // Run 启动TUN虚拟网卡全局代理，阻塞直到出错或 ctx 结束。
 // 流程: 创建网卡 -> 配置接口IP -> 打印路由提示 -> 运行用户态协议栈转发。
 func Run(ctx context.Context, cfg Config) error {

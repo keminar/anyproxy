@@ -55,7 +55,7 @@ WinDivert 在 Windows 内核网络层注册过滤器，拦截所有 outbound 的
 | 源端口 == ProxyPort | 回程包，走 `rewriteReturn` 恢复 |
 | 目标端口 == ProxyPort 且是 loopback | 放行（自身流量不重定向） |
 | 上游代理地址 | 放行（避免环路） |
-| ExcludeIPs 中的地址 | 放行（bypass 配置） |
+| ExcludeIPs 中的地址 | 放行（tun.bypassIPs 配置） |
 | 源端口在 egress 段（40001-49151） | 放行（anyproxy 自己的出站连接，确定性识别，见「环路防护」） |
 | socksGuard 认领的源端口 | 放行（兜底：回退拨号 / 外部代理进程） |
 | isDirect（loopback / skipPort / BypassPrivate 时的私网） | 放行，不重定向 |
