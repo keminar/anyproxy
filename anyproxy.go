@@ -350,7 +350,7 @@ func loadGeo() {
 		}
 	}
 	if ic, sc := geo.Stat(); ic > 0 || sc > 0 {
-		log.Printf("geo: 已加载 geoip 类别数=%d, geosite 类别数=%d", ic, sc)
+		log.Printf("geo: loaded geoip categories=%d, geosite categories=%d", ic, sc)
 	}
 	// 用了 geoip:/geosite: 规则但数据未就绪时提示
 	for _, h := range conf.RouterConfig.Hosts {
