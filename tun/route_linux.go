@@ -60,6 +60,12 @@ func setupTUNRoutes(tunName, tunIP, gw, dev string, bypassIPs []string) error {
 		if !strings.Contains(ip, "/") {
 			ip += "/32"
 		}
+		// 落在本机直连子网(物理或虚拟网卡)内的例外无需显式路由: pref 110 已让它
+		// 走 main 命中内核直连路由。强行 via 物理网关会盖掉虚拟网卡的正确路由 → 不可达。
+		if ipInBypassNets(ip) {
+			log.Printf("autoRoute: bypass %s 在直连子网内, 跳过显式路由(内核直连)\n", ip)
+			continue
+		}
 		if err := run("ip", "route", "add", ip, "via", gw, "dev", dev); err != nil {
 			log.Printf("autoRoute: bypass route %s skipped: %v\n", ip, err)
 		}
