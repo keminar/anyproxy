@@ -56,9 +56,15 @@ WinDivert 在 Windows 内核网络层注册过滤器，拦截所有 outbound 的
 | 目标端口 == ProxyPort 且是 loopback | 放行（自身流量不重定向） |
 | 上游代理地址 | 放行（避免环路） |
 | ExcludeIPs 中的地址 | 放行（bypass 配置） |
-| socksGuard 认领的源端口 | 放行（anyproxy 自己的出站连接） |
-| isDirect（loopback / skipPort / 私网） | 放行 |
-| shouldRedirect 且在范围内 | 走 `rewriteForward` 重定向 |
+| 源端口在 egress 段（40001-49151） | 放行（anyproxy 自己的出站连接，确定性识别，见「环路防护」） |
+| socksGuard 认领的源端口 | 放行（兜底：回退拨号 / 外部代理进程） |
+| isDirect（loopback / skipPort / BypassPrivate 时的私网） | 放行，不重定向 |
+| shouldRedirect 且目标端口在 RedirectPorts | 走 `rewriteForward` 重定向 |
+
+> `isDirect` 里的私网受 `BypassPrivate` 控制，Windows 上 **`tun.windows.bypassPrivate`
+> 不配默认 `true`**：私网/LAN/链路本地（含虚拟机/VM 网段）一律直连、不进引擎；
+> 显式配 `false` 才让私网 80/443 进引擎按 router 规则走。`loopback` 始终直连。
+> 详见文末「两条连接与直连判定」。
 
 ### 3. rewriteForward：出站包 → 本地代理
 
@@ -199,11 +205,44 @@ WinDivert 拦截的是所有 outbound TCP，包括 anyproxy 自己发出的连�
 
 | 层 | 机制 | 代码 |
 |----|------|------|
-| SOCKS Guard | 监听 WinDivert SOCKET 层，记录代理进程的出站源端口，process() 中放行 | socksguard.go |
+| **egress 源端口段** | anyproxy 出站连接绑定到专用源端口段 `[40001, 49151]`，process() 见到该段源端口直接放行 | proto/egress.go、proto/dialer_windows.go、redirect.go |
+| SOCKS Guard | 监听 WinDivert SOCKET 层，记录代理进程的出站源端口，process() 中放行（回退拨号与外部进程的兜底） | socksguard.go |
 | 上游排除 | `SocksExcludeIP` / `SocksExcludePort` 排除到上游代理的连接 | redirect.go:299 |
 | IP 排除 | `ExcludeIPs`（tun.bypassIPs）排除指定 IP/CIDR | redirect.go:309 |
 | loopback 放行 | 目的端口 == ProxyPort 且 loopback 的包直接放行 | redirect.go:232 |
 | 速率限制 | `MaxConnPerDomainPerSec` 限制单目的地连接速率，作为最后兜底 | proxy.go:89 |
+
+### egress 源端口段（主机制，IPv4/IPv6 一致）
+
+网络层的包无法区分「应用发起的连接」和「anyproxy 自己拨出去的连接」——两者
+源 IP 都是本机、目标都是同一台服务器、都是 outbound 80/443。唯一可靠的区分是
+**源端口 + 进程身份**。
+
+做法：Windows 的拨号器（`tunDial`）给 anyproxy 每一条出站连接（直连服务器、
+或连上游代理）都把本地源端口绑进专用段 `[40001, 49151]`；`process()` 里凡是
+源端口落在该段的包，就是 anyproxy 自己的出站，直接放行、绝不重抓。
+
+为什么这样是「根治」：
+
+- **确定性**：绑定发生在 `connect` 发出 SYN **之前**，不存在竞态。
+- **IP 协议族无关**：IPv4/IPv6 用同一段、同一判断，天然一致。
+- **段的选取**：`[40001, 49151]` 位于 NAT 端口池（10000-40000）**之上**、
+  Windows 动态/临时端口段（49152-65535）**之下**，既不撞代理伪造的环回端口，
+  也不撞真实应用流量（应用出站临时端口从 49152 起）。
+
+> 背景：早期只靠 SOCKS Guard（SOCKET 层事件）识别 anyproxy 自身出站。该事件
+> 与 NETWORK 层 SYN 分属两个句柄/协程，存在竞态；**IPv6 直连会稳定输掉这个
+> 竞态**，导致 anyproxy 自己拨向服务器的连接被反复重抓，形成
+> `app→proxy→egress→重抓→proxy→…` 的死循环（现象：同一目标连接号在一秒内
+> 暴涨，被 50/域名/秒 限流压住空转）。改用源端口段后不再依赖该事件，问题根除。
+
+SOCKS Guard 仍保留，作为两种情况的兜底：① 端口段用尽时的回退（无绑定）拨号；
+② 通过 `SocksProcessNames` 配置的外部代理进程（不经 anyproxy 拨号器）。
+
+> 端口段的权衡：绑定固定源端口受 TIME_WAIT 影响，段内端口在 TIME_WAIT 期间
+> （Windows 约 2-4 分钟）不能复用。该段约 9000 个端口，绑定冲突会自动换槽重试，
+> 整段用尽才回退到普通拨号（那条才可能环路，且被限流兜底）。个人代理场景够用；
+> 极高并发直连时可能偶发回退。
 
 ### SOCKS Guard 工作原理
 
@@ -233,6 +272,78 @@ IPv6 出站包的源 IP 是本机 IPv6 地址，重写后目的地址也是本�
 天然走 IPv6 协议栈，无需特殊处理。监听器绑 `:port`（dual-stack）同时
 接收 IPv4 和 IPv6 连接。
 
+> anyproxy 自己拨向服务器的那条（Leg 2）同样兼容 IPv6：靠 egress 源端口段
+> 放行，与 IPv4 用同一段、同一判断，不再依赖会对 IPv6 输掉竞态的 SOCKET 层
+> 事件。此前 IPv6 直连的环路问题即由此根除，见「环路防护 → egress 源端口段」。
+
+## 两条连接与直连判定
+
+透明代理里始终是**两条独立的 TCP 连接**，别混为一谈：
+
+- **Leg 1 = 应用 → 服务器**（浏览器 → server:443）：被 WinDivert 抓下、NAT 到
+  `NIC_IP:ProxyPort` 本地监听器。
+- **Leg 2 = anyproxy → 真服务器**（`ForwardTCP` 判定直连后自己拨出去的那条）：
+  绑定在 egress 端口段、被 process() 直接放行的就是**这一条**。
+
+「egress 段放行」放的是 Leg 2；`NIC_IP:ProxyPort` 监听器承接的是 Leg 1。两者
+不是一回事，监听器必须保留。
+
+### 为什么 Leg 1 必须「转一次」，不能直接放行
+
+抓到 SYN 的那一刻，anyproxy **还不知道**这个目标该直连还是走代理：
+
+- 按域名的规则（router.yaml、`default.target`、单域名 `host.proxy`）要靠
+  **TLS ClientHello 的 SNI / HTTP Host**，而首包要等 TCP 握手完成、客户端开口
+  才拿得到。
+- 所以必须先把这条 TCP 在本地当「服务器」接下来（只有落到 `net.Listener` 上
+  才拿得到 `net.Conn` 交给 `ForwardTCP`），读首包嗅探域名、跑规则、可能还要做
+  远程 DNS / 计数 / 限流 / 日志，**判完**才知道直连（→ Leg 2）还是走上游代理。
+
+握手没完成、SNI 还没到，就没法在包层判断「这条要不要放」，只能先转到本地。
+这是透明代理的本质，省不掉。
+
+### 什么时候「不转」——按 IP 就能定性的直连
+
+凭**目的 IP** 就能判定直连的，`process()` 里直接 `return true` 放行、**根本不
+NAT**，不产生 Leg 1 中转：
+
+| 条件 | 代码 | 是否中转 |
+|------|------|----------|
+| loopback（127.0.0.0/8、::1） | `isDirect` | 否，直接放行 |
+| `SkipPorts` 里的端口 | `isDirect` | 否，直接放行 |
+| 私网 / LAN / 链路本地（`BypassPrivate`，Windows 默认开） | `isDirect` | 否，直接放行 |
+| `tun.bypassIPs` 命中的 IP/CIDR | `isExcludedIP` | 否，直接放行 |
+| 目标端口不在 `RedirectPorts`（默认非 80/443） | `shouldRedirect` | 否，直接放行 |
+
+只有**必须靠域名才能定**的，才不得不转一次去拿 SNI。
+
+### 私网 / VPN 内网地址（如 `192.168.14.18`）到底走哪条
+
+Windows 上 `tun.windows.bypassPrivate` **不配默认 `true`**，所以私网地址默认**直连、不进引擎**：
+
+| 目标（默认 `bypassPrivate=true`） | 判定 | 结果 |
+|------|------|------|
+| `192.168.14.18:443` / `:80` / 任意端口 | `isPrivateOrLinkLocal` → `isDirect=true` | **不转**，捕获层直接放行，直连内网 |
+| 把 `192.168.14.0/24` 配进 `tun.bypassIPs` | `isExcludedIP` 命中（同样直连） | **不转**，直接放行 |
+
+若显式配 `tun.windows.bypassPrivate: false`（想让私网也按 router 规则走）：
+
+| 目标（`bypassPrivate=false`） | 判定 | 结果 |
+|------|------|------|
+| `192.168.14.18:443` / `:80` | `isDirect=false`；443/80 在 `RedirectPorts` → `shouldRedirect=true` | **走 NAT 转发（Leg 1）**：转本地代理，router 规则判定（通常直连，Leg 2 直接拨该 IP、egress 段放行不成环） |
+| `192.168.14.18:22`（SSH）、`:445`（SMB）等非 80/443 | 不在 `RedirectPorts` → `shouldRedirect=false` | **不转**，包层直接放行 |
+
+选择：
+
+- **默认（`bypassPrivate=true`）**：整个私网/LAN/VM 一刀切直连，最省心；
+- 想**按 router 规则代理某个私网目标**：配 `bypassPrivate: false`，让私网 80/443 进引擎；
+- 只想**精确放行某几段**、其余私网仍按规则：`bypassPrivate: false` + `tun.bypassIPs` 列出要直连的网段。
+
+> 与「同机 VPN 逃逸」区分：如果本机还跑着 OpenVPN 之类隧道，需要排除的是
+> **VPN 的传输端点**（服务器 IP，走 `tun.bypassIPs`）或**VPN 进程**
+> （走 `excludeProcs`），避免 `openvpn→server:443` 被抓成环；这与「访问 VPN
+> 内网某台主机」是两件事，见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
+
 ## 涉及的源码文件
 
 | 文件 | 职责 |
@@ -241,6 +352,8 @@ IPv6 出站包的源 IP 是本机 IPv6 地址，重写后目的地址也是本�
 | `proxy.go` | 本地代理监听器、Accept 连接、查 NAT 表、交付 ForwardTCP |
 | `nat.go` | NAT 连接表：分配/查找/回收 natPort |
 | `packet.go` | IP/TCP/UDP 包解析与原地改写辅助函数 |
-| `socksguard.go` | SOCKS 环路防护：SOCKET 层进程识别 |
+| `socksguard.go` | SOCKS 环路防护：SOCKET 层进程识别（egress 段的兜底） |
 | `engineconfig.go` | WinDivert 引擎配置结构体 |
 | `dns.go` | DNS (UDP/53) 劫持应答 |
+| `proto/egress.go` | egress 源端口段常量（`EgressPortLo`/`EgressPortHi`），proto 与 wdengine 共用 |
+| `proto/dialer_windows.go` | Windows 拨号器：把 anyproxy 出站源端口绑进 egress 段 |

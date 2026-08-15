@@ -204,6 +204,9 @@ func main() {
 			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
 			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
 			BypassIPs: withProxyBypassIPs(conf.RouterConfig.Tun.BypassIPs),
+			// 仅 Windows(WinDivert): 私网/LAN/链路本地一律直连。不配默认 true(与
+			// linux/darwin 直连子网不进 TUN 的行为一致); 显式 false 才让私网 80/443 进引擎
+			BypassPrivate: conf.RouterConfig.Tun.BypassPrivate == nil || *conf.RouterConfig.Tun.BypassPrivate,
 		}
 		tunWG.Add(1)
 		go func() {

@@ -36,11 +36,6 @@ const protoTCP = "tcp"
 const protoHTTP = "http"
 const protoHTTPS = "https"
 
-// proxyFailTTL 上级代理探测失败后, 标记为不可用的缓存时长。
-// 有效期内对该代理直接跳过 300ms 拨号探测; 过期后再探测一次以便及时发现其恢复。
-// 取值权衡: 太短则频繁重探浪费时间, 太长则代理恢复后要等更久才被重新使用。
-const proxyFailTTL = 20 * time.Second
-
 // autoDirectFailTTL 是 auto 模式下「直连失败」的缓存时长: 有效期内后续请求跳过直连、
 // 直接走代理, 只为省掉一次页面并发请求里的重复直连。刻意取短(而非缓存很久), 避免一次偶发
 // 直连失败就把该域名长时间钉死在代理上; 过期后会再尝试直连以便及时恢复。
@@ -149,11 +144,11 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
-			if srcname == "request" {
-				s.inbountCounter.Add(s.req.ID, int64(nw))
-			} else {
-				s.outbountCounter.Add(s.req.ID, int64(nw))
-			}
+				if srcname == "request" {
+					s.inbountCounter.Add(s.req.ID, int64(nw))
+				} else {
+					s.outbountCounter.Add(s.req.ID, int64(nw))
+				}
 			}
 			if ew != nil {
 				err = ew
@@ -646,9 +641,10 @@ func logSelfProxy(id uint, server string, port uint16) {
 // 单域名 host.proxy 与全局 default.proxy 共用同一套逻辑。
 // 依次对每个代理做连通性探测(getProxyServer 内含 300ms 拨号), 返回第一个能连通的;
 // 都不可用时 ok=false, opName 指示兜底动作:
-//   "local": 忽略代理走本地直连(调用方把 proxyServer 置空)
-//   "deny" : 拒绝请求
-//   ""     : 无后缀, 由调用方决定(host 情况回退全局代理)
+//
+//	"local": 忽略代理走本地直连(调用方把 proxyServer 置空)
+//	"deny" : 拒绝请求
+//	""     : 无后缀, 由调用方决定(host 情况回退全局代理)
 func resolveProxySpec(id uint, spec string) (scheme, server string, port uint16, opName string, ok bool) {
 	switch {
 	case strings.HasSuffix(spec, " local"):
@@ -727,21 +723,14 @@ func getProxyServer(proxySpec string) (string, string, uint16, error) {
 		return "", "", 0, err
 	}
 	key := fmt.Sprintf("%s:%d", proxyServer, proxyPort)
-	// 不可用缓存: 有效期内直接判失败, 跳过 300ms 拨号探测, 不浪费时间在挂掉的代理上
-	if cache.ProxyDial.Bad(key) {
-		return "", "", 0, fmt.Errorf("proxy %s unavailable (cached)", key)
-	}
-	// 检查是否可连通, 内网不好时100毫秒不够，调整到300
-	connTimeout := time.Duration(300) * time.Millisecond
+	// 不缓存「不可用」状态: 每次都实拨探测。否则上级代理重启恢复后, 仍会在旧失败缓存
+	// 有效期内被判死、导致请求无响应。探测很轻量(200ms 内建连即返回)。
+	connTimeout := time.Duration(200) * time.Millisecond
 	conn, err := tunDial("tcp", key, connTimeout)
 	if err != nil {
-		// 探测失败, 记入不可用缓存, 有效期内后续请求直接跳过
-		cache.ProxyDial.MarkBad(key, proxyFailTTL)
 		return "", "", 0, err
 	}
 	conn.Close()
-	// 探测成功, 清除可能存在的旧失败标记, 让恢复的代理立即可用
-	cache.ProxyDial.Clear(key)
 	return proxyScheme, proxyServer, proxyPort, nil
 }
 

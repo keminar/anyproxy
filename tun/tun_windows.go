@@ -43,7 +43,7 @@ func Run(ctx context.Context, cfg Config) error {
 		RedirectPorts:          []uint16{80, 443},
 		BlockQUIC:              dnsutil.BlockQUICEnabled(),
 		IPv6:                   true,
-		BypassPrivate:          false, // 与 wintun 一致: 80/443 一律进引擎, 由 router 规则决定; loopback 始终直连
+		BypassPrivate:          cfg.BypassPrivate, // 不配默认 true: 私网/LAN(含虚拟机网段)一律直连不进引擎; 配 tun.windows.bypassPrivate=false 则私网 80/443 进引擎按 router 规则。loopback 始终直连
 		MaxConnPerDomainPerSec: 50,
 	}
 	// 上游代理排除: 若全局上游服务器是 IPv4 字面量, 把 anyproxy→上游 那条腿排除出捕获,

@@ -143,15 +143,16 @@ type TcpCopy struct {
 //	excludeProcs             仅 windows(WinDivert 按进程名排除, 逃 OpenVPN 等同机隧道)
 //	inboundPorts             仅 darwin(pf reply-to 放行入站服务回包; linux 自动, windows 无需)
 type TunOS struct {
-	Name         string   `yaml:"name"`         //网卡名, linux默认anytun0, darwin默认utunN
-	Addr         string   `yaml:"addr"`         //接口地址CIDR, 如 10.9.0.1/24
-	MTU          uint32   `yaml:"mtu"`          //MTU, 默认1500
-	AutoRoute    *bool    `yaml:"autoRoute"`    //不配置默认true自动加路由; 显式false只打印命令
-	BypassIPs    []string `yaml:"bypassIPs"`    //这些目标直连(不代理): linux/darwin加/32路由; windows排除捕获
-	BlockQUIC    *bool    `yaml:"blockQUIC"`    //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
-	ExcludeProcs []string `yaml:"excludeProcs"` //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
-	InboundPorts []int    `yaml:"inboundPorts"` //仅darwin: 需pf放行回包的入站TCP端口(如22)
-	WindivertDir string   `yaml:"windivertDir"` //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
+	Name          string   `yaml:"name"`          //网卡名, linux默认anytun0, darwin默认utunN
+	Addr          string   `yaml:"addr"`          //接口地址CIDR, 如 10.9.0.1/24
+	MTU           uint32   `yaml:"mtu"`           //MTU, 默认1500
+	AutoRoute     *bool    `yaml:"autoRoute"`     //不配置默认true自动加路由; 显式false只打印命令
+	BypassIPs     []string `yaml:"bypassIPs"`     //这些目标直连(不代理): linux/darwin加/32路由; windows排除捕获
+	BypassPrivate *bool    `yaml:"bypassPrivate"` //仅windows: 不配默认true=私网/LAN/链路本地(含虚拟机/VM网段)一律直连不进引擎; 显式false则私网80/443进引擎按router规则。loopback始终直连
+	BlockQUIC     *bool    `yaml:"blockQUIC"`     //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
+	ExcludeProcs  []string `yaml:"excludeProcs"`  //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
+	InboundPorts  []int    `yaml:"inboundPorts"`  //仅darwin: 需pf放行回包的入站TCP端口(如22)
+	WindivertDir  string   `yaml:"windivertDir"`  //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
 }
 
 // Tun 虚拟网卡全局代理。
