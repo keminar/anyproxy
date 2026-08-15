@@ -13,6 +13,8 @@ cd anyproxy
 make all
 ```
 
+> 交叉编译各平台/架构（含路由器 MIPS、ARM、Windows 的 WinDivert 复制）见 [build.md](build.md)。
+
 ## 启动与后台
 
 ```bash
@@ -88,18 +90,51 @@ ulimit -n 65535
 
 > 与 `loopGuard.minActive` 相关：环路会在全局在传连接数刚过 `minActive` 时被切断，每条连接约占 2 个 fd，故 `minActive×2` 必须远小于 `ulimit -n`，否则会先撞 `too many open files`。见 [multi-instance-loop.md](multi-instance-loop.md)。
 
-其它内核参数（`sysctl`，见 `./anyproxy -h`）：
+其它内核参数：追加到 `/etc/sysctl.conf` 后执行 `sysctl -p`（完整列表见 `./anyproxy -h`）。含开启 **BBR** 拥塞控制（需内核 ≥ 4.9）：
 
-```
-net.core.somaxconn = 1024
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
+```bash
+cat >> /etc/sysctl.conf << EOF
+# TCP BBR congestion control
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# TCP/IP tuning
+fs.file-max = 1000000
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.netdev_max_backlog = 250000
+net.core.somaxconn = 4096
+net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 30
-net.ipv4.ip_local_port_range = 2000 65000
-net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_congestion_control = cubic
+net.ipv4.tcp_keepalive_time = 1200
+net.ipv4.ip_local_port_range = 10000 65000
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_max_tw_buckets = 1440000
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_mtu_probing = 1
+EOF
+sysctl -p
 ```
+
+验证 BBR：
+
+```bash
+sysctl net.ipv4.tcp_congestion_control   # => net.ipv4.tcp_congestion_control = bbr
+lsmod | grep bbr                          # => 含 tcp_bbr
+```
+
+也可用内置命令自动检查/应用（仅 Linux）：
+
+```bash
+./anyproxy -check          # 对照建议值报告 sysctl/ulimit/BBR 是否达标(只读)
+sudo ./anyproxy -check-fix # 一键写入 /etc/sysctl.d/99-anyproxy.conf 并 sysctl -p 应用
+```
+
+> `-check-fix` 只处理 sysctl；文件句柄（`ulimit -n`）因环境而异需另配：交互式登录改 `/etc/security/limits.conf`，systemd 服务在 unit 里设 `LimitNOFILE=65535`。
 
 ## 调试
 

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/keminar/anyproxy/utils/geo"
 	"gopkg.in/yaml.v2"
 )
 
@@ -23,6 +24,11 @@ type PortMap struct {
 //	name: "*google.com"  末尾一致(后缀) → www.google.com 命中, www.google.com.hk 不命中
 //	name: "google.com*"  开头一致(前缀) → google.com/google.com.hk 命中, www.google.com 不命中
 //	name: "*google.com*" 子串包含       → 含 google.com 的任意位置都命中
+//
+// 也支持按 geo 数据集匹配(需配 geo.ip / geo.site 加载 .dat):
+//
+//	name: geoip:cn       目标 IP 命中 geoip 类别 cn
+//	name: geosite:cn     目标域名命中 geosite 类别 cn
 //
 // 显式配置 match 时以 match 为准(向后兼容 contain/equal, name 原样不解析星号)。
 type Host struct {
@@ -40,6 +46,14 @@ type Host struct {
 // 优先级: 显式 Match(旧语义, name 原样) > name 首/尾 * 通配 > defaultMatch > equal。
 func (h Host) Matched(target, defaultMatch string) bool {
 	name := h.Name
+	// geo 数据集匹配: geoip:xx 按 target(IP) 匹, geosite:xx 按 target(域名) 匹。
+	// findHost 会分别用域名和 IP 各调一次, 传错类型时 geo.MatchIP/MatchSite 自然返回 false。
+	if cat, ok := strings.CutPrefix(name, "geoip:"); ok {
+		return geo.MatchIP(cat, target)
+	}
+	if cat, ok := strings.CutPrefix(name, "geosite:"); ok {
+		return geo.MatchSite(cat, target)
+	}
 	// 显式配置 match 时按旧语义处理, 保证向后兼容
 	if h.Match != "" {
 		switch h.Match {
@@ -189,6 +203,17 @@ type BypassOS struct {
 	BypassIPs    []string `yaml:"bypassIPs"`    //windows: 这些目标IP排除捕获(直连)
 }
 
+// Geo geoip/geosite 数据集。按「类别 -> 文件」配置(每个类别一个文件), 配了才启用
+// hosts 的 geoip:/geosite: 匹配。文件按扩展名区分:
+//   - .dat : protobuf 数据集(一个文件多类别), 取与配置键同名的类别;
+//   - 其它 : 纯文本列表(整个文件即该类别)。geoip 每行 CIDR/IP; geosite 每行域名,
+//     支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀), # 注释,
+//     keyword/regexp 丢弃当国外。
+type Geo struct {
+	IP   map[string]string `yaml:"ip"`   //类别 -> geoip 文件(.dat 或文本)
+	Site map[string]string `yaml:"site"` //类别 -> geosite 文件(.dat 或文本)
+}
+
 // Bypass 物理网卡绕行(不建TUN网卡)。
 // 用于本机已有另一个 anyproxy TUN 进程时：让本进程出向连接绑定物理网卡，
 // 逃出对方 TUN 的 0/1 路由，避免 target=local 请求被再次劫持成死循环。
@@ -251,6 +276,7 @@ type Router struct {
 	Tun       Tun       `yaml:"tun"`       //TUN虚拟网卡全局代理(mode=tun时生效)
 	Bypass    Bypass    `yaml:"bypass"`    //物理网卡绕行(mode=bypass时生效)
 	LoopGuard LoopGuard `yaml:"loopGuard"` //死循环兜底熔断器
+	Geo       Geo       `yaml:"geo"`       //geoip/geosite 数据集(启用 hosts 的 geoip:/geosite: 匹配)
 	Default   Default   `yaml:"default"`   //默认配置
 	Hosts     []Host    `yaml:"hosts"`     //域名列表
 	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP
