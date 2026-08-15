@@ -204,6 +204,9 @@ func main() {
 			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
 			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
 			BypassIPs: withProxyBypassIPs(conf.RouterConfig.Tun.BypassIPs),
+			// 仅 Windows(WinDivert): 私网/LAN/链路本地一律直连。不配默认 true(与
+			// linux/darwin 直连子网不进 TUN 的行为一致); 显式 false 才让私网 80/443 进引擎
+			BypassPrivate: conf.RouterConfig.Tun.BypassPrivate == nil || *conf.RouterConfig.Tun.BypassPrivate,
 		}
 		tunWG.Add(1)
 		go func() {
@@ -213,13 +216,16 @@ func main() {
 			}
 		}()
 	case "bypass":
-		// 仅初始化物理网卡绕行参数，不建TUN网卡；Windows 下会启用 /32 例外路由(逃他机TUN)
-		tun.InitBypassOnly(tun.BypassConfig{
-			ExcludeNics:  conf.RouterConfig.Bypass.ExcludeNics,
-			Device:       conf.RouterConfig.Bypass.Device,
-			ExcludeProcs: conf.RouterConfig.Bypass.ExcludeProcs,
-			BypassIPs:    withProxyBypassIPs(conf.RouterConfig.Bypass.BypassIPs),
-		})
+		// 仅 Linux 支持: 绑定物理网卡绕行, 逃出同机另一个 TUN 进程的 0/1 路由。
+		// macOS/Windows 已移除该模式(见 tun/bypass_other.go)。
+		if err := tun.InitBypassOnly(tun.BypassConfig{
+			ExcludeNics: conf.RouterConfig.Bypass.ExcludeNics,
+			Device:      conf.RouterConfig.Bypass.Device,
+		}); err != nil {
+			log.Printf("mode=bypass unsupported: %v; fallback proxy", err)
+			mode = "proxy"
+			break
+		}
 		// 退出/平滑重启前清理 bypass 加的 /32 例外路由(复用 tunCtx 取消信号 + tunWG 等待)
 		tunWG.Add(1)
 		go func() {

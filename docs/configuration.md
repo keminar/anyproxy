@@ -15,7 +15,7 @@
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
-| `mode` | string | `proxy` | 运行模式：`proxy` / `tunnel` / `tun` / `bypass`，优先级低于 `-mode` |
+| `mode` | string | `proxy` | 运行模式：`proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux），优先级低于 `-mode` |
 
 ## log
 
@@ -155,24 +155,28 @@ tun:
 | `autoRoute` | **true** | Linux/macOS | 自动加/清理路由；`false` 只打印命令；Windows 忽略 |
 | `bypassIPs` | 空 | 三平台 | 这些目标直连（Linux/macOS 加 `/32` 路由；Windows 排除捕获）。**以 IP 指定的上级代理（`-p`/`default.proxy`/`hosts[].proxy`）会自动并入，无需手动填**；只有域名指定的代理或 VPN 服务器 IP 等才需要在此手动列出 |
 | `blockQUIC` | **true** | 三平台 | drop 命中 hosts(配 ip) 域名的 UDP443，逼 QUIC 回退 TCP |
+| `bypassPrivate` | **true** | **仅 Windows** | 私网/LAN/链路本地（含虚拟机/VM 网段、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`）一律直连、不进引擎。显式 `false` 才让私网 80/443 进引擎按 router 规则走；`loopback` 始终直连。Linux/macOS 直连子网靠路由天然直连，无需此项 |
 | `excludeProcs` | 空 | **仅 Windows** | 这些进程(exe 名)出向不重定向，逃同机隧道(如 `openvpn.exe`)死循环 |
 | `inboundPorts` | 空 | **仅 macOS** | pf reply-to 放行入站服务回包(如外网 SSH 22)。Linux 自动、Windows 无需 |
 | `windivertDir` | 空(exe 同目录) | **仅 Windows** | `WinDivert.dll`+`WinDivert64.sys` 所在目录。可把驱动放到无空格/中文的干净路径(如 `C:\wd`)，exe 原地不动，绕开中文/空格路径导致的驱动加载失败 |
 
 详见 [tun-features.md](tun-features.md)、VPN 共存见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
 
-## bypass（mode=bypass 时生效）
+## bypassLinux（mode=bypass 时生效，仅 Linux）
+
+配置 key 为 `bypassLinux`，与 `mode=bypass` 配套。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `bypass.device` | 空(自动探测) | 手动指定绑定的物理网卡名；**macOS 必填**（如 `en0`） |
-| `bypass.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
+| `bypassLinux.device` | 空(自动探测) | 手动指定绑定的物理网卡名（如 `eth0`） |
+| `bypassLinux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
 
-详见 [multi-instance-loop.md](multi-instance-loop.md)。
+macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`；Windows 逃逸靠
+`tun.windows.excludeProcs`/`bypassIPs`。详见 [multi-instance-loop.md](multi-instance-loop.md)。
 
 ## loopGuard（死循环兜底熔断器）
 
-同机 A(tun)+B(bypass) 场景下，bypass 失效时的最后防线。默认开启。
+同机 A(tun)+B(bypass, 仅Linux) 场景下，bypass 失效时的最后防线。默认开启。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|

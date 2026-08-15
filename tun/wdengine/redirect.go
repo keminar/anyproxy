@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/keminar/anyproxy/proto"
 	"github.com/keminar/anyproxy/tun/windivert"
 	"github.com/keminar/anyproxy/utils/dnsutil"
 )
@@ -247,7 +248,18 @@ func (e *Engine) process(pkt []byte, addr *windivert.Address) bool {
 
 	// anyproxy's own direct-egress connections must also go out untouched.
 	// Capturing them would loop: app→proxy→anyproxy-egress→captured→proxy→…
-	// The guard identifies them by source port via the SOCKET layer.
+	//
+	// Primary, deterministic identification: the Windows dialer binds every
+	// anyproxy egress connection's source port into a dedicated band
+	// (proto.EgressPortLo..Hi), so any captured packet from that band is our own.
+	// This is happens-before the SYN and IP-version-agnostic, so it catches IPv6
+	// direct — which the SOCKET-layer guard below races and misses.
+	if p.srcPort >= proto.EgressPortLo && p.srcPort <= proto.EgressPortHi {
+		return true
+	}
+	// Backstop for the rare unbound fallback dial and for extra helper processes
+	// (SocksProcessNames): the guard identifies egress by source port via the
+	// SOCKET layer.
 	if e.guard.ownsPort(p.srcPort) {
 		return true
 	}

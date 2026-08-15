@@ -43,7 +43,7 @@ func Run(ctx context.Context, cfg Config) error {
 		RedirectPorts:          []uint16{80, 443},
 		BlockQUIC:              dnsutil.BlockQUICEnabled(),
 		IPv6:                   true,
-		BypassPrivate:          false, // 与 wintun 一致: 80/443 一律进引擎, 由 router 规则决定; loopback 始终直连
+		BypassPrivate:          cfg.BypassPrivate, // 不配默认 true: 私网/LAN(含虚拟机网段)一律直连不进引擎; 配 tun.windows.bypassPrivate=false 则私网 80/443 进引擎按 router 规则。loopback 始终直连
 		MaxConnPerDomainPerSec: 50,
 	}
 	// 上游代理排除: 若全局上游服务器是 IPv4 字面量, 把 anyproxy→上游 那条腿排除出捕获,
@@ -95,22 +95,3 @@ func Run(ctx context.Context, cfg Config) error {
 
 	return eng.Run()
 }
-
-// InitBypassOnly 在 Windows(WinDivert 模型)下初始化 bypass 配置。
-//
-// Windows 没有 0/1 路由概念, bypass 进程自身无法通过绑定网卡逃逸——
-// 逃逸必须由运行 WinDivert 的 TUN 进程在捕获层排除(在 tun.windows 配置 excludeProcs/bypassIPs)。
-// 本函数仅记录 bypass 配置并提示用户。
-func InitBypassOnly(cfg BypassConfig) {
-	log.Println("bypass-only(windivert): bypass 进程自身无法逃逸 WinDivert 捕获")
-	if len(cfg.ExcludeProcs) > 0 || len(cfg.BypassIPs) > 0 {
-		log.Printf("bypass-only(windivert): excludeProcs=%v bypassIPs=%v\n",
-			cfg.ExcludeProcs, cfg.BypassIPs)
-		log.Println("bypass-only(windivert): 以上逃逸参数需配在 TUN 进程的 tun.windows 下才能生效")
-	} else {
-		log.Println("bypass-only(windivert): 未配置 excludeProcs/bypassIPs, 若需逃逸请在 TUN 进程的 tun.windows 下配置")
-	}
-}
-
-// CleanupBypass 在 Windows 上空操作(与 InitBypassOnly 对应)。
-func CleanupBypass() {}

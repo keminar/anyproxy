@@ -164,13 +164,13 @@ route add 128.0.0.0 mask 128.0.0.0 10.9.0.1
 
 # 同机多实例的死循环防护
 
-> 各平台差异（尤其 Mac 需手动填 `bypass.device`）详见 [docs/multi-instance-loop.md](docs/multi-instance-loop.md)
+> bypass 模式仅 Linux 支持（macOS/Windows 已移除），平台替代方案详见 [docs/multi-instance-loop.md](docs/multi-instance-loop.md)
 
 同机部署两套 anyproxy：A 开 `mode=tun` 做全局代理并把请求转给上游 B，B 普通模式作为出口。
 A 的 TUN 会把 `0.0.0.0/1`、`128.0.0.0/1` 全量流量吸进来；A 自己的出向已用 `SO_BINDTODEVICE`
 绑物理网卡逃出 TUN，但 **B 的出向没逃**，会被 A 的 TUN 再次抓走 → A → B → …… 形成死循环。
 
-## 根治：B 用 mode=bypass
+## 根治：B 用 mode=bypass（仅 Linux）
 
 让 B 以 `mode=bypass` 运行，B 的出向连接会绑定物理网卡、逃出 A 的 TUN 路由，从路由层根治环路。
 同机源 IP 相同，无法用「源 IP=B」或 `ip rule from` 区分，故 bypass 是同机唯一的确定性根治手段。
@@ -178,13 +178,13 @@ A 的 TUN 会把 `0.0.0.0/1`、`128.0.0.0/1` 全量流量吸进来；A 自己的
 ```
 # B 的 conf/router.yaml
 mode: bypass
-bypass:
+bypassLinux:
   # 自动探测不到物理网卡时(启动日志 bypass-only: device="")手动指定
   device: eth0
 ```
 
-* **务必检查 B 的启动日志** `bypass-only: device="..." ip="..."`：`device`(Linux)或 `ip`(Windows/Mac) 非空才算 bypass 生效。
-  若为空说明 `defaultRoute()` 自动探测失败，bypass 会静默退回普通拨号而失效，此时用 `bypass.device` 手动指定网卡名。
+* **务必检查 B 的启动日志** `bypass-only: device="..." ip="..."`：`device` 与 `ip` 非空才算 bypass 生效。
+  若为空说明 `defaultRoute()` 自动探测失败，bypass 会静默退回普通拨号而失效，此时用 `bypassLinux.device` 手动指定网卡名。
 
 ## 兜底：loopGuard 熔断器
 

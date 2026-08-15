@@ -35,14 +35,14 @@ Linux/macOS 建 TUN 虚拟网卡接管全局流量，内部用 gVisor 用户态�
 sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
 ```
 
-## bypass 模式（物理网卡绕行）
+## bypass 模式（物理网卡绕行，仅 Linux）
 
-不建网卡，只把本进程出向连接绑定物理网卡，用于**同机已有另一个 anyproxy TUN 进程**时，让本进程 `target=local` 的请求逃出对方 TUN 的 `0/1` 路由，避免死循环。详见 [multi-instance-loop.md](multi-instance-loop.md)。
+不建网卡，只把本进程出向连接绑定物理网卡，用于**同机已有另一个 anyproxy TUN 进程**时，让本进程 `target=local` 的请求逃出对方 TUN 的 `0/1` 路由，避免死循环。**仅 Linux 支持**（macOS/Windows 已移除：macOS 入站回包用 `tun.inboundPorts`，Windows 用 WinDivert 的 `tun.windows.excludeProcs/bypassIPs`）。详见 [multi-instance-loop.md](multi-instance-loop.md)。
 
 ```yaml
 mode: bypass
-bypass:
-  device: eth0   # macOS 必填
+bypassLinux:
+  device: eth0   # 留空则自动探测默认路由网卡
 ```
 
 ## tcpcopy（端口转发）

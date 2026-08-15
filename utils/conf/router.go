@@ -143,15 +143,16 @@ type TcpCopy struct {
 //	excludeProcs             仅 windows(WinDivert 按进程名排除, 逃 OpenVPN 等同机隧道)
 //	inboundPorts             仅 darwin(pf reply-to 放行入站服务回包; linux 自动, windows 无需)
 type TunOS struct {
-	Name         string   `yaml:"name"`         //网卡名, linux默认anytun0, darwin默认utunN
-	Addr         string   `yaml:"addr"`         //接口地址CIDR, 如 10.9.0.1/24
-	MTU          uint32   `yaml:"mtu"`          //MTU, 默认1500
-	AutoRoute    *bool    `yaml:"autoRoute"`    //不配置默认true自动加路由; 显式false只打印命令
-	BypassIPs    []string `yaml:"bypassIPs"`    //这些目标直连(不代理): linux/darwin加/32路由; windows排除捕获
-	BlockQUIC    *bool    `yaml:"blockQUIC"`    //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
-	ExcludeProcs []string `yaml:"excludeProcs"` //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
-	InboundPorts []int    `yaml:"inboundPorts"` //仅darwin: 需pf放行回包的入站TCP端口(如22)
-	WindivertDir string   `yaml:"windivertDir"` //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
+	Name          string   `yaml:"name"`          //网卡名, linux默认anytun0, darwin默认utunN
+	Addr          string   `yaml:"addr"`          //接口地址CIDR, 如 10.9.0.1/24
+	MTU           uint32   `yaml:"mtu"`           //MTU, 默认1500
+	AutoRoute     *bool    `yaml:"autoRoute"`     //不配置默认true自动加路由; 显式false只打印命令
+	BypassIPs     []string `yaml:"bypassIPs"`     //这些目标直连(不代理): linux/darwin加/32路由; windows排除捕获
+	BypassPrivate *bool    `yaml:"bypassPrivate"` //仅windows: 不配默认true=私网/LAN/链路本地(含虚拟机/VM网段)一律直连不进引擎; 显式false则私网80/443进引擎按router规则。loopback始终直连
+	BlockQUIC     *bool    `yaml:"blockQUIC"`     //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
+	ExcludeProcs  []string `yaml:"excludeProcs"`  //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
+	InboundPorts  []int    `yaml:"inboundPorts"`  //仅darwin: 需pf放行回包的入站TCP端口(如22)
+	WindivertDir  string   `yaml:"windivertDir"`  //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
 }
 
 // Tun 虚拟网卡全局代理。
@@ -187,20 +188,13 @@ func (t *Tun) applyOS(goos string) {
 	}
 }
 
-// BypassOS 是一套 bypass(物理网卡绕行)参数。既可扁平写在 bypass 顶层(三平台通用)，
-// 也可按系统分块写在 bypass.linux / bypass.darwin / bypass.windows 下。
-//
-// 各字段生效平台(不生效即忽略):
-//
-//	excludeNics   仅 linux/darwin: 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
-//	device        仅 linux/darwin: 手动指定物理网卡名, 为空则回退 defaultRoute 自动探测
-//	excludeProcs  仅 windows(bypass模式): 记录用途, 实际逃逸需配在 TUN 进程的 tun.windows 下
-//	bypassIPs     仅 windows(bypass模式): 记录用途, 实际逃逸需配在 TUN 进程的 tun.windows 下
-type BypassOS struct {
-	ExcludeNics  []string `yaml:"excludeNics"`  //linux/darwin: 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
-	Device       string   `yaml:"device"`       //linux/darwin: 手动指定物理网卡名, 为空则回退 defaultRoute 自动探测
-	ExcludeProcs []string `yaml:"excludeProcs"` //windows: 这些进程(exe名)的出向不被WinDivert捕获
-	BypassIPs    []string `yaml:"bypassIPs"`    //windows: 这些目标IP排除捕获(直连)
+// Bypass 物理网卡绕行(不建TUN网卡)。仅 Linux 支持(macOS/Windows 已移除该模式)。
+// 用于本机已有另一个 anyproxy TUN 进程时：让本进程出向连接绑定物理网卡，
+// 逃出对方 TUN 的 0/1 路由，避免 target=local 请求被再次劫持成死循环。
+// 通过顶层 mode=bypass 启用，与 tun 模式互斥。配置 key 为 bypassLinux(仅Linux)。
+type Bypass struct {
+	ExcludeNics []string `yaml:"excludeNics"` //采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
+	Device      string   `yaml:"device"`      //手动指定用于绑定的物理网卡名, 为空则回退 defaultRoute 自动探测
 }
 
 // Geo geoip/geosite 数据集。按「类别 -> 文件」配置(每个类别一个文件), 配了才启用
@@ -214,41 +208,8 @@ type Geo struct {
 	Site map[string]string `yaml:"site"` //类别 -> geosite 文件(.dat 或文本)
 }
 
-// Bypass 物理网卡绕行(不建TUN网卡)。
-// 用于本机已有另一个 anyproxy TUN 进程时：让本进程出向连接绑定物理网卡，
-// 逃出对方 TUN 的 0/1 路由，避免 target=local 请求被再次劫持成死循环。
-// 通过顶层 mode=bypass 启用，与 tun 模式互斥。
-//
-// 两种写法(可混用, 系统块优先):
-//  1. 扁平(旧写法, 三平台通用): 直接在 bypass 下写 excludeNics/device 字段。
-//  2. 按系统分块(推荐): 在 bypass.linux / bypass.darwin / bypass.windows 下各写该系统的字段,
-//     程序按当前系统取对应块整体覆盖扁平字段(见 applyOS)。
-type Bypass struct {
-	BypassOS `yaml:",inline"` //扁平字段(三平台通用, 未配对应系统块时用)
-
-	Linux   *BypassOS `yaml:"linux"`   //仅在 linux 上生效的一组配置
-	Darwin  *BypassOS `yaml:"darwin"`  //仅在 darwin(macOS) 上生效的一组配置
-	Windows *BypassOS `yaml:"windows"` //仅在 windows 上生效的一组配置
-}
-
-// applyOS 把当前系统对应的分块(若配置了)整体压平进扁平字段。
-func (b *Bypass) applyOS(goos string) {
-	var blk *BypassOS
-	switch goos {
-	case "linux":
-		blk = b.Linux
-	case "darwin":
-		blk = b.Darwin
-	case "windows":
-		blk = b.Windows
-	}
-	if blk != nil {
-		b.BypassOS = *blk
-	}
-}
-
 // LoopGuard 死循环兜底熔断器。
-// 同机 A(mode=tun)+B(mode=bypass) 部署时, 正常应由 bypass 从路由层根治环路;
+// 同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署时, 正常应由 bypass 从路由层根治环路;
 // 若 bypass 未生效, 句柄会堆积且都指向同一目标(环路特征)。
 // 判定: 全局在传连接数达到 minActive(闸门)后, 若某个 host:port 占用的在传连接
 // 超过 total*ratio%, 判为环路并拒绝其新连接。这是最后防线, 非主方案。
@@ -274,7 +235,7 @@ type Router struct {
 	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
 	Mode      string    `yaml:"mode"`      //运行模式: proxy=客户端(默认); tunnel=服务端tunneld; tun=建TUN网卡全局代理; bypass=仅绑物理网卡绕行; tcpcopy=端口转发。命令行 -mode 优先
 	Tun       Tun       `yaml:"tun"`       //TUN虚拟网卡全局代理(mode=tun时生效)
-	Bypass    Bypass    `yaml:"bypass"`    //物理网卡绕行(mode=bypass时生效)
+	Bypass    Bypass    `yaml:"bypassLinux"` //物理网卡绕行(mode=bypass时生效, 仅Linux)
 	LoopGuard LoopGuard `yaml:"loopGuard"` //死循环兜底熔断器
 	Geo       Geo       `yaml:"geo"`       //geoip/geosite 数据集(启用 hosts 的 geoip:/geosite: 匹配)
 	Default   Default   `yaml:"default"`   //默认配置
@@ -292,9 +253,8 @@ func LoadRouterConfig(configPath string) (cnf Router, err error) {
 	}
 	err = yaml.Unmarshal(data, &cnf)
 	if err == nil {
-		// 按当前系统把 tun.<os> / bypass.<os> 分块压平进扁平字段, 消费者无需感知分块
+		// 按当前系统把 tun.<os> 分块压平进扁平字段, 消费者无需感知分块
 		cnf.Tun.applyOS(runtime.GOOS)
-		cnf.Bypass.applyOS(runtime.GOOS)
 		// mode: tcpcopy 归一为 tcpcopy.enable(与旧写法统一, 消费方只看 Enable; 热重载安全)
 		if cnf.Mode == "tcpcopy" {
 			cnf.TcpCopy.Enable = true

@@ -50,7 +50,7 @@ Windows 路由是**最长前缀匹配优先**，`/32` 永远压过 anyproxy 的 
    ```
    anyproxy 只要不被喂到这个包，就天然正确。
 
-2. **代码级兜住 VPN 段（待实现，方案 B）**：新增「按目标网段绑定到指定接口 ifindex」的 bypass 配置，TCP `tunDial` 与 UDP `listenUDP` 命中时把 `IP_UNICAST_IF` 指向 **TAP 的索引**（而非物理网卡），让 anyproxy 即使没有系统 /32 也能主动把 VPN 内网流量（含 DNS）送回 TAP：
+2. **代码级兜住 VPN 段（待实现，方案 B）**：新增「按目标网段绑定到指定接口 ifindex」的直连例外配置（`tun.bypassRoutes`，与 mode=bypass 无关），TCP `tunDial` 与 UDP `listenUDP` 命中时把 `IP_UNICAST_IF` 指向 **TAP 的索引**（而非物理网卡），让 anyproxy 即使没有系统 /32 也能主动把 VPN 内网流量（含 DNS）送回 TAP：
    ```yaml
    tun:
      bypassRoutes:
@@ -108,7 +108,7 @@ OpenVPN 走 **TCP 传输**（如 `tcp/443`，常用于穿透防火墙）且开�
 ```
 openvpn.exe → VPN服务器:443 (TCP传输)
    → WinDivert 捕获(443 是重定向端口) → NAT 到 anyproxy 本地监听
-   → anyproxy 回拨 VPN服务器:443（自身出向被 SOCKET guard 放行，不再捕获）
+   → anyproxy 回拨 VPN服务器:443（anyproxy 自身出向绑定在 egress 源端口段，确定性放行，不再捕获）
    → 但默认路由=VPN隧道 → openvpn.exe 又封包发往 VPN服务器:443
    → 又被 WinDivert 捕获 → …… 死循环
 ```
@@ -131,6 +131,10 @@ openvpn.exe → VPN服务器:443 (TCP传输)
    ```
 
 生效后启动日志会打印 `tun(windivert): exclude procs=[openvpn.exe] ips=[...]`。
+
+> **两种排除的可靠性差异**：`bypassIPs`（按目的 IP）在包捕获层匹配，**确定性、无竞态**；`excludeProcs`（按进程名）依赖 WinDivert 的 **SOCKET 层事件**记录该进程的出向源端口，该事件与网络层 SYN 分属两条路径、**存在竞态**（极端情况下头几个包可能没排除掉），且需要较新的 WinDivert（SOCKET 层不可用时 `excludeProcs` 完全失效，启动日志会警告）。所以：**首选进程名排除便于维护，但若 VPN 传输偶发仍被抓，改用/叠加 `bypassIPs` 填服务器 IP 最稳。**
+>
+> （注：anyproxy 自身的直连出向已改用 **egress 源端口段**确定性放行，不再依赖 SOCKET guard，也因此根治了 IPv6 直连的自环——见 [windows-windivert-redirect.md](windows-windivert-redirect.md) 的「环路防护」。SOCKET guard 如今只服务于 `excludeProcs` 这类外部进程。）
 
 > 为什么不自动扫路由表识别 VPN 服务器：OpenVPN 的 `<server>/32 via 物理网关` 虽可探测，但 `/32` 路由不止它会加，启发式易误伤/漏判，显式配置更可控。
 >
