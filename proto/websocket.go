@@ -60,13 +60,13 @@ func (s *wsTunnel) transfer() bool {
 		log.Println(trace.ID(s.req.ID), "websocket subscribe not found")
 		return false
 	}
-	b := nat.ServerBridge.Register(c, s.req.ID, s.req.conn)
+	b := nat.ServerBridge.Register(c, s.req.ID, nat.ConnHTTP, s.req.conn)
 	defer func() {
 		b.Unregister()
 	}()
 
 	// 发送创建连接请求
-	b.Open()
+	b.Open(0)
 	var err error
 	done := make(chan struct{})
 

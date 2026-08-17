@@ -14,7 +14,8 @@ type Bridge struct {
 	bridgeHub *BridgeHub
 	client    *Client
 
-	reqID uint //请求id
+	reqID uint  //请求id
+	typ   uint8 //连接类型(ConnHTTP/ConnTCP), 与 reqID 组成复合键
 	conn  *net.TCPConn
 
 	// Buffered channel of outbound messages.
@@ -31,7 +32,7 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 	// 先把p拷贝一份，否则会被外面的CopyBuffer再次修改，因为是引入传递
 	body := make([]byte, len(p))
 	copy(body, p)
-	msg := &Message{ID: b.reqID, Body: body}
+	msg := &Message{ID: b.reqID, Type: b.typ, Body: body}
 
 	if config.DebugLevel >= config.LevelDebugBody {
 		md5Val, _ := md5Byte(msg.Body)
@@ -43,9 +44,10 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Open 通知websocket 创建连接
-func (b *Bridge) Open() {
-	msg := &Message{ID: b.reqID, Method: METHOD_CREATE}
+// Open 通知websocket 创建连接。port 仅用于裸TCP路径(ConnTCP), 供订阅方查固定
+// target; HTTP 路径传 0 即可。
+func (b *Bridge) Open(port uint16) {
+	msg := &Message{ID: b.reqID, Type: b.typ, Method: METHOD_CREATE, Port: port}
 	//b.client.send <- msg //注意:不能直接写send会与close有并发安全冲突
 	cmsg := &CMessage{client: b.client, message: msg}
 	b.client.hub.broadcast <- cmsg
@@ -53,7 +55,7 @@ func (b *Bridge) Open() {
 
 // CloseWrite 通知tcp关闭连接
 func (b *Bridge) CloseWrite() {
-	msg := &Message{ID: b.reqID, Method: METHOD_CLOSE}
+	msg := &Message{ID: b.reqID, Type: b.typ, Method: METHOD_CLOSE}
 	cmsg := &CMessage{client: b.client, message: msg}
 	b.client.hub.broadcast <- cmsg
 }

@@ -171,11 +171,15 @@ func main() {
 	if gWebsocketListen != "" {
 		gWebsocketListen = tools.FillPort(gWebsocketListen)
 		go nat.NewServer(&gWebsocketListen)
+		// 服务端裸TCP端口转发入口(内网穿透)
+		go nat.StartForward(conf.RouterConfig.Websocket.Forward)
 	}
 	// websocket 客户端
 	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Connect, "")
 	if gWebsocketConn != "" {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
+		// 订阅方裸TCP转发目标映射(端口->写死target)
+		nat.SetLocalForward(conf.RouterConfig.Websocket.Forward)
 		go nat.ConnectServer(&gWebsocketConn)
 	}
 

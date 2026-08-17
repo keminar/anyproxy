@@ -101,6 +101,19 @@ type Subscribe struct {
 	Val string `yaml:"val"` //Header的val
 }
 
+// Forward 裸TCP端口转发规则(内网穿透/打洞)。同一份配置在两端含义不同:
+//   - 服务端(tunnel侧, 配了websocket.listen): 用 Listen + Email。
+//     在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
+//   - 订阅方(proxy侧, 配了websocket.connect): 用 Port + Target。
+//     收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
+//     Port 未在本地命中则拒绝(天然白名单)。
+type Forward struct {
+	Listen string `yaml:"listen"` //服务端用: 裸TCP监听地址, 如 ":2222"
+	Email  string `yaml:"email"`  //服务端用: 转发给此email的订阅方
+	Port   uint16 `yaml:"port"`   //订阅方用: 对应服务端入口端口
+	Target string `yaml:"target"` //订阅方用: 写死的dial目标, 如 "127.0.0.1:22"
+}
+
 // Websocket 与服务端websocket通信
 type Websocket struct {
 	Listen    string      `yaml:"listen"`    //websocket 监听
@@ -110,6 +123,7 @@ type Websocket struct {
 	Pass      string      `yaml:"pass"`      //密码
 	Email     string      `yaml:"email"`     //邮箱
 	Subscribe []Subscribe `yaml:"subscribe"` //订阅信息
+	Forward   []Forward   `yaml:"forward"`   //裸TCP端口转发规则(见 Forward)
 }
 
 // Default 域名

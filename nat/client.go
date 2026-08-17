@@ -3,7 +3,6 @@ package nat
 import (
 	"io"
 	"log"
-	"net"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -122,8 +121,16 @@ func (c *Client) localReadPump() {
 		}
 
 		if msg.Method == METHOD_CREATE {
-			proxConn := dialProxy() //创建本地与本地代理端口之间的连接
-			b := LocalBridge.Register(c, msg.ID, proxConn.(*net.TCPConn))
+			// ConnHTTP: dial 本地代理; ConnTCP: 按入口端口查写死的 target。
+			// 查不到 target 或 dial 失败: 不建 bridge, 回 CLOSE 让服务端拆链。
+			proxConn, derr := dialForCreate(c, msg)
+			if derr != nil {
+				log.Println(trace.ID(msg.ID), "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
+				closeMsg := &Message{ID: msg.ID, Type: msg.Type, Method: METHOD_CLOSE}
+				c.hub.broadcast <- &CMessage{client: c, message: closeMsg}
+				continue
+			}
+			b := LocalBridge.Register(c, msg.ID, msg.Type, proxConn)
 			go func() {
 				written, err := b.WritePump()
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug websocket->local", err)
