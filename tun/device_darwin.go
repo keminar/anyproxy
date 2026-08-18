@@ -168,7 +168,9 @@ func defaultRoute() (gw, dev string) {
 // defaultLocalIP 返回指定网卡的第一个 IPv4 地址, 供绑定 LocalAddr 绕过 TUN 路由。
 func defaultLocalIP(dev string) string { return localIPByIface(dev) }
 
-// bypassIfIndex 返回物理网卡的出接口索引，供 IP_BOUND_IF 用。macOS 网卡名(en0 等)稳定，
+// bypassIfIndex 返回物理网卡的出接口索引。TCP 逃逸已改 dynroute(/32 例外路由,
+// 见 proto/dialer_darwin.go), 本值仅作诊断日志; UDP 逃逸(tun/udp_dial_darwin.go)
+// 仍用它设 IP_BOUND_IF(有同类失效风险, 待验证)。macOS 网卡名(en0 等)稳定,
 // 按名解析即可；失败返回 0。
 func bypassIfIndex(dev string) int {
 	if iface, err := net.InterfaceByName(dev); err == nil {
