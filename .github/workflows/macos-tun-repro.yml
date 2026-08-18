@@ -1,13 +1,12 @@
-# macOS TUN 逃逸问题最小复现(CI 调试)
+# macOS TUN 逃逸问题最小复现 + dynroute 单测(CI 调试)
 #
 # 在 GitHub Actions 的 macOS runner(真 macOS 虚拟机, root 可用)上:
-#   1. 编译 examples/macos-tun-repro
-#   2. 以 root 运行: 创建 utun -> 加 0/1+128/1 全量路由 -> 对每个目标依次测
-#      [A]普通拨号 [D]只绑源IP [B]绑源IP+IP_BOUND_IF(tunDial现状) [C]/32例外路由
-#   3. 收集日志上传 artifact
-#
-# 目的: 验证 macOS 上 `IP_BOUND_IF + 0/1 路由` 是否复现
-#   `connect: no route to host`(用户现场报错), 并验证「动态 /32 例外」修复方案。
+#   1. go test 白盒单测 dynroute 引用计数生命周期(注入假 route 操作, 无需 root)
+#   2. 编译 examples/macos-tun-repro
+#   3. 以 root 运行复现脚本: 创建 utun -> 加 0/1+128/1 全量路由 -> 对每个目标依次测
+#      [A]普通拨号 [D]只绑源IP [B]绑源IP+IP_BOUND_IF(旧tunDial) [C]/32例外路由
+#      —— B 复现 no route to host(旧方案失效), C 验证 dynroute 修复方向
+#   4. 收集日志上传 artifact
 #
 # 手动触发: Actions 页 -> macOS TUN repro -> Run workflow
 name: macOS TUN repro
@@ -19,6 +18,7 @@ on:
       - 'examples/macos-tun-repro/**'
       - '.github/workflows/macos-tun-repro.yml'
       - 'tun/device_darwin.go'
+      - 'proto/dialer_darwin*.go'
 
 jobs:
   repro:
@@ -30,6 +30,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+
+      - name: Unit test dynroute lifecycle (no root needed)
+        run: go test -v -run 'TestDynRoute|TestCleanupDynRoutes' -count=1 ./proto/
 
       - name: Build repro (darwin)
         run: go build -o /tmp/tun-repro ./examples/macos-tun-repro

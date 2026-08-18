@@ -92,7 +92,14 @@ func CleanupDynRoutes() {
 	}
 }
 
-func macRouteAdd(cidr, gw string) error {
+// macRouteAdd/macRouteDel 是包级函数变量, 便于单测注入(不改真路由, 无需 root)。
+// 默认实现走 `route -n` 命令(需 root)。
+var (
+	macRouteAdd = macRouteAddCmd
+	macRouteDel = macRouteDelCmd
+)
+
+func macRouteAddCmd(cidr, gw string) error {
 	out, err := exec.Command("route", "-n", "add", "-net", cidr, gw).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("route add %s via %s: %v: %s", cidr, gw, err, strings.TrimSpace(string(out)))
@@ -100,7 +107,7 @@ func macRouteAdd(cidr, gw string) error {
 	return nil
 }
 
-func macRouteDel(cidr string) error {
+func macRouteDelCmd(cidr string) error {
 	out, err := exec.Command("route", "-n", "delete", "-net", cidr).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("route delete %s: %v: %s", cidr, err, strings.TrimSpace(string(out)))
