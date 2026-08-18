@@ -103,12 +103,26 @@ func run() error {
 		printDial(boundDial(target, phyIP, idx, 3*time.Second))
 
 		tip := host(target)
-		fmt.Printf("[C] add /32 exception %s via %s, then plain dial\n", tip, gw)
+		// [C] 修复后 tunDial 的完整生命周期: 加 /32 例外 -> 拨号 -> 关连接 -> 删路由
+		//     并验证路由确实被删(否则「访问过的目标永久直连、绕过代理」的副作用)
+		fmt.Printf("[C] dynroute lifecycle: add /32 %s via %s -> dial -> close -> del -> verify\n", tip, gw)
 		if err := routeCmd("-n", "add", "-net", tip+"/32", gw); err != nil {
 			fmt.Printf("    (add /32 failed: %v)\n", err)
 		} else {
-			printDial(plainDial(target, 3*time.Second))
-			_ = routeCmd("-n", "delete", "-net", tip+"/32", gw)
+			conn, err := plainDial(target, 3*time.Second)
+			printDial(conn, err)
+			if conn != nil {
+				conn.Close()
+				fmt.Println("    (connection closed)")
+			}
+			if err := routeCmd("-n", "delete", "-net", tip+"/32"); err != nil {
+				fmt.Printf("    (del /32 failed: %v)\n", err)
+			}
+			if routeExists(tip) {
+				fmt.Printf("    -> FAIL: /32 %s still present after close (permanent direct!)\n", tip)
+			} else {
+				fmt.Printf("    -> OK: /32 %s removed after close (no permanent direct)\n", tip)
+			}
 		}
 	}
 	return nil
@@ -210,6 +224,15 @@ func routeCmd(args ...string) error {
 
 func routeAdd32(ip, gw string) error { return routeCmd("-n", "add", "-net", ip+"/32", gw) }
 func routeDel32(ip, gw string) error { return routeCmd("-n", "delete", "-net", ip+"/32", gw) }
+
+// routeExists 检查 netstat 路由表里是否还存在该 /32。
+func routeExists(ip string) bool {
+	out, err := exec.Command("netstat", "-rn").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), ip+"/32")
+}
 
 // establishedIPv4s 收集当前 ESTABLISHED TCP 连接的对端 IPv4。
 // macOS netstat 输出形如: tcp4 0 0 192.168.1.10.50000 20.205.243.166.443 ESTABLISHED
