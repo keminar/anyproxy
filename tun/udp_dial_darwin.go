@@ -16,10 +16,11 @@ import (
 // listenUDP 建一个「未连接」的 UDP socket，强制 UDP 从物理网卡出，绕过 TUN 路由环路。
 // 用 IP_BOUND_IF 指定出接口，本地绑物理网卡 IP 作兜底。
 //
-// TODO: 与 TCP 同源问题——IP_BOUND_IF 压不过 0/1 路由(实测见 proto/dialer_darwin.go
-// 的 dynroute 修复)。UDP 无连接、目标动态, dynroute 引用计数方案不适用, 需另行设计
-// (如按目标动态加/删 /32, 或把 UDP 也纳入 TUN 接管); 若实测 UDP 逃逸失效
-// (DNS 查询报 no route to host), 按此方向修。
+// 注: IP_BOUND_IF 对 TCP 压不过 0/1 路由(实测 no route to host), 对 UDP 同样失效。
+// 但 UDP 目标是动态复用的(一个源口一个 socket), 无法用 TCP 的 per-connection
+// dynroute; 对 DNS(53) 目标改用 TTL 缓存的 /32 例外路由(见 udp_dynroute_darwin.go,
+// 由 udp.go 在发送前调用)。本函数仍保留 IP_BOUND_IF 作为 QUIC 等非 DNS UDP 的
+// 尽力而为(其直连失败会促使浏览器降级 TCP, 可接受)。
 //
 // firstDst 仅用于判断目标是否落在本机直连子网(是则无需绑)。
 func listenUDP(firstDst string) (*net.UDPConn, error) {

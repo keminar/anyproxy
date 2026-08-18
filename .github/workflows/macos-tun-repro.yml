@@ -31,8 +31,10 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Unit test dynroute lifecycle (no root needed)
-        run: go test -v -run 'TestDynRoute|TestCleanupDynRoutes' -count=1 ./proto/
+      - name: Unit test dynroute (proto + tun, no root needed)
+        run: |
+          go test -v -run 'TestDynRoute|TestCleanupDynRoutes' -count=1 ./proto/
+          go test -v -run 'TestUDPDynRoute|TestCleanupUDPDynRoutes' -count=1 ./tun/
 
       - name: Build repro (darwin)
         run: go build -o /tmp/tun-repro ./examples/macos-tun-repro

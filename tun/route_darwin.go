@@ -60,10 +60,12 @@ func setupTUNRoutes(tunName, tunIP, gw, dev string, bypassIPs []string) error {
 }
 
 // teardownTUNRoutes 删除 TUN 默认路由, 并清理 dynroute 加的 /32 直连例外
-// (proto.CleanupDynRoutes) 与 pf 入站放行规则。静态 bypassIPs 例外由用户管理。
+// (proto.CleanupDynRoutes 为 TCP, CleanupUDPDynRoutes 为 UDP DNS) 与 pf 入站
+// 放行规则。静态 bypassIPs 例外由用户管理。
 func teardownTUNRoutes(tunName string) {
 	cleanupInboundPF()
 	proto.CleanupDynRoutes()
+	CleanupUDPDynRoutes()
 	run := func(args ...string) { _ = exec.Command("route", args...).Run() }
 	run("-n", "delete", "-net", "0.0.0.0/1")
 	run("-n", "delete", "-net", "128.0.0.0/1")

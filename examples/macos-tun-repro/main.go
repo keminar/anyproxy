@@ -92,7 +92,6 @@ func run() error {
 
 	for _, target := range targets {
 		fmt.Printf("\n######## target %s ########\n", target)
-
 		fmt.Println("[A] plain dial (no bind)")
 		printDial(plainDial(target, 3*time.Second))
 
@@ -125,7 +124,67 @@ func run() error {
 			}
 		}
 	}
+
+	// [U] UDP 逃逸验证(修复对象是 DNS): 不加 /32 例外应超时(被 0/1 吸走),
+	//     加 /32 例外后发 DNS 查询应收到响应。
+	fmt.Println("\n######## UDP: DNS query to 1.1.1.1:53 ########")
+	probeUDPDNS(gw)
 	return nil
+}
+
+// probeUDPDNS 对照验证 UDP 逃逸: 无 /32 例外 vs 有 /32 例外, 各发一次 DNS 查询。
+func probeUDPDNS(gw string) {
+	const dnsIP = "1.1.1.1"
+	const dnsPort = "53"
+
+	fmt.Println("[U-a] UDP DNS query (no /32 exception)")
+	if _, err := udpDNSQuery(dnsIP, dnsPort, 3*time.Second); err != nil {
+		fmt.Printf("    -> FAIL (as expected without exception): %v\n", err)
+	} else {
+		fmt.Println("    -> OK?! (unexpected without exception)")
+	}
+
+	fmt.Printf("[U-b] add /32 %s via %s, then UDP DNS query\n", dnsIP, gw)
+	if err := routeCmd("-n", "add", "-net", dnsIP+"/32", gw); err != nil {
+		fmt.Printf("    (add /32 failed: %v)\n", err)
+		return
+	}
+	if n, err := udpDNSQuery(dnsIP, dnsPort, 3*time.Second); err != nil {
+		fmt.Printf("    -> FAIL: %v\n", err)
+	} else {
+		fmt.Printf("    -> OK: got %d-byte DNS reply (UDP escape fixed)\n", n)
+	}
+	_ = routeCmd("-n", "delete", "-net", dnsIP+"/32")
+}
+
+// udpDNSQuery 发一个最小 DNS A 查询, 返回收到的响应字节数。
+func udpDNSQuery(dnsIP, dnsPort string, timeout time.Duration) (int, error) {
+	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(dnsIP, dnsPort))
+	if err != nil {
+		return 0, err
+	}
+	conn, err := net.DialUDP("udp4", nil, raddr)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	// 最小 DNS 查询: ID=0x1234, RD, QDCOUNT=1, qname "abc" A IN
+	q := []byte{
+		0x12, 0x34, 0x01, 0x00,
+		0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 'a', 0x01, 'b', 0x01, 'c', 0x00,
+		0x00, 0x01, 0x00, 0x01,
+	}
+	if _, err := conn.Write(q); err != nil {
+		return 0, err
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func printDial(conn net.Conn, err error) {
