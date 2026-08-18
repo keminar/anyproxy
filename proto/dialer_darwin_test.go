@@ -106,7 +106,13 @@ func TestDynRouteSkipsNonIPv4(t *testing.T) {
 	config.TUNBypassGW = oldGW
 }
 
-// TestDynRouteConcurrent 验证并发 acquire/release 同一目标, 路由恰好加一次删一次。
+// TestDynRouteConcurrent 验证 N 个「并发连接」(先全部 acquire 持有, 再全部释放)
+// 时, 路由恰好加一次删一次——模拟真实场景: 连接有持有期, refs 从 0 涨到 N,
+// 最后一个连接关闭才跌回 0。
+//
+// 注意: 不能写成「acquire 后立即 release」的背靠背并发——那会让 refs 在 0↔1
+// 间振荡, 每轮振荡都触发一次 add/del(短连接场景的真实行为, 可接受), 测不出
+// 并发连接的正确性。
 func TestDynRouteConcurrent(t *testing.T) {
 	f, restore := installFakeRouteOps(t)
 	defer restore()
@@ -119,19 +125,42 @@ func TestDynRouteConcurrent(t *testing.T) {
 	const ip = "183.47.99.22"
 	const n = 100
 
+	// 阶段一: 并发建立 n 个连接(全部 acquire, 持有中)
 	var wg sync.WaitGroup
+	start := make(chan struct{})
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			d.acquire(ip)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	d.mu.Lock()
+	if d.refs[ip] != n {
+		d.mu.Unlock()
+		t.Fatalf("after %d concurrent acquires: refs=%d, want %d", n, d.refs[ip], n)
+	}
+	d.mu.Unlock()
+	if f.countAdd() != 1 {
+		t.Fatalf("concurrent acquires should add exactly once: add=%d", f.countAdd())
+	}
+
+	// 阶段二: 并发关闭 n 个连接(全部 release)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			d.release(ip)
 		}()
 	}
 	wg.Wait()
 
 	if f.countAdd() != 1 || f.countDel() != 1 {
-		t.Fatalf("concurrent 100 acquire/release: add=%d del=%d, want exactly 1/1", f.countAdd(), f.countDel())
+		t.Fatalf("concurrent %d conns: add=%d del=%d, want exactly 1/1", n, f.countAdd(), f.countDel())
 	}
 	if len(d.refs) != 0 {
 		t.Fatalf("refs should drain to empty: %v", d.refs)

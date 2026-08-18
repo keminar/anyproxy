@@ -33,6 +33,9 @@ import (
 // 副作用控制: /32 例外是全局路由, 若加而不删, 会令「外部应用访问该目标」也走
 // 物理网卡直连、绕过 TUN 代理。故用引用计数, 路由只在 anyproxy 自身连接存活期间
 // 保留, 引用归零即删除; TUN 退出时 CleanupDynRoutes 兜底清理残留。
+//
+// 已知行为: 极短连接(acquire 后立即 release)会让 refs 在 0↔1 间振荡, 每轮振荡
+// 触发一次 route add/del。真实 TCP 连接有持有期(毫秒级以上), 此开销可忽略。
 type dynRoute struct {
 	mu   sync.Mutex
 	refs map[string]int  // 目标 IP -> 活跃连接数
