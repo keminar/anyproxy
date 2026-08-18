@@ -142,6 +142,9 @@ func (c *Client) localReadPump() {
 			// 从tcp返回数据到ws
 			go func() {
 				defer b.Unregister()
+				if msg.Type == ConnTCP {
+					defer log.Println(trace.ID(msg.ID), "local tcp forward closed")
+				}
 				readSize, err := b.CopyBuffer(b, proxConn, "local")
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug local->websocket", err)
 				if config.DebugLevel >= config.LevelDebug {

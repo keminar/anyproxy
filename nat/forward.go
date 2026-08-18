@@ -69,7 +69,7 @@ func dialForCreate(c *Client, msg *Message) (*net.TCPConn, error) {
 		}
 		conn, err = bypassDial("tcp", target, 5*time.Second)
 		if err == nil {
-			log.Printf("local tcp forward connecting to %s (entry port %d)", target, msg.Port)
+			log.Println(trace.ID(msg.ID), fmt.Sprintf("local tcp forward connecting to %s (entry port %d)", target, msg.Port))
 		}
 	} else {
 		conn = dialProxy() //创建本地与本地代理端口之间的连接
@@ -139,6 +139,8 @@ func handleForward(conn *net.TCPConn, r conf.Forward) {
 	id := forwardInc.ID()
 	// 服务端入口端口: 从监听地址解析, 供订阅方查固定 target
 	port := listenPort(r.Listen)
+	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d)", conn.RemoteAddr(), r.Email, port))
+	defer log.Println(trace.ID(id), "nat forward closed")
 
 	b := ServerBridge.Register(c, id, ConnTCP, conn)
 	defer b.Unregister()
