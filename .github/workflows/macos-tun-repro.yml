@@ -1,0 +1,52 @@
+# macOS TUN 逃逸问题最小复现(CI 调试)
+#
+# 在 GitHub Actions 的 macOS runner(真 macOS 虚拟机, root 可用)上:
+#   1. 编译 examples/macos-tun-repro
+#   2. 以 root 运行: 创建 utun -> 加 0/1+128/1 全量路由 -> 对每个目标依次测
+#      [A]普通拨号 [D]只绑源IP [B]绑源IP+IP_BOUND_IF(tunDial现状) [C]/32例外路由
+#   3. 收集日志上传 artifact
+#
+# 目的: 验证 macOS 上 `IP_BOUND_IF + 0/1 路由` 是否复现
+#   `connect: no route to host`(用户现场报错), 并验证「动态 /32 例外」修复方案。
+#
+# 手动触发: Actions 页 -> macOS TUN repro -> Run workflow
+name: macOS TUN repro
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'examples/macos-tun-repro/**'
+      - '.github/workflows/macos-tun-repro.yml'
+      - 'tun/device_darwin.go'
+
+jobs:
+  repro:
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build repro (darwin)
+        run: go build -o /tmp/tun-repro ./examples/macos-tun-repro
+
+      - name: Run repro as root
+        run: |
+          echo "===== route table BEFORE ====="
+          netstat -rn | head -20
+          echo "===== run ====="
+          sudo /tmp/tun-repro 2>&1 | tee /tmp/tun-repro.log
+          echo "===== route table AFTER ====="
+          netstat -rn | head -20
+        timeout-minutes: 5
+
+      - name: Upload repro log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tun-repro-log
+          path: /tmp/tun-repro.log
