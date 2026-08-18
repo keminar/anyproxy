@@ -1,0 +1,75 @@
+# 构建与测试。每次 push / PR 自动跑。
+#
+# 为什么要跨三个平台跑: 这个仓库有大量按平台分文件的代码 —— nat/bypass_*.go、
+# proto/dialer_*.go、proto/stream_addr_*.go、tun/device_*.go、tun/route_*.go 等等。
+# 在一个平台上开发时,另外两个平台的那几份文件根本不参与编译,改坏了本地毫无察觉,
+# 要等真机上跑才炸(macos-tun-repro.yml 那次就是这么来的)。
+#
+# examples/derp-nat 与 examples/tunnel-hop 是独立 go.mod 的一次性验证程序,依赖很重
+# (Tailscale 整套),不进 CI;examples/nat-punch 在主模块里,跟着一起跑。
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支上新的 push 取消还在跑的旧任务,不然连续提交时会排一长队。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂掉不影响另外两个继续跑完 —— 否则只能看到最先失败的那个,
+      # 而"三个里哪几个坏了"恰恰是最有用的信息。
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # 跟着 go.mod 走,升级 Go 版本时不用记得改这里。
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  race:
+    name: race (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # 竞态检测要 cgo(gcc),Windows 开发机上常常没有,所以这一项本地跑不了 ——
+      # 正是该交给 CI 的活。nat 包里 QUIC 直连与 UDP 中继都是多 goroutine 的,
+      # count=3 让每个用例经历几种不同的调度交错,单次跑抓不住的时序问题更容易露出来。
+      - run: go test -race -count=3 ./...
+
+  cross:
+    name: cross build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # 上面的 matrix 只覆盖 runner 自己的架构(都是 amd64/arm64 各一)。这里补交叉编译:
+      # 便宜(不跑测试,几秒钟),但能挡住"改了 build tag 导致某个目标平台缺文件/重复定义"
+      # 这类问题 —— scripts/build.sh 出的正是这几个目标。
+      - name: build for each release target
+        run: |
+          set -e
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            echo "==> $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build ./...
+          done
