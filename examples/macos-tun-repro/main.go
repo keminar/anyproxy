@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -125,26 +126,36 @@ func run() error {
 		}
 	}
 
-	// [U] UDP 逃逸验证(修复对象是 DNS): 不加 /32 例外应超时(被 0/1 吸走),
-	//     加 /32 例外后发 DNS 查询应收到响应。
+	// [U] UDP 逃逸验证(修复对象是 DNS): 对照普通拨号 / 旧 IP_BOUND_IF 方式 /
+	//     加 /32 例外, 各发一次 DNS 查询。
 	fmt.Println("\n######## UDP: DNS query to 1.1.1.1:53 ########")
-	probeUDPDNS(gw)
+	probeUDPDNS(gw, phyIP, idx)
 	return nil
 }
 
-// probeUDPDNS 对照验证 UDP 逃逸: 无 /32 例外 vs 有 /32 例外, 各发一次 DNS 查询。
-func probeUDPDNS(gw string) {
+// probeUDPDNS 对照验证 UDP 逃逸:
+//   U-a 普通 UDP(无绑定)          —— 预期超时(被 0/1 吸进 utun)
+//   U-b 绑源 IP + IP_BOUND_IF(旧 listenUDP) —— 预期失败(IP_BOUND_IF 压不过 0/1)
+//   U-c 加 /32 例外后普通 UDP      —— 预期收到 DNS 响应(修复验证)
+func probeUDPDNS(gw, phyIP string, ifIdx int) {
 	const dnsIP = "1.1.1.1"
 	const dnsPort = "53"
 
-	fmt.Println("[U-a] UDP DNS query (no /32 exception)")
+	fmt.Println("[U-a] UDP DNS query, plain (no bind)")
 	if _, err := udpDNSQuery(dnsIP, dnsPort, 3*time.Second); err != nil {
 		fmt.Printf("    -> FAIL (as expected without exception): %v\n", err)
 	} else {
 		fmt.Println("    -> OK?! (unexpected without exception)")
 	}
 
-	fmt.Printf("[U-b] add /32 %s via %s, then UDP DNS query\n", dnsIP, gw)
+	fmt.Printf("[U-b] UDP DNS query, bind src %s + IP_BOUND_IF ifIndex=%d (old listenUDP)\n", phyIP, ifIdx)
+	if n, err := udpBoundQuery(phyIP, ifIdx, dnsIP, dnsPort, 3*time.Second); err != nil {
+		fmt.Printf("    -> FAIL (IP_BOUND_IF loses to 0/1, as expected): %v\n", err)
+	} else {
+		fmt.Printf("    -> OK?! (unexpected, got %d bytes)\n", n)
+	}
+
+	fmt.Printf("[U-c] add /32 %s via %s, then plain UDP DNS query\n", dnsIP, gw)
 	if err := routeCmd("-n", "add", "-net", dnsIP+"/32", gw); err != nil {
 		fmt.Printf("    (add /32 failed: %v)\n", err)
 		return
@@ -155,6 +166,43 @@ func probeUDPDNS(gw string) {
 		fmt.Printf("    -> OK: got %d-byte DNS reply (UDP escape fixed)\n", n)
 	}
 	_ = routeCmd("-n", "delete", "-net", dnsIP+"/32")
+}
+
+// udpBoundQuery 用「未连接 UDP socket + 绑物理 IP + IP_BOUND_IF」(旧 listenUDP 方式)
+// 发 DNS 查询, 返回响应字节数。用于对照验证 IP_BOUND_IF 对 UDP 同样失效。
+func udpBoundQuery(phyIP string, ifIdx int, dnsIP, dnsPort string, timeout time.Duration) (int, error) {
+	lc := &net.ListenConfig{}
+	if ifIdx > 0 {
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
+			var serr error
+			if err := c.Control(func(fd uintptr) {
+				serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BOUND_IF, ifIdx)
+			}); err != nil {
+				return err
+			}
+			return serr
+		}
+	}
+	pc, err := lc.ListenPacket(context.Background(), "udp4", net.JoinHostPort(phyIP, "0"))
+	if err != nil {
+		return 0, err
+	}
+	conn := pc.(*net.UDPConn)
+	defer conn.Close()
+	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(dnsIP, dnsPort))
+	if err != nil {
+		return 0, err
+	}
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.WriteToUDP(dnsQueryBytes(), raddr); err != nil {
+		return 0, err
+	}
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // udpDNSQuery 发一个最小 DNS A 查询, 返回收到的响应字节数。
@@ -169,14 +217,7 @@ func udpDNSQuery(dnsIP, dnsPort string, timeout time.Duration) (int, error) {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(timeout))
-	// 最小 DNS 查询: ID=0x1234, RD, QDCOUNT=1, qname "abc" A IN
-	q := []byte{
-		0x12, 0x34, 0x01, 0x00,
-		0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0x01, 'a', 0x01, 'b', 0x01, 'c', 0x00,
-		0x00, 0x01, 0x00, 0x01,
-	}
-	if _, err := conn.Write(q); err != nil {
+	if _, err := conn.Write(dnsQueryBytes()); err != nil {
 		return 0, err
 	}
 	buf := make([]byte, 512)
@@ -185,6 +226,16 @@ func udpDNSQuery(dnsIP, dnsPort string, timeout time.Duration) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// dnsQueryBytes 最小 DNS 查询: ID=0x1234, RD, QDCOUNT=1, qname "abc" A IN
+func dnsQueryBytes() []byte {
+	return []byte{
+		0x12, 0x34, 0x01, 0x00,
+		0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x01, 'a', 0x01, 'b', 0x01, 'c', 0x00,
+		0x00, 0x01, 0x00, 0x01,
+	}
 }
 
 func printDial(conn net.Conn, err error) {
