@@ -148,6 +148,13 @@ func probeUDPDNS(gw, phyIP string, ifIdx int) {
 		fmt.Println("    -> OK?! (unexpected without exception)")
 	}
 
+	fmt.Printf("[U-d] UDP DNS query, bind src %s only (no IP_BOUND_IF)\n", phyIP)
+	if n, err := udpBoundQuery(phyIP, -1, dnsIP, dnsPort, 3*time.Second); err != nil {
+		fmt.Printf("    -> FAIL (bind src only loses to 0/1, as expected): %v\n", err)
+	} else {
+		fmt.Printf("    -> OK?! (unexpected, got %d bytes)\n", n)
+	}
+
 	fmt.Printf("[U-b] UDP DNS query, bind src %s + IP_BOUND_IF ifIndex=%d (old listenUDP)\n", phyIP, ifIdx)
 	if n, err := udpBoundQuery(phyIP, ifIdx, dnsIP, dnsPort, 3*time.Second); err != nil {
 		fmt.Printf("    -> FAIL (IP_BOUND_IF loses to 0/1, as expected): %v\n", err)
