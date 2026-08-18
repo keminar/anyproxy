@@ -241,6 +241,7 @@ websocket:
 
 ```yaml
 # 服务端（公网）
+listen: off                   # 纯穿透不需要本机代理监听，可关掉（不写则默认 :3000）
 websocket:
   listen: :3002
   user: someuser
@@ -252,6 +253,7 @@ websocket:
 
 ```yaml
 # 订阅端（内网，email 与服务端 forward.email 对应）
+listen: off                   # 订阅端做纯裸TCP转发时也不需要本机代理监听
 websocket:
   connect: <服务端IP>:3002
   host: ws.example.com
@@ -265,6 +267,8 @@ websocket:
 ```
 
 用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出的 `target`，未列端口拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email` 区分。
+
+> `listen: off`（或 `-l off`）关闭本机代理监听，只跑 websocket 后台，适合纯穿透。**注意**：只有「裸 TCP 转发」能这么用；websocket 的「HTTP 头订阅」路径（8.1）依赖本机代理端口，关掉后不生效。
 
 ---
 

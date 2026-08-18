@@ -10,7 +10,7 @@
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l` |
+| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l`。设为 `off`（或 `none`/`-`）**关闭代理监听**，仅跑 websocket/tun 等后台服务（纯内网穿透场景，不需要本机代理端口）。关闭后 websocket 的「HTTP 头订阅」路径失效（它依赖本机代理），「裸 TCP 转发」不受影响 |
 | `network` | string | `tcp` | 监听协议：`tcp`(v4+v6) / `tcp4` / `tcp6` |
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |

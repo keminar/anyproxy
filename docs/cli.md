@@ -4,7 +4,7 @@
 
 | 参数 | 说明 | 配置文件等价项 | 优先级 |
 |------|------|----------------|--------|
-| `-l ADDRPORT` | 监听地址端口，如 `:3000` 或 `127.0.0.1:3000` | `listen` | 命令行 > 配置 > `:3000` |
+| `-l ADDRPORT` | 监听地址端口，如 `:3000` 或 `127.0.0.1:3000`；设为 `off`（或 `none`/`-`）**关闭代理监听**，仅跑 websocket/tun 等后台服务（纯内网穿透用） | `listen` | 命令行 > 配置 > `:3000` |
 | `-p PROXIES` | 上级代理，如 `tunnel://10.2.2.2:3001` / `socks5://10.2.2.2:3128` / `http://10.1.1.1:80`；支持逗号分隔多代理与末尾 `local`/`deny` 后缀（见 [routing.md](routing.md#proxy-字段)） | `default.proxy` | 命令行 > 配置 |
 | `-c FILEPATH` | 配置文件路径，默认 `conf/router.yaml` | — | — |
 | `-mode` | 运行模式（五者互斥）：`proxy`（默认）/ `tunnel`(tunneld 服务端) / `tun`(TUN 全局代理) / `bypass`(物理网卡绕行, 仅 Linux) / `tcpcopy`(端口转发) | `mode` | 命令行 > 配置 |
