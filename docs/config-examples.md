@@ -206,10 +206,16 @@ tcpcopy:
 
 ## 8. websocket 内网穿透
 
-服务端（公网侧）接收，客户端（内网侧）回连。可与代理同进程。
+服务端（公网侧）监听，订阅端（内网侧）**主动回连**。可与代理同进程。有两条转发路径，原理与字段详解见 [websocket.md](websocket.md)。
+
+> `user`/`pass` **两端必须一致**（`pass` 参与 token 校验，订阅端漏配会鉴权失败）；`email` 用于辨别/定位订阅端，本身不参与 token。
+
+### 8.1 HTTP 头订阅转发（按请求头把公网请求送进内网）
+
+公网侧带 `Anyproxy-Action: websocket` 头、且头部命中某订阅端 `subscribe` 的 HTTP 请求，被转发给该订阅端；订阅端用**本机代理**再向内网发起。
 
 ```yaml
-# 服务端
+# 服务端（公网）
 websocket:
   listen: :3002
   user: someuser
@@ -217,16 +223,48 @@ websocket:
 ```
 
 ```yaml
-# 客户端（内网另一台/另一进程）
+# 订阅端（内网另一台/另一进程）
 websocket:
   connect: <服务端IP>:3002
   host: ws.example.com
   user: someuser
-  email: user@example.com     # 定位用户，不鉴权
+  pass: somepass              # 与服务端一致（算 token，必填）
+  email: user@example.com     # 定位订阅端
   subscribe:
-    - key: X-Env
+    - key: X-Env              # 公网请求头命中 key=val 才转发给本端
       val: test
 ```
+
+### 8.2 裸 TCP 端口转发（SSH 打洞 / 暴露内网 TCP 服务）
+
+服务端起裸 TCP 监听端口，按 `email` 桥接到订阅端，订阅端 dial 写死的内网目标。
+
+```yaml
+# 服务端（公网）
+websocket:
+  listen: :3002
+  user: someuser
+  pass: somepass
+  forward:
+    - listen: :2222           # 公网入口端口（裸TCP监听）
+      email: home@example.com # 转发给此 email 的订阅端
+```
+
+```yaml
+# 订阅端（内网，email 与服务端 forward.email 对应）
+websocket:
+  connect: <服务端IP>:3002
+  host: ws.example.com
+  user: someuser
+  pass: somepass
+  email: home@example.com
+  forward:
+    - port: 2222              # 对应服务端入口端口
+      target: 127.0.0.1:22    # 收到该端口的连接就 dial 内网真实目标（本机 sshd）
+  # 纯裸TCP转发无需 subscribe：email 命中 forward 规则即允许空订阅
+```
+
+用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出的 `target`，未列端口拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email` 区分。
 
 ---
 

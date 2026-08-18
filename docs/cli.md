@@ -7,7 +7,7 @@
 | `-l ADDRPORT` | 监听地址端口，如 `:3000` 或 `127.0.0.1:3000` | `listen` | 命令行 > 配置 > `:3000` |
 | `-p PROXIES` | 上级代理，如 `tunnel://10.2.2.2:3001` / `socks5://10.2.2.2:3128` / `http://10.1.1.1:80`；支持逗号分隔多代理与末尾 `local`/`deny` 后缀（见 [routing.md](routing.md#proxy-字段)） | `default.proxy` | 命令行 > 配置 |
 | `-c FILEPATH` | 配置文件路径，默认 `conf/router.yaml` | — | — |
-| `-mode` | 运行模式：`proxy`（默认）/ `tunnel`(tunneld 服务端) / `tun`(TUN 全局代理) / `bypass`(物理网卡绕行, 仅 Linux) | `mode` | 命令行 > 配置 |
+| `-mode` | 运行模式（五者互斥）：`proxy`（默认）/ `tunnel`(tunneld 服务端) / `tun`(TUN 全局代理) / `bypass`(物理网卡绕行, 仅 Linux) / `tcpcopy`(端口转发) | `mode` | 命令行 > 配置 |
 | `-ws-listen` | websocket 监听地址端口（内网穿透服务端） | `websocket.listen` | 命令行 > 配置 |
 | `-ws-connect` | websocket 连接地址端口（内网穿透客户端） | `websocket.connect` | 命令行 > 配置 |
 | `-daemon` | 后台守护进程运行（fork 子进程，父进程退出） | — | — |
