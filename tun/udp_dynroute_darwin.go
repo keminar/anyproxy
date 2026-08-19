@@ -38,6 +38,20 @@ func ensureUDPDynRoute(ip string) {
 	macUDPDynRoute.ensure(ip)
 }
 
+// udpDirectBlocked 判断该 UDP 目标在 macOS 上是否注定无法直连逃逸 TUN。
+// macOS scoped routing: socket 绑定物理网卡(IP_BOUND_IF/源IP)后, 若目标路由仍
+// 命中 TUN 的 0/1+128/1 全量路由(即目标不在本机直连子网), sendto 必然
+// EHOSTUNREACH(no route to host)。DNS(53) 由 ensureUDPDynRoute 加 /32 例外路由
+// 解决; 其余 UDP 故意不加 /32(会让该目标的 TCP 也绕过代理), 调用方应直接 drop,
+// 促客户端回退 TCP 走 TUN 代理——既符合设计意图, 也避免每包
+// listen→写失败→淘汰 的 socket 风暴与错误日志刷屏。
+func udpDirectBlocked(dst string) bool {
+	if config.TUNBypassDev == "" {
+		return false
+	}
+	return !dstInBypassNet(dst)
+}
+
 // ensure 确保目标 IPv4 有 /32 例外路由(TTL 缓存)。无网关/IPv6/非 IP 跳过。
 func (d *udpDynRoute) ensure(ip string) {
 	gw := config.TUNBypassGW
