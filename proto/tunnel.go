@@ -200,6 +200,8 @@ func (s *tunnel) transfer(clientUnRead int) {
 	// 计入 loopguard 在传连接, 结束时释放(key 为空则跳过, 如 tcpcopy)
 	guard.enter(s.guardKey)
 	defer guard.leave(s.guardKey)
+	// 结束时补记残余字节, 避免同一分钟内快速完成的连接漏统计
+	defer s.flushCounters()
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
 	done := make(chan struct{})
@@ -290,6 +292,17 @@ func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
 	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, logAddr)
 	s.inbountCounter = inbound.RegisterCounter(uplink)
 	s.outbountCounter = outbound.RegisterCounter(downlink)
+}
+
+// flushCounters 在连接结束时把上/下行计数器里「还没到分钟翻转、尚未打印」的残余
+// 字节立即补记进日志, 避免快速完成的连接漏统计(见 stats.Counter.Flush)。
+func (s *tunnel) flushCounters() {
+	if s.inbountCounter != nil {
+		s.inbountCounter.Flush(s.req.ID)
+	}
+	if s.outbountCounter != nil {
+		s.outbountCounter.Flush(s.req.ID)
+	}
 }
 
 // 连接地址优先使用IP

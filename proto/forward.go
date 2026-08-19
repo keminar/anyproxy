@@ -159,6 +159,8 @@ func (s *tunnel) transferConn(client net.Conn) {
 	// 计入 loopguard 在传连接, 结束时释放(key 为空则跳过)
 	guard.enter(s.guardKey)
 	defer guard.leave(s.guardKey)
+	// 结束时补记残余字节, 避免同一分钟内快速完成的连接漏统计
+	defer s.flushCounters()
 	s.curState = stateActive
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -231,15 +233,15 @@ func (s *tunnel) copyConn(dst io.Writer, src io.Reader, srcname string) (written
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
-			if srcname == "request" {
-				if s.inbountCounter != nil {
-					s.inbountCounter.Add(s.req.ID, int64(nw))
+				if srcname == "request" {
+					if s.inbountCounter != nil {
+						s.inbountCounter.Add(s.req.ID, int64(nw))
+					}
+				} else {
+					if s.outbountCounter != nil {
+						s.outbountCounter.Add(s.req.ID, int64(nw))
+					}
 				}
-			} else {
-				if s.outbountCounter != nil {
-					s.outbountCounter.Add(s.req.ID, int64(nw))
-				}
-			}
 			}
 			if ew != nil {
 				err = ew
