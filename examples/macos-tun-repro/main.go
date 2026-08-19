@@ -137,7 +137,7 @@ func run() error {
 
 	// [P] pf route-to + egress 源端口段(方案 7): 0/1 路由仍存在时, 验证
 	//     pf 规则能否按源端口段强制出向走物理网卡(压过 0/1)。
-	probePFRouteTo(gw, phyDev)
+	probePFRouteTo(gw, phyDev, phyIP)
 	return nil
 }
 
@@ -146,19 +146,18 @@ func run() error {
 //   pass out proto {tcp udp} from any port 40001:49151 route-to (en0 网关)
 // 在包转发层强制该段连接走物理网卡, 优先级高于路由表(0/1 → utun)。
 // 验证: P-a 不绑端口 → 被 0/1 吸走失败; P-b 绑 egress 段端口 → route-to 生效成功。
-func probePFRouteTo(gw, phyDev string) {
+func probePFRouteTo(gw, phyDev, phyIP string) {
 	const egressLo, egressHi = 40001, 49151
 
 	fmt.Println("\n######## [P] pf route-to + egress source-port band ########")
 
-	// 1. 加载 pf: pass all 兜底(不破坏 runner 其余流量) + egress 段 route-to 物理网卡。
-	//    macOS pf 语法坑(实测/文档确认):
-	//    - route-to 必须紧跟 `pass out` 之后(不能放规则尾部)
-	//    - 文件末尾必须有空行, 否则 pfctl 报 syntax error
+	// 1. 加载 pf。规则顺序关键:
+	//    - pf filter 是 first-match: route-to 规则必须在 pass all 之前, 否则永远匹配不到
+	//    - macOS pf 语法: route-to 紧跟 `pass out` 之后; 文件末尾必须空行
 	conf := fmt.Sprintf(
-		"pass all\n"+
-			"pass out route-to (%s %s) proto tcp from any port %d:%d to any\n"+
-			"pass out route-to (%s %s) proto udp from any port %d:%d to any\n\n",
+		"pass out route-to (%s %s) proto tcp from any port %d:%d to any\n"+
+			"pass out route-to (%s %s) proto udp from any port %d:%d to any\n"+
+			"pass all\n\n",
 		phyDev, gw, egressLo, egressHi, phyDev, gw, egressLo, egressHi)
 	f, err := os.CreateTemp("", "anyproxy-pf-*.conf")
 	if err != nil {
@@ -190,14 +189,16 @@ func probePFRouteTo(gw, phyDev string) {
 	fmt.Println("[P-a] plain dial 1.1.1.1:443 (no egress port bind)")
 	printDial(plainDial("1.1.1.1:443", 3*time.Second))
 
-	// 3. P-b 绑 egress 段源端口拨号 → 预期 pf route-to 强制物理网卡 → 成功
-	fmt.Printf("[P-b] dial 1.1.1.1:443 with src port %d (egress band, pf route-to)\n", egressLo)
-	printDial(boundPortDial("1.1.1.1:443", egressLo, 3*time.Second))
+	// 3. P-b 绑「物理网卡 IP + egress 段源端口」拨号 → 预期 pf route-to 强制物理网卡 → 成功。
+	//    必须绑物理 IP: route-to 不改源地址, 若源 IP 是 utun 的 10.9.0.1, 回包会被 0/1 吸回。
+	fmt.Printf("[P-b] dial 1.1.1.1:443 with src %s:%d (phy IP + egress band, pf route-to)\n", phyIP, egressLo)
+	printDial(boundSrcDial("1.1.1.1:443", phyIP, egressLo, 3*time.Second))
 }
 
-// boundPortDial 只绑源端口(不绑 IP)拨号——pf route-to 按源端口段匹配。
-func boundPortDial(target string, port int, timeout time.Duration) (net.Conn, error) {
-	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{Port: port}}
+// boundSrcDial 绑物理网卡 IP + 源端口拨号——pf route-to 按源端口段匹配,
+// 且源 IP 为物理 IP 时回包才能回到物理网卡(route-to 不改源地址)。
+func boundSrcDial(target, srcIP string, port int, timeout time.Duration) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: net.ParseIP(srcIP), Port: port}}
 	return d.Dial("tcp", target)
 }
 
