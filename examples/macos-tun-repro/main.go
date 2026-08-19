@@ -28,6 +28,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 
@@ -138,6 +139,10 @@ func run() error {
 	// [P] pf route-to + egress 源端口段(方案 7): 0/1 路由仍存在时, 验证
 	//     pf 规则能否按源端口段强制出向走物理网卡(压过 0/1)。
 	probePFRouteTo(gw, phyDev, phyIP)
+
+	// [P2] 方案一(pf 透明重定向)的其余猜测: rdr 语法 / user-group 自排除 /
+	//      本机自产流量能否被 rdr 捕获 / DIOCNATLOOK 还原原始目的。
+	probePFScheme1(gw, phyDev)
 	return nil
 }
 
@@ -200,6 +205,232 @@ func probePFRouteTo(gw, phyDev, phyIP string) {
 func boundSrcDial(target, srcIP string, port int, timeout time.Duration) (net.Conn, error) {
 	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: net.ParseIP(srcIP), Port: port}}
 	return d.Dial("tcp", target)
+}
+
+// [P2] 方案一(pf 透明重定向)其余猜测的真机验证。
+// 文字评估里对「pf rdr + 源端口段」这套方案给过几条判断, 这里逐条落到真机上验证:
+//
+//	猜测① macOS pf 支持 rdr(把连接重定向到本地监听端口)  —— pfctl 能否接受该语法
+//	猜测② 可用 user/group 匹配排除自身出向(比源端口段更干净) —— macOS 这支 pf 是否保留该 token
+//	猜测③ 取原始目的地址要对 /dev/pf 发 DIOCNATLOOK ioctl(不像 Linux 的 SO_ORIGINAL_DST)
+//	猜测④ rdr 只作用于「入接口」的包; 本机自产的出向流量不经入接口, 故 rdr 难以直接捕获(fiddly)
+//
+// ①② 用 `pfctl -n -f`(只解析不加载)判定, 零风险且结论确定;
+// ③④ 用「本地监听 + rdr + DIOCNATLOOK」端到端实测。
+func probePFScheme1(gw, phyDev string) {
+	fmt.Println("\n######## [P2] pf scheme-1 (transparent redirect) assumptions ########")
+
+	// --- 猜测①②: 仅解析(pfctl -n -f), 不加载, 安全 ---
+	uid, gid := os.Getuid(), os.Getgid()
+	syntaxChecks := []struct{ name, rules string }{
+		{"① rdr redirect -> local port",
+			"rdr pass on lo0 inet proto tcp from any to 192.0.2.1 port 9443 -> 127.0.0.1 port 3129"},
+		{"② user match (self-exclude by uid)",
+			fmt.Sprintf("pass out proto tcp from any to any user %d", uid)},
+		{"② group match (self-exclude by gid)",
+			fmt.Sprintf("pass out proto tcp from any to any group %d", gid)},
+		{"② route-to composed with user !=",
+			fmt.Sprintf("pass out route-to (%s %s) proto tcp from any to any user != %d", phyDev, gw, uid)},
+		{"  route-to by source-port band (sanity)",
+			fmt.Sprintf("pass out route-to (%s %s) proto tcp from any port 40001:49151 to any", phyDev, gw)},
+	}
+	for _, c := range syntaxChecks {
+		if ok, msg := pfctlParseOK(c.rules); ok {
+			fmt.Printf("  [OK]   %s: pfctl accepts syntax\n", c.name)
+		} else {
+			fmt.Printf("  [FAIL] %s: %s\n", c.name, msg)
+		}
+	}
+
+	// --- 猜测③④: 本机自产流量 rdr 到本地监听 + DIOCNATLOOK 还原原始目的 ---
+	probePFRedirectE2E()
+}
+
+// pfctlParseOK 用 `pfctl -n -f`(仅解析、不加载)判定规则语法是否被当前内核的 pf 接受。
+func pfctlParseOK(rules string) (bool, string) {
+	f, err := os.CreateTemp("", "anyproxy-pfsyntax-*.conf")
+	if err != nil {
+		return false, err.Error()
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	_, _ = f.WriteString(rules + "\n") // pfctl 要求文件以换行结尾
+	_ = f.Close()
+	out, err := exec.Command("pfctl", "-n", "-f", path).CombinedOutput()
+	return err == nil, strings.TrimSpace(string(out))
+}
+
+// probePFRedirectE2E 端到端验证猜测③④:
+// 本机进程拨向 192.0.2.1:9443(RFC5737 TEST-NET-1, 必定无真实主机/无路由), 试图让
+// pf rdr 把它重定向到本地监听, 再用 DIOCNATLOOK 还原原始目的地址。
+//
+//	接受到连接 => 方案一「透明重定向」对本机流量在 macOS 可行, 且 DIOCNATLOOK 能取回原目的;
+//	始终收不到 => 印证猜测④(本机自产流量不经入接口, rdr 抓不到), 方案一对本机代理不实用,
+//	              只能退回 route-to(已在 [P] 验证) 或直接用 TUN。
+func probePFRedirectE2E() {
+	fmt.Println("[P2-e2e] host-local dial -> pf rdr -> local listener + DIOCNATLOOK")
+	const testDst = "192.0.2.1" // RFC5737 TEST-NET-1
+	const testPort = 9443
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		fmt.Printf("    (listen: %v)\n", err)
+		return
+	}
+	defer ln.Close()
+	lport := ln.Addr().(*net.TCPAddr).Port
+
+	// rdr 命中「到 testDst」的包 -> 本地监听; 并用 route-to 把本机出向该目的的包先送到 lo0,
+	// 因为本机自产流量默认不经任何入接口, 不 route-to 到 lo0 就没有「入 lo0」这一步供 rdr 命中。
+	// 这一步正是猜测④要验证的 fiddly 之处。
+	rules := fmt.Sprintf(
+		"rdr pass on lo0 inet proto tcp from any to %s port %d -> 127.0.0.1 port %d\n"+
+			"pass out route-to (lo0 127.0.0.1) inet proto tcp from any to %s port %d\n\n",
+		testDst, testPort, lport, testDst, testPort)
+	if ok, msg := pfctlLoad(rules); !ok {
+		fmt.Printf("    -> INCONCLUSIVE: pf load failed: %s\n", msg)
+		return
+	}
+	defer pfRestore()
+
+	// 后台 accept
+	type accepted struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan accepted, 1)
+	go func() {
+		c, e := ln.Accept()
+		ch <- accepted{c, e}
+	}()
+	// 后台拨号(命中 rdr 则连到本地监听; 未命中则无路由/超时失败)
+	go func() {
+		c, e := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", testDst, testPort), 3*time.Second)
+		if e == nil {
+			time.AfterFunc(2*time.Second, func() { _ = c.Close() })
+		}
+	}()
+
+	select {
+	case a := <-ch:
+		if a.err != nil {
+			fmt.Printf("    -> FAIL: accept: %v\n", a.err)
+			return
+		}
+		defer a.conn.Close()
+		fmt.Printf("    -> OK: rdr works, listener accepted from %v (local %v)\n",
+			a.conn.RemoteAddr(), a.conn.LocalAddr())
+		// 猜测③: DIOCNATLOOK 还原原始目的
+		cAddr := a.conn.RemoteAddr().(*net.TCPAddr)
+		lAddr := a.conn.LocalAddr().(*net.TCPAddr)
+		rdIP, rdPort, err := pfNatLook(cAddr.IP, cAddr.Port, lAddr.IP, lAddr.Port)
+		if err != nil {
+			fmt.Printf("    -> DIOCNATLOOK FAIL: %v (struct/ioctl 需按机型微调)\n", err)
+			return
+		}
+		if rdIP.String() == testDst && rdPort == testPort {
+			fmt.Printf("    -> DIOCNATLOOK OK: recovered original dst %s:%d (matches!)\n", rdIP, rdPort)
+		} else {
+			fmt.Printf("    -> DIOCNATLOOK got %s:%d (expected %s:%d)\n", rdIP, rdPort, testDst, testPort)
+		}
+	case <-time.After(4 * time.Second):
+		fmt.Println("    -> FAIL: listener never accepted (rdr did NOT capture host-local traffic)")
+		fmt.Println("       => 印证猜测④: 本机自产出向流量不经入接口, pf rdr 抓不到;")
+		fmt.Println("          方案一对本机代理不实用, 应退回 route-to([P]) 或直接用 TUN。")
+	}
+}
+
+// pfctlLoad 加载一段 pf 规则(启用 pf 并覆盖当前规则集)。
+func pfctlLoad(rules string) (bool, string) {
+	f, err := os.CreateTemp("", "anyproxy-pfload-*.conf")
+	if err != nil {
+		return false, err.Error()
+	}
+	path := f.Name()
+	_, _ = f.WriteString(rules)
+	_ = f.Close()
+	out, err := exec.Command("pfctl", "-ef", path).CombinedOutput()
+	os.Remove(path)
+	return err == nil, strings.TrimSpace(string(out))
+}
+
+// pfRestore 清空 pf 规则并重载系统默认 /etc/pf.conf。
+func pfRestore() {
+	_ = exec.Command("pfctl", "-F", "all").Run()
+	_ = exec.Command("pfctl", "-f", "/etc/pf.conf").Run()
+}
+
+// --- DIOCNATLOOK: 向 /dev/pf 查询 rdr/NAT 状态, 取回原始目的地址 ---
+//
+// macOS 的 pf(Apple 移植自 OpenBSD 4.x)其 pfioc_natlook 与 OpenBSD 版不同:
+// 端口字段是 4 字节的 union pf_state_xport(含 u_int32_t spi), 且多一个 proto_variant,
+// 整个结构体共 84 字节。这里按 Apple 版布局填充。
+
+type pfAddr [16]byte  // union pf_addr, IPv4 放前 4 字节
+type pfXport [4]byte  // union pf_state_xport, port 放前 2 字节(网络序)
+
+type pfiocNatlook struct {
+	saddr        pfAddr
+	daddr        pfAddr
+	rsaddr       pfAddr
+	rdaddr       pfAddr
+	sxport       pfXport
+	dxport       pfXport
+	rsxport      pfXport
+	rdxport      pfXport
+	af           uint8
+	proto        uint8
+	protoVariant uint8
+	direction    uint8
+}
+
+const (
+	pfDirOut    = 2 // PF_OUT
+	afInet      = 2 // AF_INET
+	ipprotoTCP6 = 6 // IPPROTO_TCP
+)
+
+func setPfAddr(a *pfAddr, ip net.IP) {
+	if v4 := ip.To4(); v4 != nil {
+		copy(a[:4], v4)
+	}
+}
+func setPfPort(x *pfXport, port int) {
+	x[0] = byte(port >> 8)
+	x[1] = byte(port)
+}
+func getPfPort(x pfXport) int { return int(x[0])<<8 | int(x[1]) }
+
+// iowr 复算 BSD 的 _IOWR(group, num, size) ioctl 号。用运行时 sizeof 计算长度,
+// 避免手算结构体大小出错导致 ioctl 号不匹配。
+func iowr(group byte, num uint8, size uintptr) uint {
+	const iocInout = 0xC0000000
+	const iocparmMask = 0x1fff
+	return iocInout | (uint(size&iocparmMask) << 16) | (uint(group) << 8) | uint(num)
+}
+
+// pfNatLook 用 (client 源, 本地目的, PF_OUT) 查询 pf 状态表, 返回 rdr 之前的原始目的。
+func pfNatLook(clientIP net.IP, clientPort int, localIP net.IP, localPort int) (net.IP, int, error) {
+	fd, err := unix.Open("/dev/pf", unix.O_RDWR, 0)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open /dev/pf: %w", err)
+	}
+	defer unix.Close(fd)
+
+	var nl pfiocNatlook
+	setPfAddr(&nl.saddr, clientIP)
+	setPfAddr(&nl.daddr, localIP)
+	setPfPort(&nl.sxport, clientPort)
+	setPfPort(&nl.dxport, localPort)
+	nl.af = afInet
+	nl.proto = ipprotoTCP6
+	nl.direction = pfDirOut
+
+	num := iowr('D', 23, unsafe.Sizeof(nl)) // _IOWR('D', 23, struct pfioc_natlook)
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(num), uintptr(unsafe.Pointer(&nl))); errno != 0 {
+		return nil, 0, fmt.Errorf("ioctl DIOCNATLOOK: %v", errno)
+	}
+	return net.IP(nl.rdaddr[:4]).To4(), getPfPort(nl.rdxport), nil
 }
 
 // [F] 方案 5: fake-ip 分流式 TUN。
