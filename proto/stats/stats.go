@@ -40,6 +40,8 @@ func (m *Manager) UnregisterCounter() {
 
 	for _, v := range m.counters {
 		if now-v.active > 300 {
+			// 回收前补记残余字节(兜底: 若连接结束时未 Flush, 避免漏统计)
+			v.Flush(0)
 			delete(m.counters, v.name)
 		}
 	}

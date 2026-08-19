@@ -70,7 +70,7 @@ func init() {
 // 转发实体
 type tunnel struct {
 	req      *Request
-	conn     *net.TCPConn // 后端服务
+	conn     net.Conn // 后端服务
 	curState int
 
 	inboundIP string // 来源IP
@@ -98,6 +98,14 @@ func newTunnel(req *Request) *tunnel {
 	return s
 }
 
+// closeWrite 安全地半关闭连接写端。s.conn 可能是 *net.TCPConn（直连），
+// 也可能是包装类型（如 macOS 上的 *dynConn），通过类型断言兼容二者。
+func (s *tunnel) closeWrite() {
+	if cw, ok := s.conn.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+}
+
 // copyBuffer 传输数据
 func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (written int64, err error) {
 	//如果设置过大会耗内存高，4k比较合理
@@ -118,7 +126,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 					// 如果包是http协议则认为http复用
 					if isKeepAliveHttp(s.req.ctx, s.req.conn, buf[0:nr]) {
 						// 关闭与旧的服务器的连接的写
-						s.conn.CloseWrite()
+						s.closeWrite()
 						// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
 						s.curState = stateIdle
 
@@ -183,7 +191,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 
 			if srcname == "request" {
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
-				s.conn.CloseWrite()
+				s.closeWrite()
 				s.curState = stateClosed
 			}
 			break
@@ -200,6 +208,8 @@ func (s *tunnel) transfer(clientUnRead int) {
 	// 计入 loopguard 在传连接, 结束时释放(key 为空则跳过, 如 tcpcopy)
 	guard.enter(s.guardKey)
 	defer guard.leave(s.guardKey)
+	// 结束时补记残余字节, 避免同一分钟内快速完成的连接漏统计
+	defer s.flushCounters()
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
 	done := make(chan struct{})
@@ -264,7 +274,7 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 	if err != nil {
 		return err
 	}
-	s.conn = conn.(*net.TCPConn)
+	s.conn = conn
 	// 出向本地址(实际 egress)是排查 TUN 环路的关键证据: 若它落在 TUN 网段
 	// (如 10.9.0.x)而非物理网卡 IP, 说明出向没能逃出 TUN, 就是环路根因。
 	if config.DebugLevel >= config.LevelLong {
@@ -274,7 +284,10 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 }
 
 // 注册计数器, 日志地址优先使用域名
-func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
+// registerCounter 按「来源IP × 目标地址 × 方向」注册上下行流量计数器。
+// 统计始终以「最终目标」为主地址; 走上级代理时用 viaProxy 附上经由的代理地址
+// 直连时 viaProxy 传空。
+func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16, viaProxy string) {
 	// 日志地址优先使用域名
 	var logAddr string
 	if dstName != "" {
@@ -286,10 +299,24 @@ func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
 			logAddr = fmt.Sprintf("%s:%d", dstIP, dstPort)
 		}
 	}
+	if viaProxy != "" {
+		logAddr = logAddr + " via " + viaProxy
+	}
 	uplink := fmt.Sprintf("inbound>>>%s>>>%s>>>uplink", s.inboundIP, logAddr)
 	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, logAddr)
 	s.inbountCounter = inbound.RegisterCounter(uplink)
 	s.outbountCounter = outbound.RegisterCounter(downlink)
+}
+
+// flushCounters 在连接结束时把上/下行计数器里「还没到分钟翻转、尚未打印」的残余
+// 字节立即补记进日志, 避免快速完成的连接漏统计(见 stats.Counter.Flush)。
+func (s *tunnel) flushCounters() {
+	if s.inbountCounter != nil {
+		s.inbountCounter.Flush(s.req.ID)
+	}
+	if s.outbountCounter != nil {
+		s.outbountCounter.Flush(s.req.ID)
+	}
 }
 
 // 连接地址优先使用IP
@@ -307,7 +334,7 @@ func (s *tunnel) buildAddress(dstName, dstIP string, dstPort uint16, addCounter 
 	}
 
 	if addCounter && connAddr != "" {
-		s.registerCounter(dstName, dstIP, dstPort)
+		s.registerCounter(dstName, dstIP, dstPort, "")
 	}
 	return
 }
@@ -554,7 +581,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			return
 		}
 
-		network, connAddr := s.buildAddress(proxyServer, "", proxyPort, true)
+		network, connAddr := s.buildAddress(proxyServer, "", proxyPort, false)
+		// 统计以最终目标为主, 附带经由的上级代理(而非只记代理地址), 便于识别真实下载地址
+		s.registerCounter(dstName, dstIP, dstPort, fmt.Sprintf("%s:%d", proxyServer, proxyPort))
 		switch proxyScheme {
 		case "socks5":
 			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
@@ -756,7 +785,7 @@ func (s *tunnel) socks5(network, connAddr string, targetNet, targetAddr string) 
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
-	s.conn = conn.(*net.TCPConn)
+	s.conn = conn
 	return
 }
 

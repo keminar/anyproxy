@@ -30,7 +30,11 @@ var connSeq uint64
 // startProxy binds the local listener. If cfg.ProxyPort is 0 an ephemeral port
 // is chosen and written back into cfg so the WinDivert filter can reference it.
 // It binds ":port" (dual-stack) because redirected packets are addressed to this
-// host's NIC IP — IPv4 or IPv6 — rather than to 127.0.0.1/::1.
+// host's NIC IP — IPv4 or IPv6 — rather than to 127.0.0.1/::1; binding a single
+// loopback address would miss them. To keep the port from being an externally
+// reachable open endpoint, handle() rejects any accepted connection whose remote
+// IP is not this host's own (redirected connections always have remote IP ==
+// local IP; see the check there).
 func startProxy(cfg *Config, nat *natTable) (*proxyServer, error) {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.ProxyPort))
 	if err != nil {
@@ -72,6 +76,18 @@ func (s *proxyServer) handle(c net.Conn) {
 	ra, ok := c.RemoteAddr().(*net.TCPAddr)
 	if !ok {
 		return
+	}
+	// 安全: 监听虽绑在 :port(必须能收到发往本机 NIC IP 的环回重定向包), 但只应服务
+	// 本机重定向来的连接。重定向包由 rewriteForward 把目的 IP 改成「包自身的源 IP」
+	// (本机 NIC IP), 源 IP 不变, 故被重定向连接的「远端 IP 恒等于本地 IP」。外部主机
+	// 直连本端口时远端 IP 不等, 一律拒绝——避免该端口被当作开放端口扫描/滥用。
+	if la, ok := c.LocalAddr().(*net.TCPAddr); ok {
+		if !ra.IP.Equal(la.IP) && !ra.IP.IsLoopback() {
+			if s.cfg.Verbose {
+				log.Printf("reject non-local connection from %s to :%d", ra.IP, s.cfg.ProxyPort)
+			}
+			return
+		}
 	}
 	ent, ok := s.nat.lookupNat(uint16(ra.Port))
 	if !ok {

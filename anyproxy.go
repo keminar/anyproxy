@@ -10,6 +10,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
@@ -131,8 +132,15 @@ func main() {
 	daemon.Daemonize(envRunMode, fd)
 
 	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig.Listen, ":3000")
-	gListenAddrPort = tools.FillPort(gListenAddrPort)
-	config.SetListenPort(gListenAddrPort)
+	// listen 显式设为 off/none/- 时不起代理监听, 仅跑 websocket/tun 等后台服务
+	// (典型: 纯 websocket 裸TCP穿透, 不需要本机代理端口)。
+	listenOff := isListenOff(gListenAddrPort)
+	if listenOff {
+		gListenAddrPort = ""
+	} else {
+		gListenAddrPort = tools.FillPort(gListenAddrPort)
+		config.SetListenPort(gListenAddrPort)
+	}
 
 	var writer io.Writer
 	// 前台执行，daemon运行根据环境变量识别
@@ -171,11 +179,15 @@ func main() {
 	if gWebsocketListen != "" {
 		gWebsocketListen = tools.FillPort(gWebsocketListen)
 		go nat.NewServer(&gWebsocketListen)
+		// 服务端裸TCP端口转发入口(内网穿透)
+		go nat.StartForward(conf.RouterConfig.Websocket.Forward)
 	}
 	// websocket 客户端
 	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Connect, "")
 	if gWebsocketConn != "" {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
+		// 订阅方裸TCP转发目标映射(端口->写死target)
+		nat.SetLocalForward(conf.RouterConfig.Websocket.Forward)
 		go nat.ConnectServer(&gWebsocketConn)
 	}
 
@@ -257,9 +269,40 @@ func main() {
 	if mode == "tunnel" {
 		handler = proto.ServerHandler
 	}
+	if listenOff {
+		// 关闭了代理监听: 没有 grace server 阻塞主流程, 改为等退出信号,
+		// 收到后取消 TUN context 并等设备清理。websocket 后台 goroutine 随进程退出。
+		if gWebsocketListen == "" && gWebsocketConn == "" && mode != "tun" && mode != "bypass" {
+			log.Println("warning: 代理监听已关闭(listen off), 但未配置 websocket/tun, 进程将空转")
+		}
+		log.Println("代理监听已关闭(listen off), 仅运行后台服务(websocket/tun 等)")
+		waitForShutdown(tunCancel, &tunWG)
+		return
+	}
 	server := grace.NewServer(gListenAddrPort, handler, network)
 	registerTUNCleanup(server, tunCancel, &tunWG)
 	server.ListenAndServe()
+}
+
+// isListenOff 判断监听地址是否被显式关闭(off/none/no/disable/-, 大小写不敏感)。
+// 关闭后不起本机代理监听, 仅跑 websocket/tun 等后台服务。
+func isListenOff(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "none", "no", "disable", "disabled", "-":
+		return true
+	}
+	return false
+}
+
+// waitForShutdown 在关闭代理监听时替代 grace server 的阻塞: 等 SIGINT/SIGTERM,
+// 收到后取消 TUN context 并等待设备清理再退出。
+// 注意: 此路径不支持 grace server 的 SIGHUP 平滑重启(后台服务进程重启即可)。
+func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	cancel()
+	wg.Wait()
 }
 
 // registerTUNCleanup 注册 SIGHUP/SIGINT/SIGTERM 的 PreSignal 钩子，

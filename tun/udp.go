@@ -202,11 +202,22 @@ func (f *udpForwarder) handle(pkt []byte) {
 		return
 	}
 
+	// macOS: 目标不在本机直连子网时, 绑物理网卡的 UDP socket 压不过 TUN 的
+	// 0/1+128/1 全量路由, sendto 必然 EHOSTUNREACH(DNS 已在中继内加 /32 例外路由,
+	// 其余 UDP 故意不加——会让该目标的 TCP 也绕过代理)。直接 drop 促客户端回退
+	// TCP 走 TUN 代理, 同时避免每包 listen→写失败→淘汰 的 socket 风暴与日志刷屏。
+	dstAddr := fmt.Sprintf("%s:%d", dstIP.String(), dstPort)
+	if udpDirectBlocked(dstAddr) {
+		if config.DebugLevel >= config.LevelDebug {
+			log.Printf("udp drop to %s (bound socket cannot escape TUN route, expect TCP fallback)", dstAddr)
+		}
+		return
+	}
+
 	// NAT 表按「客户端源(srcIP:srcPort)」建键，不含目标：一个源口共用一个 socket，
 	// socket 数 = 不同源口数(与应用层直连一致)，而非目标数，避免 P2P 洪泛把
 	// 内核 socket 打爆(Windows WSAENOBUFS)。
 	key := fmt.Sprintf("%s:%d", srcIP, srcPort)
-	dstAddr := fmt.Sprintf("%s:%d", dstIP.String(), dstPort)
 
 	// DNS 会话用短超时快速回收，其余(QUIC 等长连接)用常规超时
 	sessTimeout := udpSessionTimeout
@@ -265,6 +276,9 @@ func (f *udpForwarder) handle(pkt []byte) {
 	conn := sess.conn
 	f.mu.Unlock()
 
+	// 53 端口已在上面 DNS 分支全部处理(hosts 劫持或 dnsRelay 中继)并 return,
+	// 不会到达这里。解析器的 /32 例外路由(darwin)由 dnsRelay.forward 内的
+	// ensureUDPDynRoute 负责, 此处无需再加。
 	a := dstIP.As4()
 	if _, err := conn.WriteToUDP(payload, &net.UDPAddr{IP: net.IP(a[:]), Port: int(dstPort)}); err != nil {
 		log.Printf("udp forward write %s err: %v", dstAddr, err)
