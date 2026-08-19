@@ -72,6 +72,20 @@ func (h *Hub) run() {
 	}
 }
 
+// GetClientByEmail 按email获取订阅者(裸TCP转发用, 无http头可匹配)。
+// 同email多连接时返回首个命中; 无命中返回nil。
+func (h *Hub) GetClientByEmail(email string) *Client {
+	if email == "" {
+		return nil
+	}
+	for client := range h.clients {
+		if client.Email == email {
+			return client
+		}
+	}
+	return nil
+}
+
 // GetClient 获取某一个订阅者
 func (h *Hub) GetClient(header http.Header) *Client {
 	for client := range h.clients {

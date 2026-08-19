@@ -48,10 +48,10 @@ var tunables = []tunable{
 	{"net.ipv4.tcp_keepalive_time", "1200", info},
 	{"net.ipv4.ip_local_port_range", "10000 65000", info},
 	{"net.ipv4.tcp_max_syn_backlog", "8192", gte},
-	{"net.ipv4.tcp_max_tw_buckets", "1440000", info},
+	{"net.ipv4.tcp_max_tw_buckets", "524288", info},
 	{"net.ipv4.tcp_fastopen", "3", eq},
 	{"net.ipv4.tcp_window_scaling", "1", eq},
-	{"net.ipv4.tcp_rmem", "4096 87380 67108864", info},
+	{"net.ipv4.tcp_rmem", "4096 131072 67108864", info},
 	{"net.ipv4.tcp_wmem", "4096 65536 67108864", info},
 	{"net.ipv4.tcp_mtu_probing", "1", eq},
 }

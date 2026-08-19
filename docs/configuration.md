@@ -10,12 +10,12 @@
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l` |
+| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l`。设为 `off`（或 `none`/`-`）**关闭代理监听**，仅跑 websocket/tun 等后台服务（纯内网穿透场景，不需要本机代理端口）。关闭后 websocket 的「HTTP 头订阅」路径失效（它依赖本机代理），「裸 TCP 转发」不受影响 |
 | `network` | string | `tcp` | 监听协议：`tcp`(v4+v6) / `tcp4` / `tcp6` |
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
-| `mode` | string | `proxy` | 运行模式：`proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux），优先级低于 `-mode` |
+| `mode` | string | `proxy` | 运行模式（五者互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
 
 ## log
 

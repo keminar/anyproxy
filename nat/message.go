@@ -11,6 +11,13 @@ const METHOD_CREATE = "create"
 // METHOD_CLOSE 关闭连接命令
 const METHOD_CLOSE = "close"
 
+// 连接类型: 与 ID 组成复合键, 使 http 与 tcp 两路的 id 即便同号也不会在
+// ServerBridge/LocalBridge 中互相串扰(两路各自的采番器都可从 1 起步)。
+const (
+	ConnHTTP uint8 = 0 //现有 HTTP 转发路径
+	ConnTCP  uint8 = 1 //裸 TCP 端口转发路径
+)
+
 // SEND_CHAN_LEN 发送通道长度
 const SEND_CHAN_LEN = 200
 
@@ -31,8 +38,10 @@ type SubscribeMessage struct {
 // Message 普通消息体
 type Message struct {
 	ID     uint
+	Type   uint8  //连接类型(ConnHTTP/ConnTCP), 与 ID 组成复合键
 	Method string
 	Body   []byte
+	Port   uint16 //仅 METHOD_CREATE 用: 服务端裸TCP入口端口, 订阅方据此查固定 target
 }
 
 // CMessage 普通消息体的复合类型，标记要向哪个Client发送
