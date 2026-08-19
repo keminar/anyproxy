@@ -155,3 +155,12 @@ func (c *dynConn) Close() error {
 	c.once.Do(func() { macDynRoute.release(c.ip) })
 	return err
 }
+
+// CloseWrite 半关闭写端，委托给底层 *net.TCPConn。
+// 使 dynConn 满足 tunnel.closeWrite() 的接口断言。
+func (c *dynConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}

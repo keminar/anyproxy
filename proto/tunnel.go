@@ -70,7 +70,7 @@ func init() {
 // 转发实体
 type tunnel struct {
 	req      *Request
-	conn     *net.TCPConn // 后端服务
+	conn     net.Conn // 后端服务
 	curState int
 
 	inboundIP string // 来源IP
@@ -98,6 +98,14 @@ func newTunnel(req *Request) *tunnel {
 	return s
 }
 
+// closeWrite 安全地半关闭连接写端。s.conn 可能是 *net.TCPConn（直连），
+// 也可能是包装类型（如 macOS 上的 *dynConn），通过类型断言兼容二者。
+func (s *tunnel) closeWrite() {
+	if cw, ok := s.conn.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+}
+
 // copyBuffer 传输数据
 func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (written int64, err error) {
 	//如果设置过大会耗内存高，4k比较合理
@@ -118,7 +126,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 					// 如果包是http协议则认为http复用
 					if isKeepAliveHttp(s.req.ctx, s.req.conn, buf[0:nr]) {
 						// 关闭与旧的服务器的连接的写
-						s.conn.CloseWrite()
+						s.closeWrite()
 						// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
 						s.curState = stateIdle
 
@@ -183,7 +191,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 
 			if srcname == "request" {
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
-				s.conn.CloseWrite()
+				s.closeWrite()
 				s.curState = stateClosed
 			}
 			break
@@ -266,7 +274,7 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 	if err != nil {
 		return err
 	}
-	s.conn = conn.(*net.TCPConn)
+	s.conn = conn
 	// 出向本地址(实际 egress)是排查 TUN 环路的关键证据: 若它落在 TUN 网段
 	// (如 10.9.0.x)而非物理网卡 IP, 说明出向没能逃出 TUN, 就是环路根因。
 	if config.DebugLevel >= config.LevelLong {
@@ -777,7 +785,7 @@ func (s *tunnel) socks5(network, connAddr string, targetNet, targetAddr string) 
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
-	s.conn = conn.(*net.TCPConn)
+	s.conn = conn
 	return
 }
 

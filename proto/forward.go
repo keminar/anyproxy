@@ -172,7 +172,7 @@ func (s *tunnel) transferConn(client net.Conn) {
 		s.readSize, err = s.copyConn(s.conn, client, "request")
 		s.logCopyErr("request->server", err)
 		// 请求读完，通知后端不再有上行数据
-		s.conn.CloseWrite()
+		s.closeWrite()
 	}()
 
 	// 响应方向: server -> client
