@@ -147,10 +147,15 @@ func run() error {
 }
 
 // [P] 方案 7: pf route-to + egress 源端口段。
-// 原理: anyproxy 出向绑定专用源端口段(40001-49151), pf 规则
+// 设想: anyproxy 出向绑定专用源端口段(40001-49151), pf 规则
 //   pass out proto {tcp udp} from any port 40001:49151 route-to (en0 网关)
-// 在包转发层强制该段连接走物理网卡, 优先级高于路由表(0/1 → utun)。
-// 验证: P-a 不绑端口 → 被 0/1 吸走失败; P-b 绑 egress 段端口 → route-to 生效成功。
+// 想在包转发层强制该段连接走物理网卡, 压过路由表(0/1 → utun)。
+//
+// 实测结论(FAILED): P-a 被 0/1 吸走超时; P-b 绑物理 IP+egress 端口后仍 no route to host。
+//   → macOS pf 的 route-to 对「本机自产的出向新连接」不生效(与 OpenBSD 不同; 仅对转发流量
+//     和入向连接的 reply-to 有效, 后者正是 tun.inboundPorts 能工作的原因)。
+//   → 方案一(route-to 源端口段)在 macOS 无法用于本机出向分流; 本机代理只能靠 utun + 逃逸,
+//     或走方案五(fake-ip, 见 [F])。保留本探针用于回归/佐证该结论。
 func probePFRouteTo(gw, phyDev, phyIP string) {
 	const egressLo, egressHi = 40001, 49151
 
@@ -217,6 +222,10 @@ func boundSrcDial(target, srcIP string, port int, timeout time.Duration) (net.Co
 //
 // ①② 用 `pfctl -n -f`(只解析不加载)判定, 零风险且结论确定;
 // ③④ 用「本地监听 + rdr + DIOCNATLOOK」端到端实测。
+//
+// 实测结论: ① rdr 语法 OK、② user/group 语法 OK(macOS pf 确实保留了这两个 token),
+// 但 ④ 端到端 rdr 抓不到本机自产流量(listener never accepted) → ③ 因此无从触发。
+// 结合 [P] 的 route-to 也失败, 可判定: macOS pf 无法管本机出向, 方案一对本机代理不成立。
 func probePFScheme1(gw, phyDev string) {
 	fmt.Println("\n######## [P2] pf scheme-1 (transparent redirect) assumptions ########")
 
@@ -449,6 +458,13 @@ func pfNatLook(clientIP net.IP, clientPort int, localIP net.IP, localPort int) (
 // 不需要任何逃逸机制。
 // 验证: F-a 真实 IP 拨号 → 不在接管集 → 走物理网卡成功(天然逃逸);
 //       F-b fake-ip 网段拨号 → 命中接管集 → 被 TUN 捕获超时。
+//
+// 重要局限(不能作为全局代理的唯一方案):
+//   fake-ip 靠劫持 DNS 发假 IP 来按域名分流。凡是「不走 DNS、直接连真实 IP」的流量
+//   (客户端硬编码 IP、连接前已缓存过的 IP、某些 P2P/游戏/探测)拿不到假 IP, 落在真实
+//   IP 段 → 走默认路由直连 → 完全绕过代理(F-a 演示的就是这个"天然逃逸"的另一面)。
+//   因此「只接管假段」只解决"域名可见性"和"anyproxy 自身逃逸", 要真正全局代理仍需
+//   0/1 全量接管(真 IP 按 IP/geo 规则走), fake-ip 只是叠加在其上给域名分流用。
 func probeFakeIP() {
 	fmt.Println("\n######## [F] fake-ip style: TUN only takes 198.18.0.0/15 ########")
 
