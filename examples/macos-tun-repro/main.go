@@ -341,6 +341,7 @@ func probePFRedirectE2E() {
 }
 
 // pfctlLoad 加载一段 pf 规则(启用 pf 并覆盖当前规则集)。
+// pf 已被前面场景启用时(-ef 报 "pf already enabled"), 降级为 -f 仅加载规则。
 func pfctlLoad(rules string) (bool, string) {
 	f, err := os.CreateTemp("", "anyproxy-pfload-*.conf")
 	if err != nil {
@@ -349,9 +350,18 @@ func pfctlLoad(rules string) (bool, string) {
 	path := f.Name()
 	_, _ = f.WriteString(rules)
 	_ = f.Close()
+	defer os.Remove(path)
+
 	out, err := exec.Command("pfctl", "-ef", path).CombinedOutput()
-	os.Remove(path)
-	return err == nil, strings.TrimSpace(string(out))
+	if err == nil {
+		return true, strings.TrimSpace(string(out))
+	}
+	if strings.Contains(string(out), "already enabled") {
+		// pf 已启用(前面场景启用过): 降级 -f 仅加载规则覆盖当前规则集
+		out2, err2 := exec.Command("pfctl", "-f", path).CombinedOutput()
+		return err2 == nil, strings.TrimSpace(string(out2))
+	}
+	return false, strings.TrimSpace(string(out))
 }
 
 // pfRestore 清空 pf 规则并重载系统默认 /etc/pf.conf。
