@@ -265,6 +265,11 @@ func (f *udpForwarder) handle(pkt []byte) {
 	conn := sess.conn
 	f.mu.Unlock()
 
+	// DNS 目标加 /32 例外路由(darwin), 逃出 0/1 全量路由恢复 UDP 直连;
+	// 其余平台空操作(linux SO_BINDTODEVICE 有效)。仅 DNS(53) 加, 不碰 QUIC。
+	if dstPort == dnsPort {
+		ensureUDPDynRoute(dstIP.String())
+	}
 	a := dstIP.As4()
 	if _, err := conn.WriteToUDP(payload, &net.UDPAddr{IP: net.IP(a[:]), Port: int(dstPort)}); err != nil {
 		log.Printf("udp forward write %s err: %v", dstAddr, err)
