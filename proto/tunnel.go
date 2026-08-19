@@ -276,7 +276,11 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 }
 
 // 注册计数器, 日志地址优先使用域名
-func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
+// registerCounter 按「来源IP × 目标地址 × 方向」注册上下行流量计数器。
+// 统计始终以「最终目标」为主地址; 走上级代理时用 viaProxy 附上经由的代理地址
+// (形如 "cloudme.io:80 via 192.168.122.1:10808"), 使日志既有真实目标又有中转代理。
+// 直连时 viaProxy 传空。
+func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16, viaProxy string) {
 	// 日志地址优先使用域名
 	var logAddr string
 	if dstName != "" {
@@ -287,6 +291,9 @@ func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
 		} else {
 			logAddr = fmt.Sprintf("%s:%d", dstIP, dstPort)
 		}
+	}
+	if viaProxy != "" {
+		logAddr = logAddr + " via " + viaProxy
 	}
 	uplink := fmt.Sprintf("inbound>>>%s>>>%s>>>uplink", s.inboundIP, logAddr)
 	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, logAddr)
@@ -320,7 +327,7 @@ func (s *tunnel) buildAddress(dstName, dstIP string, dstPort uint16, addCounter 
 	}
 
 	if addCounter && connAddr != "" {
-		s.registerCounter(dstName, dstIP, dstPort)
+		s.registerCounter(dstName, dstIP, dstPort, "")
 	}
 	return
 }
@@ -567,7 +574,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			return
 		}
 
-		network, connAddr := s.buildAddress(proxyServer, "", proxyPort, true)
+		network, connAddr := s.buildAddress(proxyServer, "", proxyPort, false)
+		// 统计以最终目标为主, 附带经由的上级代理(而非只记代理地址), 便于识别真实下载地址
+		s.registerCounter(dstName, dstIP, dstPort, fmt.Sprintf("%s:%d", proxyServer, proxyPort))
 		switch proxyScheme {
 		case "socks5":
 			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
