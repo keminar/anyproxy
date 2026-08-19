@@ -152,12 +152,14 @@ func probePFRouteTo(gw, phyDev string) {
 	fmt.Println("\n######## [P] pf route-to + egress source-port band ########")
 
 	// 1. 加载 pf: pass all 兜底(不破坏 runner 其余流量) + egress 段 route-to 物理网卡。
-	//    语法注意: 需显式 `to any`; proto 列表拆成两条规则, 兼容老版本 pf。
+	//    macOS pf 语法坑(实测/文档确认):
+	//    - route-to 必须紧跟 `pass out` 之后(不能放规则尾部)
+	//    - 文件末尾必须有空行, 否则 pfctl 报 syntax error
 	conf := fmt.Sprintf(
 		"pass all\n"+
-			"pass out proto tcp from any port %d:%d to any route-to (%s %s)\n"+
-			"pass out proto udp from any port %d:%d to any route-to (%s %s)\n",
-		egressLo, egressHi, phyDev, gw, egressLo, egressHi, phyDev, gw)
+			"pass out route-to (%s %s) proto tcp from any port %d:%d to any\n"+
+			"pass out route-to (%s %s) proto udp from any port %d:%d to any\n\n",
+		phyDev, gw, egressLo, egressHi, phyDev, gw, egressLo, egressHi)
 	f, err := os.CreateTemp("", "anyproxy-pf-*.conf")
 	if err != nil {
 		fmt.Printf("    (create pf conf: %v)\n", err)
