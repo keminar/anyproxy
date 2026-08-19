@@ -151,9 +151,13 @@ func probePFRouteTo(gw, phyDev string) {
 
 	fmt.Println("\n######## [P] pf route-to + egress source-port band ########")
 
-	// 1. 加载 pf: pass all 兜底(不破坏 runner 其余流量) + egress 段 route-to 物理网卡
-	conf := fmt.Sprintf("pass all\npass out proto { tcp udp } from any port %d:%d route-to (%s %s)\n",
-		egressLo, egressHi, phyDev, gw)
+	// 1. 加载 pf: pass all 兜底(不破坏 runner 其余流量) + egress 段 route-to 物理网卡。
+	//    语法注意: 需显式 `to any`; proto 列表拆成两条规则, 兼容老版本 pf。
+	conf := fmt.Sprintf(
+		"pass all\n"+
+			"pass out proto tcp from any port %d:%d to any route-to (%s %s)\n"+
+			"pass out proto udp from any port %d:%d to any route-to (%s %s)\n",
+		egressLo, egressHi, phyDev, gw, egressLo, egressHi, phyDev, gw)
 	f, err := os.CreateTemp("", "anyproxy-pf-*.conf")
 	if err != nil {
 		fmt.Printf("    (create pf conf: %v)\n", err)
