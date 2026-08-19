@@ -278,7 +278,6 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 // 注册计数器, 日志地址优先使用域名
 // registerCounter 按「来源IP × 目标地址 × 方向」注册上下行流量计数器。
 // 统计始终以「最终目标」为主地址; 走上级代理时用 viaProxy 附上经由的代理地址
-// (形如 "cloudme.io:80 via 192.168.122.1:10808"), 使日志既有真实目标又有中转代理。
 // 直连时 viaProxy 传空。
 func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16, viaProxy string) {
 	// 日志地址优先使用域名
