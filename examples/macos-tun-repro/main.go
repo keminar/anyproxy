@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -40,6 +41,9 @@ func main() {
 	if err := run(); err != nil {
 		log.Fatalf("FATAL: %v", err)
 	}
+	// [F] fake-ip 分流场景在主流程清理(0/1 路由删除、utun 关闭)后独立跑:
+	// 需要"TUN 只接管 fake-ip 网段"的干净环境。
+	probeFakeIP()
 	fmt.Println("== done ==")
 }
 
@@ -130,7 +134,97 @@ func run() error {
 	//     加 /32 例外, 各发一次 DNS 查询。
 	fmt.Println("\n######## UDP: DNS query to 1.1.1.1:53 ########")
 	probeUDPDNS(gw, phyIP, idx)
+
+	// [P] pf route-to + egress 源端口段(方案 7): 0/1 路由仍存在时, 验证
+	//     pf 规则能否按源端口段强制出向走物理网卡(压过 0/1)。
+	probePFRouteTo(gw, phyDev)
 	return nil
+}
+
+// [P] 方案 7: pf route-to + egress 源端口段。
+// 原理: anyproxy 出向绑定专用源端口段(40001-49151), pf 规则
+//   pass out proto {tcp udp} from any port 40001:49151 route-to (en0 网关)
+// 在包转发层强制该段连接走物理网卡, 优先级高于路由表(0/1 → utun)。
+// 验证: P-a 不绑端口 → 被 0/1 吸走失败; P-b 绑 egress 段端口 → route-to 生效成功。
+func probePFRouteTo(gw, phyDev string) {
+	const egressLo, egressHi = 40001, 49151
+
+	fmt.Println("\n######## [P] pf route-to + egress source-port band ########")
+
+	// 1. 加载 pf: pass all 兜底(不破坏 runner 其余流量) + egress 段 route-to 物理网卡
+	conf := fmt.Sprintf("pass all\npass out proto { tcp udp } from any port %d:%d route-to (%s %s)\n",
+		egressLo, egressHi, phyDev, gw)
+	f, err := os.CreateTemp("", "anyproxy-pf-*.conf")
+	if err != nil {
+		fmt.Printf("    (create pf conf: %v)\n", err)
+		return
+	}
+	path := f.Name()
+	if _, err := f.WriteString(conf); err != nil {
+		f.Close()
+		os.Remove(path)
+		fmt.Printf("    (write pf conf: %v)\n", err)
+		return
+	}
+	f.Close()
+	defer os.Remove(path)
+
+	fmt.Printf("    pfctl -ef: %s\n", strings.ReplaceAll(strings.TrimSpace(conf), "\n", " | "))
+	if out, err := exec.Command("pfctl", "-ef", path).CombinedOutput(); err != nil {
+		fmt.Printf("    (pfctl load failed: %v: %s)\n", err, strings.TrimSpace(string(out)))
+		return
+	}
+	// 恢复默认 pf(清规则 + 重载 /etc/pf.conf)
+	defer func() {
+		_ = exec.Command("pfctl", "-F", "all").Run()
+		_ = exec.Command("pfctl", "-f", "/etc/pf.conf").Run()
+	}()
+
+	// 2. P-a 普通拨号(不绑 egress 端口) → 预期被 0/1 吸走而失败
+	fmt.Println("[P-a] plain dial 1.1.1.1:443 (no egress port bind)")
+	printDial(plainDial("1.1.1.1:443", 3*time.Second))
+
+	// 3. P-b 绑 egress 段源端口拨号 → 预期 pf route-to 强制物理网卡 → 成功
+	fmt.Printf("[P-b] dial 1.1.1.1:443 with src port %d (egress band, pf route-to)\n", egressLo)
+	printDial(boundPortDial("1.1.1.1:443", egressLo, 3*time.Second))
+}
+
+// boundPortDial 只绑源端口(不绑 IP)拨号——pf route-to 按源端口段匹配。
+func boundPortDial(target string, port int, timeout time.Duration) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{Port: port}}
+	return d.Dial("tcp", target)
+}
+
+// [F] 方案 5: fake-ip 分流式 TUN。
+// 原理: TUN 只接管 fake-ip 网段(198.18.0.0/15), 不加 0/1 全量路由; 真实 IP
+// 流量走默认路由(物理网卡)。anyproxy 自身出向目标永远是真 IP → 天然逃逸,
+// 不需要任何逃逸机制。
+// 验证: F-a 真实 IP 拨号 → 不在接管集 → 走物理网卡成功(天然逃逸);
+//       F-b fake-ip 网段拨号 → 命中接管集 → 被 TUN 捕获超时。
+func probeFakeIP() {
+	fmt.Println("\n######## [F] fake-ip style: TUN only takes 198.18.0.0/15 ########")
+
+	d, err := tun.New("", 1500)
+	if err != nil {
+		fmt.Printf("    (create tun: %v)\n", err)
+		return
+	}
+	defer d.Close()
+	if err := d.SetupAddr("10.9.0.1/24"); err != nil {
+		fmt.Printf("    (setup addr: %v)\n", err)
+		return
+	}
+	if err := routeCmd("-n", "add", "-net", "198.18.0.0/15", "-interface", d.Name()); err != nil {
+		fmt.Printf("    (add 198.18/15 route: %v)\n", err)
+		return
+	}
+	defer func() { _ = routeCmd("-n", "delete", "-net", "198.18.0.0/15") }()
+
+	fmt.Println("[F-a] real-IP dial 1.1.1.1:443 (outside fake-ip range -> default route, natural escape)")
+	printDial(plainDial("1.1.1.1:443", 3*time.Second))
+
+	fmt.Println("[F-b] fake-ip dial 198.18.0.1:443 (inside fake-ip range -> captured by TUN)")
+	printDial(plainDial("198.18.0.1:443", 3*time.Second))
 }
 
 // probeUDPDNS 对照验证 UDP 逃逸:
