@@ -178,13 +178,14 @@ A 的 TUN 会把 `0.0.0.0/1`、`128.0.0.0/1` 全量流量吸进来；A 自己的
 ```
 # B 的 conf/router.yaml
 mode: bypass
-bypassLinux:
-  # 自动探测不到物理网卡时(启动日志 bypass-only: device="")手动指定
-  device: eth0
+tun:
+  linux:
+    # 自动探测不到物理网卡时(启动日志 bypass-only: device="")手动指定
+    device: eth0
 ```
 
 * **务必检查 B 的启动日志** `bypass-only: device="..." ip="..."`：`device` 与 `ip` 非空才算 bypass 生效。
-  若为空说明 `defaultRoute()` 自动探测失败，bypass 会静默退回普通拨号而失效，此时用 `bypassLinux.device` 手动指定网卡名。
+  若为空说明 `defaultRoute()` 自动探测失败，bypass 会静默退回普通拨号而失效，此时用 `tun.linux.device` 手动指定网卡名。
 
 ## 兜底：loopGuard 熔断器
 

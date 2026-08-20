@@ -1,4 +1,4 @@
-# 监听端口IP, 优先级低于启动传参
+# 监听端口IP, 优先级低于启动传参，不监听设置为off
 listen:
 # 日志目录
 log:
@@ -57,6 +57,11 @@ tun:
 #    bypassIPs:               # 这些目标直连(自动加 /32 路由), 填上级代理/VPN服务器IP
 #      - 192.168.199.1
 #    # 说明: 外网SSH等入站服务的回包由内置源策略路由(ip rule)自动放行, 无需配置。
+#    # 下面两项仅 mode=bypass(物理网卡绕行, 不建TUN网卡)时生效, 与 mode=tun 互斥:
+#    excludeNics:             # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
+#      - anytun0
+#    device:                  # 手动指定物理网卡名, 留空则自动探测默认路由网卡
+#      # eth0
 #
 #  # ===== macOS (gVisor utun) =====
 #  darwin:
@@ -78,15 +83,7 @@ tun:
 #    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)
 #      - openvpn.exe
 
-# mode=bypass 时生效: 物理网卡绕行(仅 Linux 支持; macOS/Windows 已移除该模式)
-# 配置 key 为 bypassLinux, 与 mode=bypass 配套
-bypassLinux:
-#  excludeNics:              # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
-#    - anytun0
-#  device:                   # 手动指定物理网卡名, 留空则自动探测默认路由网卡
-#    # eth0
-
-# 死循环兜底熔断器(最后防线, 非主方案)。
+# 死循环兜底熔断器(不仅仅应用于全局代理，经过anyproxy的死循环都有效)。
 # 同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署时, 正常应由 bypass 从路由层根治环路;
 # 若 bypass 未生效, 句柄会堆积且都指向同一目标。判定: 全局在传连接数达到 minActive
 # (闸门)后, 若某个 host:port 占用的在传连接超过 total*ratio%, 判为环路并拒绝其新连接。
@@ -100,21 +97,28 @@ loopGuard:
 #  # 单目标占全局在传连接的百分比阈值(如80=80%); <=0 用默认80
 #  ratio: 80
 
-# geoip/geosite 数据集, 按「类别 -> 文件」配置(每类别一个文件), 配了才启用 hosts 的
-# geoip:/geosite: 匹配。文件按扩展名区分:
-#   .dat : protobuf 数据集(一个文件多类别), 取与配置键同名的类别;
-#   其它 : 纯文本列表(整个文件即该类别)。geoip 每行 CIDR/IP; geosite 每行域名,
-#          支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀), # 注释,
-#          keyword/regexp 当国外丢弃。如域名列表 direct-list.txt。
+# geoip/geosite 数据集, 配了才启用 hosts 的 geoip:/geosite: 匹配(见下面 hosts 说明)。
+# 只负责「加载数据」: 加载哪些类别在这里, 命中后干什么(target/dns/proxy)仍写在 hosts,
+# 由 hosts 里 geoip:xx / geosite:xx 规则的摆放位置决定优先级(保持排序灵活)。
+#
+# 顶层 geoip: / geosite:, 每项一个文件, 一个文件可含多类别、只解析一次。
+# 文件按扩展名区分:
+#   .dat : protobuf 数据集(一个文件多类别)。cats 列出要用的类别; cats 留空=加载文件内全部类别。
+#   其它 : 纯文本列表(整个文件即一个类别), cats 须恰好给一个类别名。geoip 每行 CIDR/IP;
+#          geosite 每行域名, 支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀),
+#          # 注释, keyword/regexp 当国外丢弃。如域名列表 direct-list.txt。
 # .dat 可先用命令离线提取所需类别成小文件随发布携带(运行时只读小文件):
 #   anyproxy -geo-extract -geo-in geosite.dat -geo-cat cn,google -geo-out geosite-cn.dat
-geo:
-#  ip:
-#    cn: ./geoip-cn.dat        # .dat: 取其中的 cn 类别
-#    # cn: ./china-cidr.txt    # 或文本 CIDR 列表(整文件=cn)
-#  site:
-#    cn: ./direct-list.txt     # 文本域名列表(整文件=cn)
-#    google: ./geosite.dat     # .dat: 取其中的 google 类别
+#geoip:
+#  - file: ./geoip.dat          # .dat 一个文件多类别, 只解析一次
+#    cats: [cn, us]             # 要用的类别; 留空则加载该 .dat 内全部类别
+#  - file: ./cloudflare.txt     # 文本 CIDR 列表, 整文件即一个类别
+#    cats: [cloudflare]         # 文本列表必须恰好一个类别名
+#geosite:
+#  - file: ./geosite.dat
+#    cats: [google, cn]
+#  - file: ./direct-list.txt    # 文本域名列表(整文件=cn)
+#    cats: [cn]
 
 # 默认操作，可热加载
 default:
@@ -147,7 +151,7 @@ default:
 #   name: "google.com*"  开头一致(前缀) → google.com/google.com.hk 命中，www.google.com 不命中
 #   name: "*google.com*" 子串包含       → 含 google.com 的任意位置都命中
 # yaml 中以 * 开头的值需加引号；显式配 match 时仍以 match 为准(兼容旧配置)
-# name 还支持 geoip:xx / geosite:xx 按 geo 数据集匹配(需配上面的 geo.ip / geo.site):
+# name 还支持 geoip:xx / geosite:xx 按 geo 数据集匹配(需配上面的顶层 geoip: / geosite:):
 #   - name: geoip:cn      # 目标 IP 命中 geoip 类别 cn → target 生效(如 local 直连)
 #     target: local
 #   - name: geosite:cn    # 目标域名命中 geosite 类别 cn → target 生效
@@ -180,23 +184,42 @@ hosts:
     allowIP:
      # - 172.17.0.12
 
-#websocket配置
-#对于服务端需要配置 listen, user, pass 三个参数
-#对于客户端未配置connect / user / email 都不发起连接
+#websocket 配置, 按角色分 server(服务端) / client(客户端) 两块
+#  server: 需配 listen, user, pass 才起服务
+#  client: 未配 connect / user / email 则不发起连接
 websocket:
-  # 监听端口
-  listen:
-  # ip 端口
-  connect:
-  # connect 域名
-  host:
-  # 用户名
-  user:
-  # 密码
-  pass:
-  # Email用于定位用户，不鉴权
-  email:
-  # 订阅头部信息
-  subscribe:
-    - key:
-      val:
+  # ===== 服务端(tunnel侧) =====
+  server:
+    # 监听端口
+    listen:
+    # 认证用户(校验接入的订阅方)
+    user:
+    # 密码
+    pass:
+    # 可接入的客户端IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
+    allowIP:
+    #  - 172.17.0.0/16
+    # 裸TCP端口转发入口(内网穿透): 在 listen 端口收连接, 经 websocket 转给该 email 的订阅方
+    forward:
+      # - listen: ":2222"
+      #   email: someone@example.com
+  # ===== 客户端(proxy侧) =====
+  client:
+    # ip 端口
+    connect:
+    # connect 域名(Host头)
+    host:
+    # 用户名(发给服务端)
+    user:
+    # 密码
+    pass:
+    # Email用于定位用户，不鉴权
+    email:
+    # 订阅头部信息
+    subscribe:
+      - key:
+        val:
+    # 裸TCP端口转发目标: 收到服务端 port 入口来的连接时, dial 写死的 target
+    forward:
+      # - port: 2222
+      #   target: 127.0.0.1:22

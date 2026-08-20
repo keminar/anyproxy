@@ -221,6 +221,12 @@ func (srv *Server) ListenAndServe() (err error) {
 // getListener either opens a new socket to listen on, or takes the acceptor socket
 // it got passed when restarted.
 func (srv *Server) getListener(laddr string) (l *net.TCPListener, err error) {
+	wantAddr, err := net.ResolveTCPAddr(srv.Network, laddr)
+	if err != nil {
+		err = fmt.Errorf("net.Listen error: %v", err)
+		return
+	}
+
 	if srv.isChild {
 		var ptrOffset uint
 		if len(socketPtrOffsetMap) > 0 {
@@ -237,21 +243,40 @@ func (srv *Server) getListener(laddr string) (l *net.TCPListener, err error) {
 			return
 		}
 		l = ln.(*net.TCPListener)
-	} else {
-		var lnaddr *net.TCPAddr
-		lnaddr, err = net.ResolveTCPAddr(srv.Network, laddr)
-		if err != nil {
-			err = fmt.Errorf("net.Listen error: %v", err)
-			return
-		}
 
-		l, err = net.ListenTCP(srv.Network, lnaddr)
+		// listen 配置在两次启动间被改过: 继承的 fd 绑的还是旧地址, 不能直接复用,
+		// 否则改了 listen 后 SIGHUP 平滑重启不会生效(继续监听旧地址)。这里发现
+		// 地址不一致就放弃继承, 关掉旧 fd 改在新地址上重新监听。
+		if oldAddr, ok := l.Addr().(*net.TCPAddr); ok && !sameTCPAddr(oldAddr, wantAddr) {
+			log.Println(os.Getpid(), "listen addr changed:", oldAddr, "->", wantAddr, ", 放弃继承旧 fd, 重新监听")
+			l.Close() // 关闭 net.FileListener 内部 dup 出的 fd
+			f.Close() // net.FileListener 会 dup fd, 原始继承的 fd 3 需要单独关闭, 否则泄漏
+			l, err = net.ListenTCP(srv.Network, wantAddr)
+			if err != nil {
+				err = fmt.Errorf("net.Listen error: %v", err)
+				return
+			}
+		}
+	} else {
+		l, err = net.ListenTCP(srv.Network, wantAddr)
 		if err != nil {
 			err = fmt.Errorf("net.Listen error: %v", err)
 			return
 		}
 	}
 	return
+}
+
+// sameTCPAddr 判断两个监听地址是否等价。未指定 host(0.0.0.0/::/nil, 即通配地址)
+// 时不强制比较具体 IP, 只要端口一致就视为同一地址。
+func sameTCPAddr(a, b *net.TCPAddr) bool {
+	if a.Port != b.Port {
+		return false
+	}
+	if a.IP == nil || a.IP.IsUnspecified() || b.IP == nil || b.IP.IsUnspecified() {
+		return true
+	}
+	return a.IP.Equal(b.IP)
 }
 
 // handleSignals listens for os Signals and calls any hooked in function that the
@@ -379,7 +404,12 @@ func (srv *Server) fork() (err error) {
 	cmd.ExtraFiles = files
 	err = cmd.Start()
 	if err != nil {
-		log.Fatalf("Restart: Failed to launch, error: %v", err)
+		// 新进程都没能起来就不该拖旧进程一起死(旧进程还在正常服务), 把错误交回给
+		// 调用方(handleSignals 只会 log, 保持旧进程运行), 同时复位 runningServersForked,
+		// 否则下次 SIGHUP 会被 fork() 顶部的重入保护直接吞掉, 永久失去重试机会。
+		runningServersForked = false
+		err = fmt.Errorf("Restart: Failed to launch, error: %v", err)
+		return
 	}
 	go cmd.Wait()
 

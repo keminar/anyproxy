@@ -29,9 +29,10 @@ TUN，但 **B 的出向流量没逃**，被 A 的 TUN 再次抓走 → A → B �
 ```yaml
 # B 的 conf/router.yaml
 mode: bypass
-bypassLinux:
-  # 自动探测不到物理网卡时手动指定
-  device: eth0
+tun:
+  linux:
+    # 自动探测不到物理网卡时手动指定
+    device: eth0
 ```
 
 **务必检查 B 的启动日志**：
@@ -41,7 +42,7 @@ bypass-only: device="eth0" ip="192.168.1.10" exclude=[...]
 ```
 
 `device` 与 `ip` 非空才算 bypass 生效。若为空，说明自动探测失败、bypass 会**静默退回普通拨号而失效**，
-此时必须用 `bypassLinux.device` 手动指定网卡名。
+此时必须用 `tun.linux.device` 手动指定网卡名。
 
 ## 第二层（兜底）：loopGuard 熔断器
 
@@ -97,7 +98,7 @@ loopGuard 在 Mac 依然有效。）
 | **macOS** | ❌ 已移除 | 入站服务回包被 TUN 吸走 → `mode=tun` + `tun.inboundPorts`（pf reply-to） |
 | **Windows** | ❌ 已移除 | WinDivert 模型无 0/1 路由概念；逃逸靠 TUN 进程的 `tun.windows.excludeProcs`/`bypassIPs` + egress 源端口段（见 [windows-windivert-escape.md](windows-windivert-escape.md)） |
 
-> Linux 上若自动探测失败（`bypass-only: device=""`），用 `bypassLinux.device` 手动指定网卡名。
+> Linux 上若自动探测失败（`bypass-only: device=""`），用 `tun.linux.device` 手动指定网卡名。
 > 另外，Windows/macOS 上 B（anyproxy 进程）的出向仍会被 A 的捕获/路由接管：macOS 无 0/1 路由时不适用；
 > Windows 上 B 出向靠 egress 源端口段被 A 天然放行（同为 anyproxy 时），无需 bypass 模式。
 
@@ -106,7 +107,7 @@ loopGuard 在 Mac 依然有效。）
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
 | `mode` | `proxy` | `proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux）；同机 A 用 tun、B 用 bypass |
-| `bypassLinux.device` | 空(自动探测) | 手动指定物理网卡名（仅 Linux） |
-| `bypassLinux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（仅 Linux） |
+| `tun.linux.device` | 空(自动探测) | 手动指定物理网卡名（仅 Linux, mode=bypass） |
+| `tun.linux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（仅 Linux, mode=bypass） |
 | `loopGuard.minActive` | 1000 | 在传连接闸门；`<0` 关闭 |
 | `loopGuard.ratio` | 80 | 单目标占比阈值(%) |

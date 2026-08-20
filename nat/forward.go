@@ -21,8 +21,8 @@ var forwardInc = autoinc.New(1, 1)
 // 只读(启动时一次性构建), 无需加锁。
 var localForward = map[uint16]string{}
 
-// SetLocalForward 订阅方启动时构建 端口->target 映射(见 conf.Forward)。
-func SetLocalForward(rules []conf.Forward) {
+// SetLocalForward 订阅方启动时构建 端口->target 映射(见 conf.ClientForward)。
+func SetLocalForward(rules []conf.ClientForward) {
 	m := map[uint16]string{}
 	for _, r := range rules {
 		if r.Port != 0 && r.Target != "" {
@@ -47,7 +47,7 @@ func isForwardEmail(email string) bool {
 	if email == "" {
 		return false
 	}
-	for _, r := range conf.RouterConfig.Websocket.Forward {
+	for _, r := range conf.RouterConfig.Websocket.Server.Forward {
 		if r.Listen != "" && r.Email == email {
 			return true
 		}
@@ -91,7 +91,7 @@ func dialForCreate(c *Client, msg *Message) (*net.TCPConn, error) {
 // StartForward 服务端(tunnel侧)启动裸TCP端口转发监听。每条 forward 规则一个
 // 监听 goroutine; 只对配了 Listen 的规则生效。需在 NewServer 之后调用(依赖
 // ServerHub/ServerBridge 已初始化)。
-func StartForward(rules []conf.Forward) {
+func StartForward(rules []conf.ServerForward) {
 	for _, r := range rules {
 		if r.Listen == "" {
 			continue
@@ -100,7 +100,7 @@ func StartForward(rules []conf.Forward) {
 	}
 }
 
-func listenForward(r conf.Forward) {
+func listenForward(r conf.ServerForward) {
 	ln, err := net.Listen("tcp", r.Listen)
 	if err != nil {
 		log.Printf("nat forward listen %s err: %v", r.Listen, err)
@@ -119,7 +119,7 @@ func listenForward(r conf.Forward) {
 }
 
 // handleForward 处理一条进来的裸TCP连接: 选订阅方 -> 建 bridge -> 双向转发。
-func handleForward(conn *net.TCPConn, r conf.Forward) {
+func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	if r.Email == "" {
 		log.Printf("nat forward %s email empty, close", r.Listen)
 		conn.Close()

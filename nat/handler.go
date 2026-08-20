@@ -31,7 +31,7 @@ var tempDelay time.Duration
 
 // ConnectServer 连接到websocket服务
 func ConnectServer(addr *string) {
-	if conf.RouterConfig.Websocket.User == "" || conf.RouterConfig.Websocket.Email == "" {
+	if conf.RouterConfig.Websocket.Client.User == "" || conf.RouterConfig.Websocket.Client.Email == "" {
 		log.Println("ws user or email empty, donot connect")
 		return
 	}
@@ -75,8 +75,8 @@ func connect(addr *string, interrupt chan os.Signal) {
 	log.Printf("connecting to %s", u.String())
 
 	h := http.Header{}
-	if conf.RouterConfig.Websocket.Host != "" {
-		h.Add("Host", conf.RouterConfig.Websocket.Host)
+	if conf.RouterConfig.Websocket.Client.Host != "" {
+		h.Add("Host", conf.RouterConfig.Websocket.Client.Host)
 	}
 	wsDialer := &websocket.Dialer{
 		NetDial:          func(network, addr string) (net.Conn, error) { return bypassDial(network, addr, 30*time.Second) },
@@ -91,7 +91,7 @@ func connect(addr *string, interrupt chan os.Signal) {
 	defer c.Close()
 
 	w := newClientHandler(c)
-	err = w.auth(conf.RouterConfig.Websocket.User, conf.RouterConfig.Websocket.Pass, conf.RouterConfig.Websocket.Email)
+	err = w.auth(conf.RouterConfig.Websocket.Client.User, conf.RouterConfig.Websocket.Client.Pass, conf.RouterConfig.Websocket.Client.Email)
 	if err != nil {
 		log.Println("auth:", err)
 
@@ -107,7 +107,7 @@ func connect(addr *string, interrupt chan os.Signal) {
 		return
 	}
 	tempDelay = 0
-	err = w.subscribe(conf.RouterConfig.Websocket.Subscribe)
+	err = w.subscribe(conf.RouterConfig.Websocket.Client.Subscribe)
 	if err != nil {
 		log.Println("subscribe:", err)
 		time.Sleep(time.Duration(3) * time.Second)

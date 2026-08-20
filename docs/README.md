@@ -9,6 +9,7 @@
 
 - [cli.md](cli.md) — 命令行参数详解，及与配置文件的优先级。
 - [configuration.md](configuration.md) — `router.yaml` 完整配置参考，按配置段逐项说明。
+- [hot-reload.md](hot-reload.md) — `watcher: true` 配置热加载：哪些配置改动即时生效、哪些需重启或 SIGHUP，及其判定机制。
 - [config-examples.md](config-examples.md) — 按场景的完整配置示例：全局代理、按域名分流、Windows+OpenVPN、macOS 入站 SSH、iptables、tunneld、tcpcopy、内网穿透、同机双实例。
 - [routing.md](routing.md) — 路由与代理规则：域名匹配、`target`/`proxy`/`dns`/`ip`/`port`/`allowIP`、多代理 `local`/`deny`、优先级。
 - [proxy-decision.md](proxy-decision.md) — 代理决策逻辑详解：`target`(local/remote/auto/deny) × `proxy`(多代理 + local/deny 后缀) 的完整判定顺序、host/全局回退链、热加载、不可用缓存。

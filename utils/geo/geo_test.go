@@ -259,3 +259,69 @@ func TestExtractRoundTrip(t *testing.T) {
 		t.Error("提取不存在的类别应报错")
 	}
 }
+
+// TestLoadIPFile 校验新写法: 一个 .dat 一次加载多类别; cats 留空=全部; 文本列表 cats 约束。
+func TestLoadIPFile(t *testing.T) {
+	reset()
+	dat := writeTmp(t, "geoip.dat", list(
+		geoIPMsg("CN", cidrMsg([]byte{1, 2, 0, 0}, 16)),
+		geoIPMsg("US", cidrMsg([]byte{8, 8, 8, 0}, 24)),
+		geoIPMsg("JP", cidrMsg([]byte{9, 9, 9, 0}, 24)),
+	))
+	// 一个文件一次取多个类别
+	if err := LoadIPFile(dat, []string{"cn", "us"}); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchIP("cn", "1.2.3.4") || !MatchIP("us", "8.8.8.8") {
+		t.Error("cn/us 应命中")
+	}
+	if MatchIP("jp", "9.9.9.9") {
+		t.Error("未加载的 jp 不应命中")
+	}
+	if err := LoadIPFile(dat, []string{"kr"}); err == nil {
+		t.Error("缺失类别应报错")
+	}
+
+	// cats 留空 = 加载全部类别
+	reset()
+	if err := LoadIPFile(dat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchIP("cn", "1.2.3.4") || !MatchIP("us", "8.8.8.8") || !MatchIP("jp", "9.9.9.9") {
+		t.Error("cats 留空应加载全部类别")
+	}
+	if ic, _ := Stat(); ic != 3 {
+		t.Errorf("应加载 3 个类别, 实际 %d", ic)
+	}
+
+	// 文本列表: cats 必须恰好一个
+	reset()
+	txt := writeTmp(t, "cn.txt", []byte("1.2.0.0/16\n"))
+	if err := LoadIPFile(txt, nil); err == nil {
+		t.Error("文本列表 cats 留空应报错")
+	}
+	if err := LoadIPFile(txt, []string{"a", "b"}); err == nil {
+		t.Error("文本列表 cats 多个应报错")
+	}
+	if err := LoadIPFile(txt, []string{"cn"}); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchIP("cn", "1.2.3.4") {
+		t.Error("文本列表单类别应命中")
+	}
+}
+
+// TestLoadSiteFile 校验 geosite 新写法的多类别与 cats 留空=全部。
+func TestLoadSiteFile(t *testing.T) {
+	reset()
+	dat := writeTmp(t, "geosite.dat", list(
+		geoSiteMsg("CN", domainMsg(2, "baidu.com")),
+		geoSiteMsg("GOOGLE", domainMsg(2, "google.com")),
+	))
+	if err := LoadSiteFile(dat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchSite("cn", "www.baidu.com") || !MatchSite("google", "www.google.com") {
+		t.Error("cats 留空应加载全部 geosite 类别")
+	}
+}
