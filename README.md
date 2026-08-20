@@ -136,7 +136,12 @@ make all
 
 ## 代理设置
 
-> Linux 下 iptables 防火墙全局代理（专用用户 + owner 规则）、规则查看与删除，以及浏览器 / 手机端代理设置，见 [docs/deployment.md](docs/deployment.md#linux-iptables-全局代理)。
+客户端代理设置：
+
+- 浏览器 [Chrome 设置](https://zhidao.baidu.com/question/204679423955769445.html)
+- 手机端 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html)  [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
+
+> Linux 下 iptables 防火墙全局代理（专用用户 + owner 规则）、规则查看与删除，见 [docs/deployment.md](docs/deployment.md#linux-iptables-全局代理)。
 
 ## 文档导航
 
