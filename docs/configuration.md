@@ -15,7 +15,7 @@
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
-| `mode` | string | `proxy` | 运行模式（五者互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
+| `mode` | string | `proxy` | 运行模式（互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
 
 ## log
 
@@ -59,19 +59,22 @@ tcpcopy:
 
 ## geo（geoip/geosite 数据集）
 
-按「类别 → 文件」配置，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，取同名类别）或纯文本列表（整文件即该类别）。详见 [geo.md](geo.md)。
+顶层 `geoip:` / `geosite:` 各是一个**文件列表**，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，一个文件多类别，`cats` 留空=全部）或纯文本列表（整文件即一个类别，`cats` 须恰好一个）。**同一类别可由多个文件合并取并集**（如 `geosite.dat` 的 `cn` + `direct-list.txt` 的 `cn`，`geosite:cn` 命中两者内容之和；重复去重、按列表顺序合并、类名大小写不敏感）。详见 [geo.md](geo.md)。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `geo.ip` | map[类别]文件 | 每个类别一个 geoip 文件（`.dat` 或 CIDR 文本列表） |
-| `geo.site` | map[类别]文件 | 每个类别一个 geosite 文件（`.dat` 或域名文本列表，如 `direct-list.txt`） |
+| `geoip[].file` | string | geoip 数据文件（`.dat` 或 CIDR 文本列表） |
+| `geoip[].cats` | []类别 | 从该文件加载的类别；`.dat` 留空=全部，文本列表须恰好一个 |
+| `geosite[].file` | string | geosite 数据文件（`.dat` 或域名文本列表，如 `direct-list.txt`） |
+| `geosite[].cats` | []类别 | 同上 |
 
 ```yaml
-geo:
-  ip:
-    cn: ./geoip-cn.dat        # .dat 取 cn 类别; 也可 ./china-cidr.txt(文本)
-  site:
-    cn: ./direct-list.txt     # 文本域名列表; 也可 ./geosite-cn.dat
+geoip:
+  - file: ./geoip.dat         # .dat 一个文件多类别, 只解析一次
+    cats: [cn]                # 留空则加载该 .dat 内全部类别
+geosite:
+  - file: ./direct-list.txt   # 文本域名列表, 整文件即一个类别
+    cats: [cn]
 hosts:
   - name: geoip:cn
     target: local        # 国内 IP 直连
@@ -162,14 +165,14 @@ tun:
 
 详见 [tun-features.md](tun-features.md)、VPN 共存见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
 
-## bypassLinux（mode=bypass 时生效，仅 Linux）
+## tun.linux（mode=bypass 时生效，仅 Linux）
 
-配置 key 为 `bypassLinux`，与 `mode=bypass` 配套。
+`mode=bypass`（物理网卡绕行）复用 `tun.linux` 下的两个字段，与 `mode=bypass` 配套。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `bypassLinux.device` | 空(自动探测) | 手动指定绑定的物理网卡名（如 `eth0`） |
-| `bypassLinux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
+| `tun.linux.device` | 空(自动探测) | 手动指定绑定的物理网卡名（如 `eth0`） |
+| `tun.linux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
 
 macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`；Windows 逃逸靠
 `tun.windows.excludeProcs`/`bypassIPs`。详见 [multi-instance-loop.md](multi-instance-loop.md)。
@@ -187,14 +190,17 @@ macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`
 
 ## websocket（内网穿透）
 
-服务端需配 `listen`/`user`/`pass`；客户端需配 `connect`/`user`/`email`（缺一不发起连接）。详见 [modes.md](modes.md#websocket-内网穿透)。
+配置按角色分 `server`（服务端）/ `client`（客户端）两块。服务端需配 `server.listen`/`user`/`pass`；客户端需配 `client.connect`/`user`/`email`（缺一不发起连接）。详见 [modes.md](modes.md#websocket-内网穿透)。
 
 | 字段 | 说明 |
 |------|------|
-| `websocket.listen` | 服务端监听地址端口 |
-| `websocket.connect` | 客户端连接的地址端口 |
-| `websocket.host` | connect 的域名 |
-| `websocket.user` | 认证用户名 |
-| `websocket.pass` | 认证密码 |
-| `websocket.email` | 用于定位用户，不鉴权 |
-| `websocket.subscribe` | 订阅头部信息列表，元素为 `{key, val}` |
+| `websocket.server.listen` | 服务端监听地址端口 |
+| `websocket.server.user` / `.pass` | 服务端认证用户名 / 密码（校验接入的订阅端） |
+| `websocket.server.allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP），为空不限制；按真实 TCP 来源判定，loopback 始终放行 |
+| `websocket.server.forward` | 服务端裸TCP转发入口列表，元素为 `{listen, email}` |
+| `websocket.client.connect` | 客户端连接的地址端口 |
+| `websocket.client.host` | connect 的域名 |
+| `websocket.client.user` / `.pass` | 客户端认证用户名 / 密码（发给服务端） |
+| `websocket.client.email` | 用于定位用户，不鉴权 |
+| `websocket.client.subscribe` | 订阅头部信息列表，元素为 `{key, val}` |
+| `websocket.client.forward` | 订阅端裸TCP转发目标列表，元素为 `{port, target}` |

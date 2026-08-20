@@ -101,29 +101,45 @@ type Subscribe struct {
 	Val string `yaml:"val"` //Header的val
 }
 
-// Forward 裸TCP端口转发规则(内网穿透/打洞)。同一份配置在两端含义不同:
-//   - 服务端(tunnel侧, 配了websocket.listen): 用 Listen + Email。
-//     在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
-//   - 订阅方(proxy侧, 配了websocket.connect): 用 Port + Target。
-//     收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
-//     Port 未在本地命中则拒绝(天然白名单)。
-type Forward struct {
-	Listen string `yaml:"listen"` //服务端用: 裸TCP监听地址, 如 ":2222"
-	Email  string `yaml:"email"`  //服务端用: 转发给此email的订阅方
-	Port   uint16 `yaml:"port"`   //订阅方用: 对应服务端入口端口
-	Target string `yaml:"target"` //订阅方用: 写死的dial目标, 如 "127.0.0.1:22"
+// ServerForward 服务端(tunnel侧)裸TCP端口转发入口(内网穿透)。
+// 在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
+type ServerForward struct {
+	Listen string `yaml:"listen"` //裸TCP监听地址, 如 ":2222"
+	Email  string `yaml:"email"`  //转发给此email的订阅方
 }
 
-// Websocket 与服务端websocket通信
+// ClientForward 订阅方(proxy侧)裸TCP端口转发目标。
+// 收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
+// Port 未在本地命中则拒绝(天然白名单)。
+type ClientForward struct {
+	Port   uint16 `yaml:"port"`   //对应服务端入口端口
+	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
+}
+
+// WsServer 服务端(tunnel侧)websocket配置。配了 server.listen 才起服务。
+type WsServer struct {
+	Listen  string          `yaml:"listen"`  //websocket 监听地址
+	User    string          `yaml:"user"`    //认证用户(校验接入的订阅方)
+	Pass    string          `yaml:"pass"`    //密码
+	AllowIP []string        `yaml:"allowIP"` //可接入的客户端IP(CIDR/单IP), 为空不限制; 按真实TCP来源判定
+	Forward []ServerForward `yaml:"forward"` //裸TCP端口转发入口(见 ServerForward)
+}
+
+// WsClient 客户端(proxy侧)websocket配置。未配 connect / user / email 则不发起连接。
+type WsClient struct {
+	Connect   string          `yaml:"connect"`   //连接的 ip:端口
+	Host      string          `yaml:"host"`      //connect 的域名(Host头)
+	User      string          `yaml:"user"`      //认证用户(发给服务端)
+	Pass      string          `yaml:"pass"`      //密码
+	Email     string          `yaml:"email"`     //Email用于定位用户, 不鉴权
+	Subscribe []Subscribe     `yaml:"subscribe"` //订阅头部信息
+	Forward   []ClientForward `yaml:"forward"`   //裸TCP端口转发目标(见 ClientForward)
+}
+
+// Websocket 会话订阅通信, 按角色分 server(服务端)/ client(客户端)两块配置。
 type Websocket struct {
-	Listen    string      `yaml:"listen"`    //websocket 监听
-	Connect   string      `yaml:"connect"`   //websocket 连接
-	Host      string      `yaml:"host"`      //connect的域名
-	User      string      `yaml:"user"`      //认证用户
-	Pass      string      `yaml:"pass"`      //密码
-	Email     string      `yaml:"email"`     //邮箱
-	Subscribe []Subscribe `yaml:"subscribe"` //订阅信息
-	Forward   []Forward   `yaml:"forward"`   //裸TCP端口转发规则(见 Forward)
+	Server WsServer `yaml:"server"` //服务端(tunnel侧)
+	Client WsClient `yaml:"client"` //客户端(proxy侧)
 }
 
 // Default 域名
@@ -156,6 +172,7 @@ type TcpCopy struct {
 //	blockQUIC                三平台
 //	excludeProcs             仅 windows(WinDivert 按进程名排除, 逃 OpenVPN 等同机隧道)
 //	inboundPorts             仅 darwin(pf reply-to 放行入站服务回包; linux 自动, windows 无需)
+//	excludeNics/device       仅 linux 且 mode=bypass(物理网卡绕行, 见 Tun 注释)
 type TunOS struct {
 	Name          string   `yaml:"name"`          //网卡名, linux默认anytun0, darwin默认utunN
 	Addr          string   `yaml:"addr"`          //接口地址CIDR, 如 10.9.0.1/24
@@ -167,6 +184,8 @@ type TunOS struct {
 	ExcludeProcs  []string `yaml:"excludeProcs"`  //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
 	InboundPorts  []int    `yaml:"inboundPorts"`  //仅darwin: 需pf放行回包的入站TCP端口(如22)
 	WindivertDir  string   `yaml:"windivertDir"`  //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
+	ExcludeNics   []string `yaml:"excludeNics"`   //仅linux且mode=bypass: 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
+	Device        string   `yaml:"device"`        //仅linux且mode=bypass: 手动指定用于绑定的物理网卡名, 为空则回退defaultRoute自动探测
 }
 
 // Tun 虚拟网卡全局代理。
@@ -176,6 +195,10 @@ type TunOS struct {
 //  2. 按系统分块(推荐): 在 tun.linux / tun.darwin / tun.windows 下各写该系统的字段,
 //     程序按当前系统取对应块整体覆盖扁平字段(见 applyOS)。这样每个系统块里只出现
 //     该系统用得到的字段, 避免"某字段在本平台无效"的困惑。
+//
+// mode=bypass(物理网卡绕行, 不建TUN网卡, 仅Linux) 也复用本块的 tun.linux.excludeNics /
+// tun.linux.device: 本机已有另一个 anyproxy TUN 进程时, 让本进程出向连接绑定物理网卡,
+// 逃出对方 TUN 的 0/1 路由, 避免 target=local 请求被再次劫持成死循环。与 tun 模式互斥。
 type Tun struct {
 	TunOS `yaml:",inline"` //扁平字段(三平台通用, 未配对应系统块时用)
 
@@ -202,24 +225,15 @@ func (t *Tun) applyOS(goos string) {
 	}
 }
 
-// Bypass 物理网卡绕行(不建TUN网卡)。仅 Linux 支持(macOS/Windows 已移除该模式)。
-// 用于本机已有另一个 anyproxy TUN 进程时：让本进程出向连接绑定物理网卡，
-// 逃出对方 TUN 的 0/1 路由，避免 target=local 请求被再次劫持成死循环。
-// 通过顶层 mode=bypass 启用，与 tun 模式互斥。配置 key 为 bypassLinux(仅Linux)。
-type Bypass struct {
-	ExcludeNics []string `yaml:"excludeNics"` //采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
-	Device      string   `yaml:"device"`      //手动指定用于绑定的物理网卡名, 为空则回退 defaultRoute 自动探测
-}
-
-// Geo geoip/geosite 数据集。按「类别 -> 文件」配置(每个类别一个文件), 配了才启用
-// hosts 的 geoip:/geosite: 匹配。文件按扩展名区分:
-//   - .dat : protobuf 数据集(一个文件多类别), 取与配置键同名的类别;
-//   - 其它 : 纯文本列表(整个文件即该类别)。geoip 每行 CIDR/IP; geosite 每行域名,
-//     支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀), # 注释,
-//     keyword/regexp 丢弃当国外。
-type Geo struct {
-	IP   map[string]string `yaml:"ip"`   //类别 -> geoip 文件(.dat 或文本)
-	Site map[string]string `yaml:"site"` //类别 -> geosite 文件(.dat 或文本)
+// GeoFile 一个 geoip/geosite 数据文件及要加载的类别(顶层 geoip:/geosite: 用)。
+// 配了才启用 hosts 的 geoip:/geosite: 匹配。文件按扩展名区分:
+//   - .dat : protobuf 数据集(一个文件多类别)。cats 列出要用的类别; cats 留空=加载文件内全部类别。
+//   - 其它 : 纯文本列表(整个文件即一个类别), cats 必须恰好给一个类别名。
+//     geoip 每行 CIDR/IP; geosite 每行域名, 支持 full:/domain:/keyword:/regexp: 前缀
+//     (无前缀默认 domain 后缀), # 注释, keyword/regexp 丢弃当国外。
+type GeoFile struct {
+	File string   `yaml:"file"` //数据文件路径(.dat 或文本列表)
+	Cats []string `yaml:"cats"` //要加载的类别; .dat 留空=全部类别; 文本列表须恰好一个
 }
 
 // LoopGuard 死循环兜底熔断器。
@@ -248,10 +262,10 @@ type Router struct {
 	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
 	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
 	Mode      string    `yaml:"mode"`      //运行模式: proxy=客户端(默认); tunnel=服务端tunneld; tun=建TUN网卡全局代理; bypass=仅绑物理网卡绕行; tcpcopy=端口转发。命令行 -mode 优先
-	Tun       Tun       `yaml:"tun"`       //TUN虚拟网卡全局代理(mode=tun时生效)
-	Bypass    Bypass    `yaml:"bypassLinux"` //物理网卡绕行(mode=bypass时生效, 仅Linux)
+	Tun       Tun       `yaml:"tun"`       //TUN虚拟网卡全局代理(mode=tun); mode=bypass 复用 tun.linux.excludeNics/device
 	LoopGuard LoopGuard `yaml:"loopGuard"` //死循环兜底熔断器
-	Geo       Geo       `yaml:"geo"`       //geoip/geosite 数据集(启用 hosts 的 geoip:/geosite: 匹配)
+	GeoIP     []GeoFile `yaml:"geoip"`     //geoip 数据文件列表(一个文件可多类别; cats 空=全部)
+	GeoSite   []GeoFile `yaml:"geosite"`   //geosite 数据文件列表
 	Default   Default   `yaml:"default"`   //默认配置
 	Hosts     []Host    `yaml:"hosts"`     //域名列表
 	AllowIP   []string  `yaml:"allowIP"`   //可以访问的客户端IP

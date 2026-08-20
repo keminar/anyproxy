@@ -82,6 +82,15 @@ func NewServer(addr *string) {
 
 // serveWs handles websocket requests from the peer.
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	// server.allowIP 白名单: 按真实 TCP 来源(r.RemoteAddr)判定, 不信可伪造的头部;
+	// 命中即拒绝, 连 upgrade 都不做。为空则不限制。
+	peerIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !serverIPAllowed(peerIP) {
+		log.Printf("serveWs deny ip %s, not in websocket.server.allowIP\n", peerIP)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("serveWs", err)
@@ -107,13 +116,13 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, []byte("xtime err, please check local time"))
 		return
 	}
-	if user.User != conf.RouterConfig.Websocket.User {
+	if user.User != conf.RouterConfig.Websocket.Server.User {
 		log.Printf("serveWs client email %s ignore, user is error\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("user err"))
 		return
 	}
 
-	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, conf.RouterConfig.Websocket.Pass, user.Xtime))
+	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, conf.RouterConfig.Websocket.Server.Pass, user.Xtime))
 	if err != nil || user.Token != token {
 		log.Printf("serveWs client email %s ignore, token is error\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
@@ -159,6 +168,37 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 }
 
 // getIPAdress 客户端IP
+// serverIPAllowed 判断接入 websocket 服务端的客户端 IP 是否在 server.allowIP 内。
+// 为空则不限制; loopback(本机自连) 始终放行; 支持 CIDR 与单 IP。
+func serverIPAllowed(ip string) bool {
+	allows := conf.RouterConfig.Websocket.Server.AllowIP
+	if len(allows) == 0 {
+		return true
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsLoopback() {
+		return true
+	}
+	for _, p := range allows {
+		if ipInCIDR(parsed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ipInCIDR 判断 IP 是否在 cidr 内(支持 ipv4/ipv6); cidr 非法时按单 IP 精确比较。
+func ipInCIDR(ip net.IP, cidr string) bool {
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return ip.String() == cidr
+	}
+	return ipNet.Contains(ip)
+}
+
 func getIPAdress(req *http.Request, head []string) string {
 	var ipAddress string
 	// X-Forwarded-For容易被伪造,最好不用

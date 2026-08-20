@@ -36,6 +36,8 @@ sudo -u anyproxy ./anyproxy -daemon
 kill -HUP <pid>
 ```
 
+> `listen: off`（纯 websocket 穿透，无主监听 fd 可交接）下 `SIGHUP` 也支持，但走的是「**先起新进程、老进程再退出**」：websocket 服务自带绑定重试，老进程退出释放端口后新进程接管，订阅端会自动重连（会有极短暂的连接中断，不是零感知交接）。
+
 ## 进程停止与清理
 
 - **普通模式**：`SIGINT`(Ctrl+C) / `SIGTERM` 关闭监听、drain 连接后退出。

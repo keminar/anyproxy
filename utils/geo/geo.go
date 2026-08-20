@@ -356,81 +356,128 @@ var (
 
 func isDat(path string) bool { return strings.HasSuffix(strings.ToLower(path), ".dat") }
 
-// LoadIP 把 path(.dat 取同名类别; 文本整文件)加载/合并到类别 cat 的 geoip。
-func LoadIP(cat, path string) error {
+// LoadIPFile 读取 path 一次, 把其中类别加载/合并进 geoip(同一文件只解析一次)。
+//   - .dat(protobuf, 一个文件多类别): cats 非空则按名取(缺失报错); cats 为空则加载文件内全部类别。
+//   - 文本列表(非 .dat): 整个文件即一个类别, cats 必须恰好给一个类别名。
+func LoadIPFile(path string, cats []string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	var rs []ipRange
+	toMerge := map[string][]ipRange{}
 	if isDat(path) {
-		cats, err := datIPCats(data)
+		all, err := datIPCats(data)
 		if err != nil {
 			return err
 		}
-		rs = cats[strings.ToLower(cat)]
-		if len(rs) == 0 {
-			return fmt.Errorf("%s 中无 geoip 类别 %q", path, cat)
+		if len(cats) == 0 { // 全部类别
+			for k, v := range all {
+				toMerge[k] = v
+			}
+			if len(toMerge) == 0 {
+				return fmt.Errorf("%s 中无任何 geoip 类别", path)
+			}
+		} else {
+			for _, c := range cats {
+				k := strings.ToLower(c)
+				rs := all[k]
+				if len(rs) == 0 {
+					return fmt.Errorf("%s 中无 geoip 类别 %q", path, c)
+				}
+				toMerge[k] = rs
+			}
 		}
 	} else {
-		rs = textIPRanges(data)
+		if len(cats) != 1 {
+			return fmt.Errorf("%s 为文本列表, 需恰好一个类别名(cats), 实际 %d 个", path, len(cats))
+		}
+		rs := textIPRanges(data)
 		if len(rs) == 0 {
 			return fmt.Errorf("%s 未解析出任何 CIDR/IP", path)
 		}
+		toMerge[strings.ToLower(cats[0])] = rs
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if ipM == nil {
 		ipM = &ipMatcher{cats: map[string][]ipRange{}}
 	}
-	k := strings.ToLower(cat)
-	ipM.cats[k] = append(ipM.cats[k], rs...)
-	s := ipM.cats[k]
-	sort.Slice(s, func(i, j int) bool { return s[i].start.Compare(s[j].start) < 0 })
+	for k, rs := range toMerge {
+		ipM.cats[k] = append(ipM.cats[k], rs...)
+		s := ipM.cats[k]
+		sort.Slice(s, func(i, j int) bool { return s[i].start.Compare(s[j].start) < 0 })
+	}
 	return nil
 }
 
-// LoadSite 把 path(.dat 取同名类别; 文本整文件)加载/合并到类别 cat 的 geosite。
-func LoadSite(cat, path string) error {
+// LoadSiteFile 读取 path 一次, 把其中类别加载/合并进 geosite(同一文件只解析一次)。
+//   - .dat: cats 非空按名取(缺失报错); cats 为空则加载文件内全部类别。
+//   - 文本列表: 整个文件即一个类别, cats 必须恰好给一个类别名。
+func LoadSiteFile(path string, cats []string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	var c *siteCat
+	toMerge := map[string]*siteCat{}
 	if isDat(path) {
-		cats, err := datSiteCats(data)
+		all, err := datSiteCats(data)
 		if err != nil {
 			return err
 		}
-		c = cats[strings.ToLower(cat)]
-		if c == nil || (len(c.suffix) == 0 && len(c.full) == 0) {
-			return fmt.Errorf("%s 中无 geosite 类别 %q", path, cat)
+		if len(cats) == 0 { // 全部类别
+			for k, v := range all {
+				toMerge[k] = v
+			}
+			if len(toMerge) == 0 {
+				return fmt.Errorf("%s 中无任何 geosite 类别", path)
+			}
+		} else {
+			for _, c := range cats {
+				k := strings.ToLower(c)
+				sc := all[k]
+				if sc == nil || (len(sc.suffix) == 0 && len(sc.full) == 0) {
+					return fmt.Errorf("%s 中无 geosite 类别 %q", path, c)
+				}
+				toMerge[k] = sc
+			}
 		}
 	} else {
-		c = textSiteCat(data)
-		if len(c.suffix) == 0 && len(c.full) == 0 {
+		if len(cats) != 1 {
+			return fmt.Errorf("%s 为文本列表, 需恰好一个类别名(cats), 实际 %d 个", path, len(cats))
+		}
+		sc := textSiteCat(data)
+		if len(sc.suffix) == 0 && len(sc.full) == 0 {
 			return fmt.Errorf("%s 未解析出任何域名", path)
 		}
+		toMerge[strings.ToLower(cats[0])] = sc
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if siteM == nil {
 		siteM = &siteMatcher{cats: map[string]*siteCat{}}
 	}
-	k := strings.ToLower(cat)
-	dst := siteM.cats[k]
-	if dst == nil {
-		dst = newSiteCat()
-		siteM.cats[k] = dst
-	}
-	for s := range c.suffix {
-		dst.suffix[s] = struct{}{}
-	}
-	for s := range c.full {
-		dst.full[s] = struct{}{}
+	for k, sc := range toMerge {
+		dst := siteM.cats[k]
+		if dst == nil {
+			dst = newSiteCat()
+			siteM.cats[k] = dst
+		}
+		for s := range sc.suffix {
+			dst.suffix[s] = struct{}{}
+		}
+		for s := range sc.full {
+			dst.full[s] = struct{}{}
+		}
 	}
 	return nil
 }
+
+// LoadIP 把 path(.dat 取同名类别; 文本整文件)加载/合并到类别 cat 的 geoip。
+// 单类别便捷封装, 等价 LoadIPFile(path, []string{cat})。
+func LoadIP(cat, path string) error { return LoadIPFile(path, []string{cat}) }
+
+// LoadSite 同 LoadIP, 作用于 geosite。
+func LoadSite(cat, path string) error { return LoadSiteFile(path, []string{cat}) }
 
 // HasIP / HasSite 报告对应数据是否已加载。
 func HasIP() bool   { mu.RLock(); defer mu.RUnlock(); return ipM != nil && len(ipM.cats) > 0 }

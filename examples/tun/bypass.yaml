@@ -7,10 +7,12 @@ default:
   match: equal
 
 # 同机双实例逃逸: 仅 Linux 支持(macOS/Windows 已移除 bypass 模式)
+# bypass 复用 tun.linux 下的 excludeNics/device 配置
 mode: bypass
-bypassLinux:
-  # 自动探测不到物理网卡时(启动日志 bypass-only: device="")手动指定
-  device: eth0
+tun:
+  linux:
+    # 自动探测不到物理网卡时(启动日志 bypass-only: device="")手动指定
+    device: eth0
 
 # 域名
 hosts:

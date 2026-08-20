@@ -10,6 +10,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -175,19 +176,19 @@ func main() {
 	}
 
 	// websocket 服务端
-	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig.Websocket.Listen, "")
+	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig.Websocket.Server.Listen, "")
 	if gWebsocketListen != "" {
 		gWebsocketListen = tools.FillPort(gWebsocketListen)
 		go nat.NewServer(&gWebsocketListen)
 		// 服务端裸TCP端口转发入口(内网穿透)
-		go nat.StartForward(conf.RouterConfig.Websocket.Forward)
+		go nat.StartForward(conf.RouterConfig.Websocket.Server.Forward)
 	}
 	// websocket 客户端
-	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Connect, "")
+	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Client.Connect, "")
 	if gWebsocketConn != "" {
 		gWebsocketConn = tools.FillPort(gWebsocketConn)
 		// 订阅方裸TCP转发目标映射(端口->写死target)
-		nat.SetLocalForward(conf.RouterConfig.Websocket.Forward)
+		nat.SetLocalForward(conf.RouterConfig.Websocket.Client.Forward)
 		go nat.ConnectServer(&gWebsocketConn)
 	}
 
@@ -230,9 +231,10 @@ func main() {
 	case "bypass":
 		// 仅 Linux 支持: 绑定物理网卡绕行, 逃出同机另一个 TUN 进程的 0/1 路由。
 		// macOS/Windows 已移除该模式(见 tun/bypass_other.go)。
+		// bypass 复用 tun.linux 块的 excludeNics/device(applyOS 已把 tun.linux 压平进 Tun)
 		if err := tun.InitBypassOnly(tun.BypassConfig{
-			ExcludeNics: conf.RouterConfig.Bypass.ExcludeNics,
-			Device:      conf.RouterConfig.Bypass.Device,
+			ExcludeNics: conf.RouterConfig.Tun.ExcludeNics,
+			Device:      conf.RouterConfig.Tun.Device,
 		}); err != nil {
 			log.Printf("mode=bypass unsupported: %v; fallback proxy", err)
 			mode = "proxy"
@@ -276,6 +278,12 @@ func main() {
 			log.Println("warning: 代理监听已关闭(listen off), 但未配置 websocket/tun, 进程将空转")
 		}
 		log.Println("代理监听已关闭(listen off), 仅运行后台服务(websocket/tun 等)")
+		if grace.IsChild() {
+			// listen 由端口改成了 off 后 SIGHUP 重启到这里: 旧进程还在
+			// grace.Server 里等子进程 bind 成功后发来的 SIGTERM 才退出, 但这里走不到
+			// ListenAndServe() 里那段握手, 需要自己补上, 否则旧进程会一直占着端口不退出。
+			notifyOldProcessExit()
+		}
 		waitForShutdown(tunCancel, &tunWG)
 		return
 	}
@@ -294,15 +302,71 @@ func isListenOff(s string) bool {
 	return false
 }
 
-// waitForShutdown 在关闭代理监听时替代 grace server 的阻塞: 等 SIGINT/SIGTERM,
-// 收到后取消 TUN context 并等待设备清理再退出。
-// 注意: 此路径不支持 grace server 的 SIGHUP 平滑重启(后台服务进程重启即可)。
+// waitForShutdown 在关闭代理监听时替代 grace server 的阻塞并处理信号:
+//   - SIGINT/SIGTERM: 取消 TUN context、等设备清理后退出;
+//   - SIGHUP: 平滑重启。listen off 时没有主监听 fd 可继承交接, 故以「先起新进程、
+//     再退旧进程」实现——websocket 服务自带绑定重试(见 nat.NewServer), 旧进程退出
+//     释放端口后新进程即接管, 订阅端会自动重连。
 func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
 	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	cancel()
-	wg.Wait()
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		switch <-sig {
+		case syscall.SIGHUP:
+			log.Println(os.Getpid(), "Received SIGHUP (listen off): 启动新进程接管, 退出当前进程")
+			if err := restartSelf(); err != nil {
+				log.Println("restart err:", err, "(保持当前进程运行)")
+				continue // 起新进程失败就不退旧进程, 避免服务中断
+			}
+			cancel()
+			wg.Wait()
+			return
+		default: // SIGINT / SIGTERM
+			cancel()
+			wg.Wait()
+			return
+		}
+	}
+}
+
+// restartSelf 用相同参数启动一个新进程(去掉 grace 内部的 -graceful 标志)。
+// 与 grace.fork 不同, 这里不继承任何监听 fd(listen off 无主监听); 依赖 websocket
+// 服务的绑定重试来接管旧进程释放的端口。
+func restartSelf() error {
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a == "-graceful" {
+			continue
+		}
+		args = append(args, a)
+	}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd.Start()
+}
+
+// notifyOldProcessExit 在「端口 -> listen off」的 SIGHUP 重启里补上 grace.Server
+// 原本在 ListenAndServe() 里做的握手: 关掉从旧进程继承来但用不上的监听 fd(固定为
+// fd 3, 本项目只有一个 grace 监听, 单监听场景 grace 也是这样假设 offset=0 的),
+// 再给旧进程发 SIGTERM 让它退出、释放端口。不这样做旧进程会一直占着端口不退出。
+func notifyOldProcessExit() {
+	if f := os.NewFile(3, ""); f != nil {
+		f.Close()
+	}
+	ppid := os.Getppid()
+	if ppid <= 1 { // 安全检查, 避免误杀 init/被收养的孤儿进程
+		return
+	}
+	process, err := os.FindProcess(ppid)
+	if err != nil {
+		log.Println(os.Getpid(), "find old process err:", err)
+		return
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		log.Println(os.Getpid(), "notify old process err:", err)
+	}
 }
 
 // registerTUNCleanup 注册 SIGHUP/SIGINT/SIGTERM 的 PreSignal 钩子，
@@ -382,20 +446,23 @@ func withProxyBypassIPs(base []string) []string {
 // loadGeo 按配置加载 geoip/geosite 数据集(配了才加载)。加载失败只记日志、不中断启动;
 // 若 hosts 用了 geoip:/geosite: 但对应数据没配/没加载, 该规则永不命中, 给出提示。
 func loadGeo() {
-	for cat, path := range conf.RouterConfig.Geo.IP {
-		if path = strings.TrimSpace(path); path == "" {
+	// 顶层 geoip / geosite: 一个文件可多类别(cats 空=.dat 全部类别), 同文件只解析一次
+	for _, gf := range conf.RouterConfig.GeoIP {
+		path := strings.TrimSpace(gf.File)
+		if path == "" {
 			continue
 		}
-		if err := geo.LoadIP(cat, path); err != nil {
-			log.Printf("geo: 加载 geoip:%s <- %s 失败: %v", cat, path, err)
+		if err := geo.LoadIPFile(path, gf.Cats); err != nil {
+			log.Printf("geo: 加载 geoip <- %s 失败: %v", path, err)
 		}
 	}
-	for cat, path := range conf.RouterConfig.Geo.Site {
-		if path = strings.TrimSpace(path); path == "" {
+	for _, gf := range conf.RouterConfig.GeoSite {
+		path := strings.TrimSpace(gf.File)
+		if path == "" {
 			continue
 		}
-		if err := geo.LoadSite(cat, path); err != nil {
-			log.Printf("geo: 加载 geosite:%s <- %s 失败: %v", cat, path, err)
+		if err := geo.LoadSiteFile(path, gf.Cats); err != nil {
+			log.Printf("geo: 加载 geosite <- %s 失败: %v", path, err)
 		}
 	}
 	if ic, sc := geo.Stat(); ic > 0 || sc > 0 {

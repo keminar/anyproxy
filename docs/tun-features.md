@@ -22,8 +22,14 @@ QUIC(UDP443) 拦截、UDP 转发行为，以及 `target`/`proxy` 的优先级。
 
 启动（三平台一致，需管理员/root）：
 ```
+# 命令行开启（配 IP 默认 10.9.0.1/24）
 sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
-# 或 conf/router.yaml 配 mode: tun
+
+# 网卡名和接口地址通过配置 tun.name / tun.addr 指定
+sudo ./anyproxy -mode tun
+
+# 或在 conf/router.yaml 中配置 tun.enable: true 后直接启动
+sudo ./anyproxy
 ```
 
 ## 2. 自动路由 autoRoute（默认开启）
@@ -42,6 +48,20 @@ sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
 > 默认 true 意味着开 `mode=tun` 就会接管默认路由。上级代理必须直连、不能走 TUN，否则环路断网。
 > **以 IP 指定的上级代理会自动加入直连例外**（`tun.bypassIPs`，autoRoute 加 `/32` 直连路由）；
 > 只有**域名指定**的上级代理需手动把其 IP 填进 `tun.bypassIPs`。
+
+`autoRoute: false` 时启动只打印命令，需按提示手动接管（需管理员/root）：
+
+```
+# Linux: 接管默认路由前，务必先给上级代理出口 IP 加直连例外，否则会环路断网
+sudo ip route add <上级代理IP>/32 via <原网关> dev <原网卡>
+sudo ip route add 0.0.0.0/1 dev anytun0
+sudo ip route add 128.0.0.0/1 dev anytun0
+
+# Windows: 同样先给上级代理 IP 加直连例外
+route add <上级代理IP> mask 255.255.255.255 <原网关>
+route add 0.0.0.0 mask 128.0.0.0 10.9.0.1
+route add 128.0.0.0 mask 128.0.0.0 10.9.0.1
+```
 
 ## 3. QUIC(UDP 443) 拦截 blockQUIC（默认开启）
 

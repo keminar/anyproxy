@@ -2,6 +2,7 @@
 
 ## 入门与总览
 
+- [quickstart.md](quickstart.md) — 快速开始：本机启动、tunneld、转发上级代理、平滑重启、Docker。
 - [overview.md](overview.md) — 概述与架构：能做什么、数据链路、一条连接的处理流程、运行模式总览、进程模型。
 - [usage.md](usage.md) — 客户端接入与使用：同端口自动识别 HTTP+SOCKS5 代理、透明代理、全局(TUN/WinDivert)三种接入方式，及怎么把客户端指过来。
 
@@ -9,11 +10,12 @@
 
 - [cli.md](cli.md) — 命令行参数详解，及与配置文件的优先级。
 - [configuration.md](configuration.md) — `router.yaml` 完整配置参考，按配置段逐项说明。
+- [hot-reload.md](hot-reload.md) — `watcher: true` 配置热加载：哪些配置改动即时生效、哪些需重启或 SIGHUP，及其判定机制。
 - [config-examples.md](config-examples.md) — 按场景的完整配置示例：全局代理、按域名分流、Windows+OpenVPN、macOS 入站 SSH、iptables、tunneld、tcpcopy、内网穿透、同机双实例。
 - [routing.md](routing.md) — 路由与代理规则：域名匹配、`target`/`proxy`/`dns`/`ip`/`port`/`allowIP`、多代理 `local`/`deny`、优先级。
 - [proxy-decision.md](proxy-decision.md) — 代理决策逻辑详解：`target`(local/remote/auto/deny) × `proxy`(多代理 + local/deny 后缀) 的完整判定顺序、host/全局回退链、热加载、不可用缓存。
 - [modes.md](modes.md) — 运行模式：proxy / tunnel(tunneld) / tun / bypass(仅Linux) / tcpcopy 端口转发 / websocket 内网穿透。
-- [websocket.md](websocket.md) — websocket 内网穿透详解：服务端/订阅端角色、两条转发路径（HTTP 头订阅、裸 TCP 端口转发/SSH 打洞）、`forward`/`subscribe` 字段、鉴权握手、白名单与常见坑。
+- [websocket.md](websocket.md) — websocket 内网穿透详解：服务端/订阅端角色、两条转发路径（HTTP 头订阅、裸 TCP 端口转发）、`forward`/`subscribe` 字段、鉴权握手、白名单与常见坑。
 - [deployment.md](deployment.md) — 部署运维：编译、后台、平滑重启、iptables 全局代理、Docker、Windows 注意事项、性能调优。
 - [build.md](build.md) — 构建与交叉编译：`build.sh`/`build.bat` 各目标、路由器 MIPS(大端/小端、softfloat)、Windows 的 WinDivert、手动交叉编译(ARM 等)。
 

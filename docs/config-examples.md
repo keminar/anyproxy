@@ -217,25 +217,27 @@ tcpcopy:
 ```yaml
 # 服务端（公网）
 websocket:
-  listen: :3002
-  user: someuser
-  pass: somepass
+  server:
+    listen: :3002
+    user: someuser
+    pass: somepass
 ```
 
 ```yaml
 # 订阅端（内网另一台/另一进程）
 websocket:
-  connect: <服务端IP>:3002
-  host: ws.example.com
-  user: someuser
-  pass: somepass              # 与服务端一致（算 token，必填）
-  email: user@example.com     # 定位订阅端
-  subscribe:
-    - key: X-Env              # 公网请求头命中 key=val 才转发给本端
-      val: test
+  client:
+    connect: <服务端IP>:3002
+    host: ws.example.com
+    user: someuser
+    pass: somepass              # 与服务端一致（算 token，必填）
+    email: user@example.com     # 定位订阅端
+    subscribe:
+      - key: X-Env              # 公网请求头命中 key=val 才转发给本端
+        val: test
 ```
 
-### 8.2 裸 TCP 端口转发（SSH 打洞 / 暴露内网 TCP 服务）
+### 8.2 裸 TCP 端口转发（内网穿透 / 暴露内网 TCP 服务）
 
 服务端起裸 TCP 监听端口，按 `email` 桥接到订阅端，订阅端 dial 写死的内网目标。
 
@@ -243,27 +245,29 @@ websocket:
 # 服务端（公网）
 listen: off                   # 纯穿透不需要本机代理监听，可关掉（不写则默认 :3000）
 websocket:
-  listen: :3002
-  user: someuser
-  pass: somepass
-  forward:
-    - listen: :2222           # 公网入口端口（裸TCP监听）
-      email: home@example.com # 转发给此 email 的订阅端
+  server:
+    listen: :3002
+    user: someuser
+    pass: somepass
+    forward:
+      - listen: :2222         # 公网入口端口（裸TCP监听）
+        email: home@example.com # 转发给此 email 的订阅端
 ```
 
 ```yaml
 # 订阅端（内网，email 与服务端 forward.email 对应）
 listen: off                   # 订阅端做纯裸TCP转发时也不需要本机代理监听
 websocket:
-  connect: <服务端IP>:3002
-  host: ws.example.com
-  user: someuser
-  pass: somepass
-  email: home@example.com
-  forward:
-    - port: 2222              # 对应服务端入口端口
-      target: 127.0.0.1:22    # 收到该端口的连接就 dial 内网真实目标（本机 sshd）
-  # 纯裸TCP转发无需 subscribe：email 命中 forward 规则即允许空订阅
+  client:
+    connect: <服务端IP>:3002
+    host: ws.example.com
+    user: someuser
+    pass: somepass
+    email: home@example.com
+    forward:
+      - port: 2222            # 对应服务端入口端口
+        target: 127.0.0.1:22  # 收到该端口的连接就 dial 内网真实目标（本机 sshd）
+    # 纯裸TCP转发无需 subscribe：email 命中 forward 规则即允许空订阅
 ```
 
 用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出的 `target`，未列端口拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email` 区分。
@@ -291,8 +295,9 @@ default:
 # B: conf/b.yaml —— 出口，绑物理网卡逃出 A 的 TUN（仅 Linux）
 listen: :11000
 mode: bypass
-bypassLinux:
-  device: eth0                        # 留空则自动探测默认路由网卡
+tun:
+  linux:
+    device: eth0                      # 留空则自动探测默认路由网卡
 loopGuard:
   minActive: 1000                     # 兜底熔断器，默认已开
   ratio: 80

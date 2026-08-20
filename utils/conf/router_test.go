@@ -130,22 +130,25 @@ tun:
 	}
 }
 
-// TestBypassConfig 确认 bypass 配置能正确解析(仅 Linux 支持, key=bypassLinux, 扁平字段)。
+// TestBypassConfig 确认 bypass 配置能正确解析(仅 Linux 支持, 写在 tun.linux 下,
+// 经 applyOS("linux") 压平进 Tun 扁平字段供消费者读取)。
 func TestBypassConfig(t *testing.T) {
 	y := `
-bypassLinux:
-  excludeNics:
-    - anytun0
-  device: eth0
+tun:
+  linux:
+    excludeNics:
+      - anytun0
+    device: eth0
 `
 	var r Router
 	if err := yaml.Unmarshal([]byte(y), &r); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(r.Bypass.ExcludeNics) != 1 || r.Bypass.ExcludeNics[0] != "anytun0" {
-		t.Fatalf("excludeNics lost: %v", r.Bypass.ExcludeNics)
+	r.Tun.applyOS("linux")
+	if len(r.Tun.ExcludeNics) != 1 || r.Tun.ExcludeNics[0] != "anytun0" {
+		t.Fatalf("excludeNics lost: %v", r.Tun.ExcludeNics)
 	}
-	if r.Bypass.Device != "eth0" {
-		t.Fatalf("device lost: %q", r.Bypass.Device)
+	if r.Tun.Device != "eth0" {
+		t.Fatalf("device lost: %q", r.Tun.Device)
 	}
 }
