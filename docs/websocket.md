@@ -1,6 +1,6 @@
 # websocket 内网穿透
 
-anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主动回连公网侧**，之后公网侧把流量经 websocket 送进内网。适合内网在 NAT 后、没有公网 IP 的场景（远程访问家里/公司的机器、SSH 打洞、暴露内网服务）。
+anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主动回连公网侧**，之后公网侧把流量经 websocket 送进内网。适合内网在 NAT 后、没有公网 IP 的场景（远程访问家里/公司的机器、暴露内网服务）。
 
 代码在 [nat/](../nat/) 包；配置在 `router.yaml` 的 `websocket` 段（[utils/conf/router.go](../utils/conf/router.go)）。
 
@@ -37,7 +37,7 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
 
 ### 路径 B：裸 TCP 端口转发（`ConnTCP`，新路径）
 
-在服务端开一个**裸 TCP 入口端口**，整条 TCP 连接经 ws 桥接到订阅端，订阅端 dial 一个**写死的内网目标**。就是反向隧道 / 打洞。
+在服务端开一个**裸 TCP 入口端口**，整条 TCP 连接经 ws 桥接到订阅端，订阅端 dial 一个**写死的内网目标**。就是反向隧道，即内网穿透。
 
 ```
 任意 client ──TCP──▶ 服务端 :2222 (裸TCP监听)
@@ -48,7 +48,7 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
 
 - 服务端：`websocket.server.forward[].listen` 每条起一个裸 TCP 监听（`nat/forward.go` 的 `StartForward`/`listenForward`），每个进来的连接按该规则的 `email` 找订阅端（`GetClientByEmail`）桥接。
 - 订阅端：`websocket.client.forward[].port → target` 建映射（`SetLocalForward`）。收到服务端「入口端口 Port」来的连接时，dial 对应 `target`；**Port 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。
-- 适合：SSH 打洞、暴露内网 Web/DB 等任意 TCP 服务。
+- 适合：暴露内网 Web/DB 等任意 TCP 服务（如远程 SSH、内网 Web）。
 
 ## 配置字段
 
@@ -114,4 +114,4 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
 
 ## 示例
 
-见 [config-examples.md](config-examples.md) 第 8 节（8.1 HTTP 头订阅、8.2 裸 TCP / SSH 打洞）。
+见 [config-examples.md](config-examples.md) 第 8 节（8.1 HTTP 头订阅、8.2 裸 TCP 内网穿透）。

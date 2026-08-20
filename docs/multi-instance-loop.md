@@ -106,7 +106,7 @@ loopGuard 在 Mac 依然有效。）
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
-| `mode` | `proxy` | `proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux）；同机 A 用 tun、B 用 bypass |
+| `mode` | `proxy` | `proxy` / `tunnel` / `tun` / `bypass`（bypass 仅 Linux）/ `tcpcopy`；同机 A 用 tun、B 用 bypass |
 | `tun.linux.device` | 空(自动探测) | 手动指定物理网卡名（仅 Linux, mode=bypass） |
 | `tun.linux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（仅 Linux, mode=bypass） |
 | `loopGuard.minActive` | 1000 | 在传连接闸门；`<0` 关闭 |

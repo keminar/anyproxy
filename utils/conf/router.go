@@ -101,7 +101,7 @@ type Subscribe struct {
 	Val string `yaml:"val"` //Header的val
 }
 
-// ServerForward 服务端(tunnel侧)裸TCP端口转发入口(内网穿透/打洞)。
+// ServerForward 服务端(tunnel侧)裸TCP端口转发入口(内网穿透)。
 // 在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
 type ServerForward struct {
 	Listen string `yaml:"listen"` //裸TCP监听地址, 如 ":2222"

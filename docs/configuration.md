@@ -15,7 +15,7 @@
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
-| `mode` | string | `proxy` | 运行模式（五者互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
+| `mode` | string | `proxy` | 运行模式（互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
 
 ## log
 
@@ -59,7 +59,7 @@ tcpcopy:
 
 ## geo（geoip/geosite 数据集）
 
-顶层 `geoip:` / `geosite:` 各是一个**文件列表**，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，一个文件多类别，`cats` 留空=全部）或纯文本列表（整文件即一个类别，`cats` 须恰好一个）。详见 [geo.md](geo.md)。
+顶层 `geoip:` / `geosite:` 各是一个**文件列表**，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，一个文件多类别，`cats` 留空=全部）或纯文本列表（整文件即一个类别，`cats` 须恰好一个）。**同一类别可由多个文件合并取并集**（如 `geosite.dat` 的 `cn` + `direct-list.txt` 的 `cn`，`geosite:cn` 命中两者内容之和；重复去重、按列表顺序合并、类名大小写不敏感）。详见 [geo.md](geo.md)。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|

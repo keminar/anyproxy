@@ -67,6 +67,11 @@ sudo iptables -t nat -D OUTPUT 2           # 删 OUTPUT 第 2 条
 
 > Linux iptables 透明代理是 Linux 专属功能，Windows/macOS 版精简掉了这部分，改用 TUN 实现全局代理。
 
+客户端代理设置：
+
+- 浏览器 [Chrome 设置](https://zhidao.baidu.com/question/204679423955769445.html)
+- 手机端 [苹果](https://jingyan.baidu.com/article/84b4f565add95060f7da3271.html) [安卓](https://jingyan.baidu.com/article/219f4bf7ff97e6de442d38c8.html)
+
 ## Docker
 
 ```bash

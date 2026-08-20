@@ -1,6 +1,6 @@
 # 运行模式
 
-anyproxy 的运行模式由单个 `-mode`（或配置 `mode`）决定，**五个取值互斥**：`proxy`（默认）/ `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`。
+anyproxy 的运行模式由单个 `-mode`（或配置 `mode`）决定，**取值互斥**：`proxy`（默认）/ `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`。
 
 `websocket`（内网穿透）**不是 `-mode` 取值**，而是独立开关——由 `websocket.server.listen`/`websocket.client.connect`（或 `-ws-listen`/`-ws-connect`）开启，在 mode 判定之前启动，**与任一 mode 同进程共存**（通常搭配默认的 proxy）。
 
@@ -78,7 +78,7 @@ tcpcopy:
 
 ## websocket（内网穿透）
 
-通过 websocket 长连接把流量从公网带回内网，内网侧主动回连。分服务端与订阅端两个角色，可与 proxy 模式同进程共存。有两条路径：**HTTP 头订阅转发**（限非 CONNECT 的 HTTP 请求）和**裸 TCP 端口转发**（SSH 打洞 / 暴露任意内网 TCP 服务）。原理与字段详解见 [websocket.md](websocket.md)。
+通过 websocket 长连接把流量从公网带回内网，内网侧主动回连。分服务端与订阅端两个角色，可与 proxy 模式同进程共存。有两条路径：**HTTP 头订阅转发**（限非 CONNECT 的 HTTP 请求）和**裸 TCP 端口转发**（内网穿透 / 暴露任意内网 TCP 服务）。原理与字段详解见 [websocket.md](websocket.md)。
 
 - **服务端**：配 `websocket.server.{listen,user,pass}`（或 `-ws-listen`）。接收公网侧流量。裸 TCP 转发再配 `server.forward[].{listen,email}`。
 - **订阅端**：配 `websocket.client.{connect,user,pass,email}`（或 `-ws-connect`）。未配 `connect`/`user`/`email` 则不发起连接。裸 TCP 转发再配 `client.forward[].{port,target}`。

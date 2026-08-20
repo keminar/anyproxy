@@ -107,6 +107,9 @@ loopGuard:
 #   其它 : 纯文本列表(整个文件即一个类别), cats 须恰好给一个类别名。geoip 每行 CIDR/IP;
 #          geosite 每行域名, 支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀),
 #          # 注释, keyword/regexp 当国外丢弃。如域名列表 direct-list.txt。
+# 同一类别可由多个文件合并取并集(重复项去重): 如上面 geosite.dat 的 cn 与 direct-list.txt(整文件=cn)
+# 都加载后, hosts 里 geosite:cn 命中两者内容之和。按列表顺序逐项合并, 类名大小写不敏感(cn=CN);
+# 某项加载失败(如 .dat 无该类别)只打日志提示、不中断启动, 该项内容不生效。
 # .dat 可先用命令离线提取所需类别成小文件随发布携带(运行时只读小文件):
 #   anyproxy -geo-extract -geo-in geosite.dat -geo-cat cn,google -geo-out geosite-cn.dat
 #geoip:
