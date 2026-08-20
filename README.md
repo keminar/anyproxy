@@ -158,6 +158,10 @@ make all
 
 完整目录见 [docs/README.md](docs/README.md)。
 
+## License
+
+[MIT](LICENSE) © [keminar](https://github.com/keminar)
+
 ## 感谢
 
 <https://github.com/ryanchapman/go-any-proxy.git>
