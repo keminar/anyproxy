@@ -99,7 +99,7 @@ func bbrAvailable() (avail string, ok bool) {
 
 // Check 读取当前系统设置并对照建议值打印报告(只读)。返回未达标项数。
 func Check() int {
-	fmt.Println("== anyproxy 系统调优检查 (Linux) ==")
+	fmt.Println("== anyproxy system tuning check (Linux) ==")
 
 	warn := 0
 	// 文件句柄
@@ -109,36 +109,38 @@ func Check() int {
 			fmt.Printf("  [OK]   ulimit -n (RLIMIT_NOFILE) = %d\n", rl.Cur)
 		} else {
 			warn++
-			fmt.Printf("  [WARN] ulimit -n (RLIMIT_NOFILE) = %d (建议 >= %d)\n", rl.Cur, recommendedNofile)
+			fmt.Printf("  [WARN] ulimit -n (RLIMIT_NOFILE) = %d (recommended >= %d)\n", rl.Cur, recommendedNofile)
 		}
 	}
 	// BBR 是否可用
 	if avail, ok := bbrAvailable(); !ok {
 		warn++
-		fmt.Printf("  [WARN] 内核未提供 bbr (当前可用: %s); 需 kernel>=4.9 或加载 tcp_bbr\n", avail)
+		fmt.Printf("  [WARN] bbr not available in kernel (available: %s); needs kernel>=4.9 or load tcp_bbr\n", avail)
 	}
 
 	for _, t := range tunables {
 		cur, ok := readSysctl(t.key)
 		if !ok {
-			fmt.Printf("  [SKIP] %s (内核无此项)\n", t.key)
+			fmt.Printf("  [SKIP] %s (not present in this kernel)\n", t.key)
 			continue
 		}
 		switch {
+		case t.kind == info && cur == t.want:
+			fmt.Printf("  [OK]   %s = %s\n", t.key, cur)
 		case t.kind == info:
-			fmt.Printf("  [INFO] %s = %s (建议 %s)\n", t.key, cur, t.want)
+			fmt.Printf("  [INFO] %s = %s (recommended %s)\n", t.key, cur, t.want)
 		case t.ok(cur):
 			fmt.Printf("  [OK]   %s = %s\n", t.key, cur)
 		default:
 			warn++
-			fmt.Printf("  [WARN] %s = %s (建议 %s)\n", t.key, cur, t.want)
+			fmt.Printf("  [WARN] %s = %s (recommended %s)\n", t.key, cur, t.want)
 		}
 	}
 
 	if warn == 0 {
-		fmt.Println("全部达标。")
+		fmt.Println("All checks passed.")
 	} else {
-		fmt.Printf("有 %d 项未达标; 用 sudo anyproxy -check-fix 一键应用。\n", warn)
+		fmt.Printf("%d item(s) below recommendation; run sudo anyproxy -check-fix to apply.\n", warn)
 	}
 	return warn
 }
@@ -147,7 +149,7 @@ func Check() int {
 // 文件句柄(ulimit)不自动改(环境相关), 仅给提示。
 func Apply() {
 	if os.Geteuid() != 0 {
-		fmt.Println("应用系统调优需 root 权限, 请用: sudo anyproxy -check-fix")
+		fmt.Println("applying system tuning needs root, run: sudo anyproxy -check-fix")
 		return
 	}
 
@@ -158,24 +160,24 @@ func Apply() {
 	}
 	path := "/etc/sysctl.d/99-anyproxy.conf"
 	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
-		fmt.Printf("写入 %s 失败: %v\n", path, err)
+		fmt.Printf("failed to write %s: %v\n", path, err)
 		return
 	}
-	fmt.Printf("已写入 %s\n", path)
+	fmt.Printf("wrote %s\n", path)
 
 	out, err := exec.Command("sysctl", "-p", path).CombinedOutput()
 	if s := strings.TrimSpace(string(out)); s != "" {
 		fmt.Println(s)
 	}
 	if err != nil {
-		fmt.Printf("sysctl -p 失败: %v (部分项可能内核不支持)\n", err)
+		fmt.Printf("sysctl -p failed: %v (some items may be unsupported by this kernel)\n", err)
 	} else {
-		fmt.Println("sysctl 已应用。")
+		fmt.Println("sysctl applied.")
 	}
 
 	if avail, ok := bbrAvailable(); !ok {
-		fmt.Printf("警告: 内核未提供 bbr (当前可用: %s), tcp_congestion_control=bbr 不会生效(需升级内核/加载 tcp_bbr)。\n", avail)
+		fmt.Printf("warning: bbr not available in kernel (available: %s); tcp_congestion_control=bbr will not take effect (needs kernel upgrade or load tcp_bbr)\n", avail)
 	}
-	fmt.Println("提示: 文件句柄(ulimit -n)需另配 —— 交互式登录改 /etc/security/limits.conf;")
-	fmt.Println("      systemd 服务在 unit 里设 LimitNOFILE=65535。")
+	fmt.Println("note: file handle limit (ulimit -n) needs separate config -- interactive login: edit /etc/security/limits.conf;")
+	fmt.Println("      systemd service: set LimitNOFILE=65535 in the unit.")
 }
