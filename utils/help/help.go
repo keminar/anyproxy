@@ -27,7 +27,6 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "  -c=FILEPATH      Config file path, default is router.yaml\n")
 	fmt.Fprintf(os.Stdout, "Optional\n")
 	fmt.Fprintf(os.Stdout, "  -ws-listen       Websocket address and port to listen on\n")
-	fmt.Fprintf(os.Stdout, "  -ws-connect      Websocket Address and port to connect\n")
 	fmt.Fprintf(os.Stdout, "  -daemon          Run as a Unix daemon\n")
 	fmt.Fprintf(os.Stdout, "  -mode            Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN) | tcpcopy (forward every connection to tcpcopy.ip:port)\n")
 	fmt.Fprintf(os.Stdout, "  -debug           Debug mode (0, 1, 2, 3)\n")

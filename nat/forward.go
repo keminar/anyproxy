@@ -17,28 +17,19 @@ import (
 // 靠 Message.Type(ConnTCP/ConnHTTP) 区分, 复合键不会撞号。
 var forwardInc = autoinc.New(1, 1)
 
-// localForward 订阅方本地映射: 服务端入口端口 -> 写死的 dial 目标。
-// 只读(启动时一次性构建), 无需加锁。
-var localForward = map[uint16]string{}
-
-// SetLocalForward 订阅方启动时构建 端口->target 映射(见 conf.ClientForward)。
-func SetLocalForward(rules []conf.ClientForward) {
+// buildForward 订阅方按自己这条连接的配置构建 端口->target 映射(见 conf.ClientForward)。
+// 每条 server 连接各自持有一份(见 nat/handler.go 的 wsClientConn.forward), 互不干扰。
+func buildForward(rules []conf.ClientForward) map[uint16]string {
 	m := map[uint16]string{}
 	for _, r := range rules {
 		if r.Port != 0 && r.Target != "" {
 			m[r.Port] = r.Target
 		}
 	}
-	localForward = m
 	if len(m) > 0 {
 		log.Printf("nat local forward map: %v", m)
 	}
-}
-
-// lookupForward 查订阅方本地固定 target。
-func lookupForward(port uint16) (string, bool) {
-	t, ok := localForward[port]
-	return t, ok
+	return m
 }
 
 // isForwardEmail 该email是否为某条服务端forward规则的目标。命中则允许其空订阅
@@ -63,13 +54,13 @@ func dialForCreate(c *Client, msg *Message) (*net.TCPConn, error) {
 	var conn net.Conn
 	var err error
 	if msg.Type == ConnTCP {
-		target, ok := lookupForward(msg.Port)
+		target, ok := c.forward[msg.Port]
 		if !ok {
 			return nil, fmt.Errorf("no forward target for entry port %d", msg.Port)
 		}
 		conn, err = bypassDial("tcp", target, 5*time.Second)
 		if err == nil {
-			log.Println(trace.ID(msg.ID), fmt.Sprintf("local tcp forward connecting to %s (entry port %d)", target, msg.Port))
+			log.Println(c.tag, trace.ID(msg.ID), fmt.Sprintf("local tcp forward connecting to %s (entry port %d)", target, msg.Port))
 		}
 	} else {
 		conn = dialProxy() //创建本地与本地代理端口之间的连接

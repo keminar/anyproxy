@@ -75,7 +75,7 @@ func (h *BridgeHub) run() {
 
 // Register 注册。typ 与 ID 组成复合键(ConnHTTP/ConnTCP)。
 func (h *BridgeHub) Register(c *Client, ID uint, typ uint8, conn *net.TCPConn) *Bridge {
-	b := &Bridge{bridgeHub: h, reqID: ID, typ: typ, conn: conn, send: make(chan []byte, 100), client: c}
+	b := &Bridge{bridgeHub: h, reqID: ID, typ: typ, conn: conn, send: make(chan []byte, 1000), client: c}
 	h.register <- b
 	return b
 }

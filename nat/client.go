@@ -29,6 +29,12 @@ type Client struct {
 
 	// 订阅特征
 	Subscribe []SubscribeMessage
+
+	// 以下三个仅订阅方(client)侧使用, 服务端(nat/conn.go 的 serveWs 构造 Client 时)不赋值,
+	// 保持零值即可(服务端连接不会走 localReadPump/dialForCreate)
+	bridge  *BridgeHub        // 替代原全局 LocalBridge, 每条 server 连接一份, 避免多连接间请求ID撞车
+	forward map[uint16]string // 替代原全局 localForward, 每条 server 连接一份, 避免入口端口撞车
+	tag     string            // 日志前缀, 区分多条并发的 server 连接
 }
 
 // 写数据到websocket的对端
@@ -106,18 +112,18 @@ func (c *Client) localReadPump() {
 	for {
 		_, p, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Println("nat_local_debug_read_error", err.Error())
+			log.Println(c.tag, "nat_local_debug_read_error", err.Error())
 			return
 		}
 
 		msg, err := decodeMessage(p)
 		if err != nil {
-			log.Println("nat_local_debug_decode_error", err.Error())
+			log.Println(c.tag, "nat_local_debug_decode_error", err.Error())
 			return
 		}
 		if config.DebugLevel >= config.LevelDebugBody {
 			md5Val, _ := md5Byte(msg.Body)
-			log.Println("nat_local_read_from_websocket_message", msg.ID, msg.Method, md5Val)
+			log.Println(c.tag, "nat_local_read_from_websocket_message", msg.ID, msg.Method, md5Val)
 		}
 
 		if msg.Method == METHOD_CREATE {
@@ -125,17 +131,17 @@ func (c *Client) localReadPump() {
 			// 查不到 target 或 dial 失败: 不建 bridge, 回 CLOSE 让服务端拆链。
 			proxConn, derr := dialForCreate(c, msg)
 			if derr != nil {
-				log.Println(trace.ID(msg.ID), "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
+				log.Println(c.tag, trace.ID(msg.ID), "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
 				closeMsg := &Message{ID: msg.ID, Type: msg.Type, Method: METHOD_CLOSE}
 				c.hub.broadcast <- &CMessage{client: c, message: closeMsg}
 				continue
 			}
-			b := LocalBridge.Register(c, msg.ID, msg.Type, proxConn)
+			b := c.bridge.Register(c, msg.ID, msg.Type, proxConn)
 			go func() {
 				written, err := b.WritePump()
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug websocket->local", err)
 				if config.DebugLevel >= config.LevelDebug {
-					log.Println(trace.ID(msg.ID), "nat debug response size", written)
+					log.Println(c.tag, trace.ID(msg.ID), "nat debug response size", written)
 				}
 			}()
 
@@ -143,17 +149,17 @@ func (c *Client) localReadPump() {
 			go func() {
 				defer b.Unregister()
 				if msg.Type == ConnTCP {
-					defer log.Println(trace.ID(msg.ID), "local tcp forward closed")
+					defer log.Println(c.tag, trace.ID(msg.ID), "local tcp forward closed")
 				}
 				readSize, err := b.CopyBuffer(b, proxConn, "local")
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug local->websocket", err)
 				if config.DebugLevel >= config.LevelDebug {
-					log.Println(trace.ID(msg.ID), "nat debug request body size", readSize)
+					log.Println(c.tag, trace.ID(msg.ID), "nat debug request body size", readSize)
 				}
 				b.CloseWrite()
 			}()
 		} else {
-			LocalBridge.broadcast <- msg
+			c.bridge.broadcast <- msg
 		}
 	}
 }

@@ -116,13 +116,18 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, []byte("xtime err, please check local time"))
 		return
 	}
-	if user.User != conf.RouterConfig.Websocket.Server.User {
-		log.Printf("serveWs client email %s ignore, user is error\n", user.Email)
+	su, found := conf.RouterConfig.Websocket.Server.LookupUser(user.User)
+	if !found || su.Disable {
+		if found {
+			log.Printf("serveWs client email %s ignore, user %s is disabled\n", user.Email, user.User)
+		} else {
+			log.Printf("serveWs client email %s ignore, user is error\n", user.Email)
+		}
 		conn.WriteMessage(websocket.TextMessage, []byte("user err"))
 		return
 	}
 
-	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, conf.RouterConfig.Websocket.Server.Pass, user.Xtime))
+	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, su.Pass, user.Xtime))
 	if err != nil || user.Token != token {
 		log.Printf("serveWs client email %s ignore, token is error\n", user.Email)
 		conn.WriteMessage(websocket.TextMessage, []byte("token err"))

@@ -37,7 +37,6 @@ var (
 	gProxyServerSpec string
 	gConfigFile      string
 	gWebsocketListen string
-	gWebsocketConn   string
 	gMode            string
 	gHelp            bool
 	gDebug           int
@@ -57,7 +56,6 @@ func init() {
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
-	flag.StringVar(&gWebsocketConn, "ws-connect", "", "Websocket Address and port to connect")
 	flag.StringVar(&gMode, "mode", "", "Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN) | tcpcopy (forward every connection to tcpcopy.ip:port)")
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2, 3)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
@@ -183,13 +181,11 @@ func main() {
 		// 服务端裸TCP端口转发入口(内网穿透)
 		go nat.StartForward(conf.RouterConfig.Websocket.Server.Forward)
 	}
-	// websocket 客户端
-	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Client.Connect, "")
-	if gWebsocketConn != "" {
-		gWebsocketConn = tools.FillPort(gWebsocketConn)
-		// 订阅方裸TCP转发目标映射(端口->写死target)
-		nat.SetLocalForward(conf.RouterConfig.Websocket.Client.Forward)
-		go nat.ConnectServer(&gWebsocketConn)
+	// websocket 客户端: 可同时订阅多台 server(见 conf.Websocket.ClientList)
+	clientList := conf.RouterConfig.Websocket.ClientList()
+	for i, cfg := range clientList {
+		cfg.Connect = tools.FillPort(cfg.Connect)
+		go nat.ConnectServer(cfg, i)
 	}
 
 	// TUN 虚拟网卡全局代理
@@ -274,7 +270,7 @@ func main() {
 	if listenOff {
 		// 关闭了代理监听: 没有 grace server 阻塞主流程, 改为等退出信号,
 		// 收到后取消 TUN context 并等设备清理。websocket 后台 goroutine 随进程退出。
-		if gWebsocketListen == "" && gWebsocketConn == "" && mode != "tun" && mode != "bypass" {
+		if gWebsocketListen == "" && len(clientList) == 0 && mode != "tun" && mode != "bypass" {
 			log.Println("warning: 代理监听已关闭(listen off), 但未配置 websocket/tun, 进程将空转")
 		}
 		log.Println("代理监听已关闭(listen off), 仅运行后台服务(websocket/tun 等)")

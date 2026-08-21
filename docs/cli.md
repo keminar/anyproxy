@@ -9,7 +9,6 @@
 | `-c FILEPATH` | 配置文件路径，默认 `conf/router.yaml` | — | — |
 | `-mode` | 运行模式（互斥）：`proxy`（默认）/ `tunnel`(tunneld 服务端) / `tun`(TUN 全局代理) / `bypass`(物理网卡绕行, 仅 Linux) / `tcpcopy`(端口转发) | `mode` | 命令行 > 配置 |
 | `-ws-listen` | websocket 监听地址端口（内网穿透服务端） | `websocket.server.listen` | 命令行 > 配置 |
-| `-ws-connect` | websocket 连接地址端口（内网穿透客户端） | `websocket.client.connect` | 命令行 > 配置 |
 | `-daemon` | 后台守护进程运行（fork 子进程，父进程退出） | — | — |
 | `-debug` | 调试级别 `0/1/2/3`，越大日志越详细 | — | — |
 | `-pprof` | pprof 端口，留空关闭；浏览器访问 `http://<port>/debug/pprof/` | — | — |

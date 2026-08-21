@@ -208,7 +208,7 @@ tcpcopy:
 
 服务端（公网侧）监听，订阅端（内网侧）**主动回连**。可与代理同进程。有两条转发路径，原理与字段详解见 [websocket.md](websocket.md)。
 
-> `user`/`pass` **两端必须一致**（`pass` 参与 token 校验，订阅端漏配会鉴权失败）；`email` 用于辨别/定位订阅端，本身不参与 token。
+> 服务端 `users[].user`/`pass` 要与订阅端 `client.user`/`pass` **对应一致**（`pass` 参与 token 校验，订阅端漏配会鉴权失败）；`email` 用于辨别/定位订阅端，本身不参与 token。
 
 ### 8.1 HTTP 头订阅转发（按请求头把公网请求送进内网）
 
@@ -219,8 +219,9 @@ tcpcopy:
 websocket:
   server:
     listen: :3002
-    user: someuser
-    pass: somepass
+    users:
+      - user: someuser
+        pass: somepass
 ```
 
 ```yaml
@@ -247,8 +248,9 @@ listen: off                   # 纯穿透不需要本机代理监听，可关掉
 websocket:
   server:
     listen: :3002
-    user: someuser
-    pass: somepass
+    users:
+      - user: someuser
+        pass: somepass
     forward:
       - listen: :2222         # 公网入口端口（裸TCP监听）
         email: home@example.com # 转发给此 email 的订阅端
@@ -273,6 +275,61 @@ websocket:
 用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出的 `target`，未列端口拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email` 区分。
 
 > `listen: off`（或 `-l off`）关闭本机代理监听，只跑 websocket 后台，适合纯穿透。**注意**：只有「裸 TCP 转发」能这么用；websocket 的「HTTP 头订阅」路径（8.1）依赖本机代理端口，关掉后不生效。
+
+### 8.3 订阅端同时连多台服务端
+
+订阅端一个进程可同时回连多台 server，各自独立账号/转发表，用复数的 `clients` 数组（每项就是一个完整的 8.1/8.2 里 `websocket.client` 块）：
+
+```yaml
+# 订阅端：同时穿透两台不同的服务端，入口端口可以重复(各自独立转发表, 不会冲突)
+listen: off
+websocket:
+  clients:
+    - connect: <服务端A IP>:3002
+      host: ws-a.example.com   # 可选, 走 TLS 网关时用
+      user: someuser
+      pass: somepass
+      email: home@example.com
+      forward:
+        - port: 2222
+          target: 127.0.0.1:22
+    - connect: <服务端B IP>:3002
+      user: anotheruser
+      pass: anotherpass
+      email: office@example.com
+      subscribe:                # 可选, 该台如果还要走 HTTP 头订阅路径(8.1)就配, 纯裸TCP转发(本例)不需要
+        - key: X-Env
+          val: office
+      forward:
+        - port: 2222
+          target: 192.168.1.10:3389
+```
+
+`clients` 每一项都是完整独立的 `websocket.client` 块，`host`/`subscribe`/`forward` 等字段和单块写法（8.1/8.2）用法完全一样，按各自订阅端的需要配，不用每项都写全。不配 `clients` 时行为不变（仍读单个 `client` 块），字段/常见坑详见 [websocket.md](websocket.md#同时订阅多台-server)。
+
+### 8.4 服务端多用户鉴权 + 停用某个账号
+
+`websocket.server.users` 本身就是数组，一台服务端可以接受多个订阅端、各用各的账号；给某条加 `disable: true` 就能不删配置、不改密码地临时停掉某个订阅端：
+
+```yaml
+# 服务端（公网）：接受两个订阅端，账号各不相同；office 临时停用
+websocket:
+  server:
+    listen: :3002
+    users:
+      - user: home
+        pass: homepass
+      - user: office
+        pass: officepass
+        disable: true          # 临时停用, 该账号的订阅端连不上, 服务端日志会打 user office is disabled
+    forward:
+      - listen: :2222
+        email: home@example.com
+      - listen: :2223
+        email: office@example.com
+```
+
+配合 8.3 的写法，两个订阅端各自在自己的 `websocket.client.user`/`pass`（8.1/8.2 的写法）或 `clients[].user`/`pass`（8.3 的写法）里填对应账号即可；不影响 `email`（`email` 仍是独立字段，用于服务端 `forward.email` 定位订阅端，不参与鉴权）。`disable` 热加载生效，字段详见 [websocket.md](websocket.md#多用户鉴权)。
 
 ---
 

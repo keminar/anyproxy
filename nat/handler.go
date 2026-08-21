@@ -21,35 +21,68 @@ import (
 	"github.com/keminar/anyproxy/config"
 )
 
-// ClientHub 客户端的ws信息
-var ClientHub *Hub
+// wsClientConn 订阅方单条 server 连接的私有状态。一个进程可同时订阅多台 server,
+// 每台各自一份, 替代原来假设"只连一台"的包级全局单例(ClientHub/LocalBridge/tempDelay)。
+type wsClientConn struct {
+	cfg       conf.WsClient
+	liveIndex int // 在 conf.RouterConfig.Websocket.ClientList() 里的下标, 用于热加载重新取值, 见 liveAuthCfg
+	hub       *Hub
+	bridge    *BridgeHub
+	forward   map[uint16]string
+	tempDelay time.Duration
+	tag       string // 日志前缀, 用 cfg.Connect 区分是哪条连接
+}
 
-// LocalBridge 客户端的ws与http关系
-var LocalBridge *BridgeHub
+// liveAuthCfg 每次重连前重新取一遍 user/pass/host/email/subscribe, 保留热加载语义
+// (这几项在 docs/hot-reload.md 里承诺"下次重连时生效"); connect/forward 是启动时定的,
+// 不随热加载变, 取自 w.cfg。用 liveIndex 定位到配置热加载后的同一条目, 而不是重新用地址
+// 字符串匹配(地址会被 FillPort/去掉 ws:// 前缀改写, 直接比较不可靠)。
+func (w *wsClientConn) liveAuthCfg() conf.WsClient {
+	cfg := w.cfg
+	list := conf.RouterConfig.Websocket.ClientList()
+	if w.liveIndex < 0 || w.liveIndex >= len(list) {
+		return cfg // 条目在热加载后消失(如数组变短), 用启动时的快照兜底
+	}
+	live := list[w.liveIndex]
+	cfg.User, cfg.Pass, cfg.Host, cfg.Email, cfg.Subscribe = live.User, live.Pass, live.Host, live.Email, live.Subscribe
+	return cfg
+}
 
-var tempDelay time.Duration
+// logf 带 [tag] 前缀打日志, 多条 server 连接并发时便于按前缀区分。
+func (w *wsClientConn) logf(format string, args ...interface{}) {
+	log.Printf("[%s] %s", w.tag, fmt.Sprintf(format, args...))
+}
 
-// ConnectServer 连接到websocket服务
-func ConnectServer(addr *string) {
-	if conf.RouterConfig.Websocket.Client.User == "" || conf.RouterConfig.Websocket.Client.Email == "" {
-		log.Println("ws user or email empty, donot connect")
+// ConnectServer 连接到websocket服务。cfg 为这一台 server 的独立配置(见
+// conf.Websocket.ClientList), 可对多台 server 并发调用本函数。liveIndex 是 cfg 在
+// ClientList() 里的下标, 热加载时用于重新取 user/pass/host/email/subscribe(见 liveAuthCfg)。
+func ConnectServer(cfg conf.WsClient, liveIndex int) {
+	if cfg.User == "" || cfg.Email == "" {
+		log.Println("ws user or email empty, donot connect", cfg.Connect)
 		return
 	}
+	addrs := strings.Split(cfg.Connect, "://")
+	if addrs[0] == "ws" && len(addrs) == 2 {
+		cfg.Connect = addrs[1]
+	}
+
+	w := &wsClientConn{
+		cfg:       cfg,
+		liveIndex: liveIndex,
+		hub:       newHub(),
+		bridge:    newBridgeHub(),
+		forward:   buildForward(cfg.Forward),
+		tag:       cfg.Connect,
+	}
+	go w.hub.run()
+	go w.bridge.run()
+
 	interruptClose = false
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	ClientHub = newHub()
-	go ClientHub.run()
-	LocalBridge = newBridgeHub()
-	go LocalBridge.run()
-
-	addrs := strings.Split(*addr, "://")
-	if addrs[0] == "ws" && len(addrs) == 2 {
-		*addr = addrs[1]
-	}
 	for {
-		connect(addr, interrupt)
+		w.connect(interrupt)
 		if interruptClose {
 			break
 		}
@@ -69,14 +102,17 @@ func dialProxy() net.Conn {
 	return proxyConn
 }
 
-// 认证连接并交换数据
-func connect(addr *string, interrupt chan os.Signal) {
-	u := url.URL{Scheme: "ws", Host: *addr, Path: "/ws"}
-	log.Printf("connecting to %s", u.String())
+// connect 认证连接并交换数据。方法接收者 w 持有这条 server 连接的私有状态
+// (hub/bridge/forward/tempDelay), 与其它并发的 wsClientConn 互不干扰。
+func (w *wsClientConn) connect(interrupt chan os.Signal) {
+	live := w.liveAuthCfg()
+
+	u := url.URL{Scheme: "ws", Host: w.cfg.Connect, Path: "/ws"}
+	w.logf("connecting to %s", u.String())
 
 	h := http.Header{}
-	if conf.RouterConfig.Websocket.Client.Host != "" {
-		h.Add("Host", conf.RouterConfig.Websocket.Client.Host)
+	if live.Host != "" {
+		h.Add("Host", live.Host)
 	}
 	wsDialer := &websocket.Dialer{
 		NetDial:          func(network, addr string) (net.Conn, error) { return bypassDial(network, addr, 30*time.Second) },
@@ -84,38 +120,38 @@ func connect(addr *string, interrupt chan os.Signal) {
 	}
 	c, _, err := wsDialer.Dial(u.String(), h)
 	if err != nil {
-		log.Println("ws connect err:", err)
+		w.logf("ws connect err: %v", err)
 		time.Sleep(time.Duration(3) * time.Second)
 		return
 	}
 	defer c.Close()
 
-	w := newClientHandler(c)
-	err = w.auth(conf.RouterConfig.Websocket.Client.User, conf.RouterConfig.Websocket.Client.Pass, conf.RouterConfig.Websocket.Client.Email)
+	ch := newClientHandler(c)
+	err = ch.auth(live.User, live.Pass, live.Email)
 	if err != nil {
-		log.Println("auth:", err)
+		w.logf("auth: %v", err)
 
-		if tempDelay == 0 {
-			tempDelay = 3 * time.Second
+		if w.tempDelay == 0 {
+			w.tempDelay = 3 * time.Second
 		} else {
-			tempDelay *= 2
+			w.tempDelay *= 2
 		}
-		if max := 1 * time.Minute; tempDelay > max {
-			tempDelay = max
+		if max := 1 * time.Minute; w.tempDelay > max {
+			w.tempDelay = max
 		}
-		time.Sleep(tempDelay)
+		time.Sleep(w.tempDelay)
 		return
 	}
-	tempDelay = 0
-	err = w.subscribe(conf.RouterConfig.Websocket.Client.Subscribe)
+	w.tempDelay = 0
+	err = ch.subscribe(live.Subscribe)
 	if err != nil {
-		log.Println("subscribe:", err)
+		w.logf("subscribe: %v", err)
 		time.Sleep(time.Duration(3) * time.Second)
 		return
 	}
-	log.Println("websocket auth and subscribe ok")
+	w.logf("websocket auth and subscribe ok")
 
-	client := &Client{hub: ClientHub, conn: c, send: make(chan *Message, SEND_CHAN_LEN)}
+	client := &Client{hub: w.hub, conn: c, send: make(chan *Message, SEND_CHAN_LEN), bridge: w.bridge, forward: w.forward, tag: w.tag}
 	client.hub.register <- client
 	defer func() {
 		client.hub.unregister <- client
@@ -133,14 +169,14 @@ func connect(addr *string, interrupt chan os.Signal) {
 		case <-done:
 			return
 		case <-interrupt:
-			log.Println("interrupt")
+			w.logf("interrupt")
 			interruptClose = true
 
 			// Cleanly close the connection by sending a close message and then
 			// waiting (with timeout) for the server to close the connection.
 			err := c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 			if err != nil {
-				log.Println("write close:", err)
+				w.logf("write close: %v", err)
 				return
 			}
 			select {

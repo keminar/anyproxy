@@ -116,13 +116,33 @@ type ClientForward struct {
 	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
 }
 
+// ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
+type ServerUser struct {
+	User    string `yaml:"user"`    //认证用户
+	Pass    string `yaml:"pass"`    //密码
+	Disable bool   `yaml:"disable"` //true 时该账号停用: 鉴权直接拒绝, 不用删配置/改密码就能临时停掉某个订阅端
+}
+
 // WsServer 服务端(tunnel侧)websocket配置。配了 server.listen 才起服务。
 type WsServer struct {
 	Listen  string          `yaml:"listen"`  //websocket 监听地址
-	User    string          `yaml:"user"`    //认证用户(校验接入的订阅方)
-	Pass    string          `yaml:"pass"`    //密码
+	Users   []ServerUser    `yaml:"users"`   //鉴权账号数组, 每条 {user, pass, disable}, 不同订阅方各用各的账号
 	AllowIP []string        `yaml:"allowIP"` //可接入的客户端IP(CIDR/单IP), 为空不限制; 按真实TCP来源判定
 	Forward []ServerForward `yaml:"forward"` //裸TCP端口转发入口(见 ServerForward)
+}
+
+// LookupUser 按订阅方发来的 user 查 users 里的账号。found=false 表示查无此人;
+// found=true 时调用方还要看返回的 ServerUser.Disable 决定是否放行(停用的账号查得到但不该通过鉴权)。
+func (s WsServer) LookupUser(user string) (ServerUser, bool) {
+	if user == "" {
+		return ServerUser{}, false
+	}
+	for _, u := range s.Users {
+		if u.User == user {
+			return u, true
+		}
+	}
+	return ServerUser{}, false
 }
 
 // WsClient 客户端(proxy侧)websocket配置。未配 connect / user / email 则不发起连接。
@@ -138,8 +158,21 @@ type WsClient struct {
 
 // Websocket 会话订阅通信, 按角色分 server(服务端)/ client(客户端)两块配置。
 type Websocket struct {
-	Server WsServer `yaml:"server"` //服务端(tunnel侧)
-	Client WsClient `yaml:"client"` //客户端(proxy侧)
+	Server  WsServer   `yaml:"server"`  //服务端(tunnel侧)
+	Client  WsClient   `yaml:"client"`  //客户端(proxy侧), 兼容单 server 的旧写法
+	Clients []WsClient `yaml:"clients"` //客户端(proxy侧), 同时订阅多台 server 时每台一个独立配置块
+}
+
+// ClientList 汇总要连接的 server 列表。配了 clients 用 clients; 否则退化为
+// Client 包装成的单元素列表(Client.Connect 为空则不发起连接, 返回 nil)。
+func (w Websocket) ClientList() []WsClient {
+	if len(w.Clients) > 0 {
+		return w.Clients
+	}
+	if w.Client.Connect == "" {
+		return nil
+	}
+	return []WsClient{w.Client}
 }
 
 // Default 域名

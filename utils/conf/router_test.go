@@ -152,3 +152,67 @@ tun:
 		t.Fatalf("device lost: %q", r.Tun.Device)
 	}
 }
+
+// TestWebsocketClientList 确认 Websocket.ClientList() 的合并/回退逻辑:
+// 配了 clients 就用 clients(忽略旧 client); 只配旧 client 时回退为单元素列表;
+// 都不配(或旧 client.connect 为空)时返回空, 不应凭空多出一条要连接的 server。
+func TestWebsocketClientList(t *testing.T) {
+	cA := WsClient{Connect: "a:1", Email: "a"}
+	cB := WsClient{Connect: "b:2", Email: "b"}
+	legacy := WsClient{Connect: "legacy:3", Email: "legacy"}
+
+	// 只配 clients
+	w := Websocket{Clients: []WsClient{cA, cB}}
+	got := w.ClientList()
+	if len(got) != 2 || got[0].Connect != "a:1" || got[1].Connect != "b:2" {
+		t.Fatalf("clients-only: %+v", got)
+	}
+
+	// 只配旧 client
+	w = Websocket{Client: legacy}
+	got = w.ClientList()
+	if len(got) != 1 || got[0].Connect != "legacy:3" {
+		t.Fatalf("legacy-only: %+v", got)
+	}
+
+	// 两者都配: 以 clients 为准
+	w = Websocket{Client: legacy, Clients: []WsClient{cA}}
+	got = w.ClientList()
+	if len(got) != 1 || got[0].Connect != "a:1" {
+		t.Fatalf("clients should win over legacy client: %+v", got)
+	}
+
+	// 都不配
+	w = Websocket{}
+	got = w.ClientList()
+	if len(got) != 0 {
+		t.Fatalf("expected empty list, got: %+v", got)
+	}
+}
+
+// TestWsServerLookupUser 确认 WsServer.LookupUser 的多用户查找与停用逻辑:
+// disable=true 的账号能查到(found=true)但调用方应据此拒绝; 都不匹配或 user 为空返回 found=false。
+func TestWsServerLookupUser(t *testing.T) {
+	s := WsServer{
+		Users: []ServerUser{
+			{User: "alice", Pass: "alicepass"},
+			{User: "bob", Pass: "bobpass", Disable: true},
+		},
+	}
+
+	if u, ok := s.LookupUser("alice"); !ok || u.Pass != "alicepass" || u.Disable {
+		t.Fatalf("alice: %+v ok=%v", u, ok)
+	}
+	// 停用的账号: 查得到, 但 Disable=true, 由调用方拒绝
+	if u, ok := s.LookupUser("bob"); !ok || u.Pass != "bobpass" || !u.Disable {
+		t.Fatalf("bob: %+v ok=%v", u, ok)
+	}
+	// 未配置的 user
+	if _, ok := s.LookupUser("nobody"); ok {
+		t.Fatalf("nobody should not match")
+	}
+	// 空 user
+	if _, ok := s.LookupUser(""); ok {
+		t.Fatalf("empty user should not match")
+	}
+}

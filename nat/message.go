@@ -11,8 +11,9 @@ const METHOD_CREATE = "create"
 // METHOD_CLOSE 关闭连接命令
 const METHOD_CLOSE = "close"
 
-// 连接类型: 与 ID 组成复合键, 使 http 与 tcp 两路的 id 即便同号也不会在
-// ServerBridge/LocalBridge 中互相串扰(两路各自的采番器都可从 1 起步)。
+// 连接类型: 与 ID 组成复合键, 使 http 与 tcp 两路的 id 即便同号也不会在同一个
+// BridgeHub(服务端全局 ServerBridge, 或订阅方每条 server 连接各自的 bridge)中
+// 互相串扰(两路各自的采番器都可从 1 起步)。
 const (
 	ConnHTTP uint8 = 0 //现有 HTTP 转发路径
 	ConnTCP  uint8 = 1 //裸 TCP 端口转发路径

@@ -188,17 +188,18 @@ hosts:
      # - 172.17.0.12
 
 #websocket 配置, 按角色分 server(服务端) / client(客户端) 两块
-#  server: 需配 listen, user, pass 才起服务
-#  client: 未配 connect / user / email 则不发起连接
+#  server: 需配 listen, users 才起服务
+#  client: 未配 connect / user / email 则不发起连接; 要同时订阅多台 server 用 clients(数组)代替, 见下方注释
 websocket:
   # ===== 服务端(tunnel侧) =====
   server:
     # 监听端口
     listen:
-    # 认证用户(校验接入的订阅方)
-    user:
-    # 密码
-    pass:
+    # 鉴权账号数组(校验接入的订阅方), 每条 user/pass/disable; disable: true 可临时停用某个账号
+    users:
+      # - user:
+      #   pass:
+      #   disable: false
     # 可接入的客户端IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
     allowIP:
     #  - 172.17.0.0/16
@@ -226,3 +227,20 @@ websocket:
     forward:
       # - port: 2222
       #   target: 127.0.0.1:22
+  # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
+  # 字段同上面 client 块(connect/host/user/pass/email/subscribe/forward)
+  # clients:
+  #   - connect:
+  #     user:
+  #     pass:
+  #     email:
+  #     forward:
+  #       - port: 2222
+  #         target: 127.0.0.1:22
+  #   - connect:
+  #     user:
+  #     pass:
+  #     email:
+  #     forward:
+  #       - port: 2222
+  #         target: 192.168.1.10:3389
