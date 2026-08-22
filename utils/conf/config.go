@@ -4,13 +4,23 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// RouterConfig 配置
-var RouterConfig *Router
+var routerConfig atomic.Pointer[Router]
+
+// RouterConfig 返回当前生效的配置。并发安全，热加载时可能被 notify 协程替换。
+func RouterConfig() *Router {
+	return routerConfig.Load()
+}
+
+// SetRouterConfig 原子替换当前生效的配置。
+func SetRouterConfig(r *Router) {
+	routerConfig.Store(r)
+}
 
 // LoadAllConfig 加载顺序要求，不写成init
 func LoadAllConfig(filePath string) {
@@ -29,7 +39,7 @@ func LoadAllConfig(filePath string) {
 		log.Println(fmt.Sprintf("config file %s load err:%s", "router", err.Error()))
 		return
 	}
-	RouterConfig = &conf
+	SetRouterConfig(&conf)
 	if conf.Watcher {
 		go notify(filePath)
 	}
@@ -57,7 +67,7 @@ func notify(filePath string) {
 			log.Println(fmt.Sprintf("config file %s load err:%s", "router", err.Error()))
 			return
 		}
-		RouterConfig = &conf
+		SetRouterConfig(&conf)
 		log.Println("config file reloaded:", filePath)
 	}
 

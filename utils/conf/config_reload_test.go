@@ -22,9 +22,9 @@ func TestNotifyReloadOnAtomicSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	RouterConfig = &conf
-	if RouterConfig.Listen != "3000" {
-		t.Fatalf("initial listen = %q, want 3000", RouterConfig.Listen)
+	SetRouterConfig(&conf)
+	if RouterConfig().Listen != "3000" {
+		t.Fatalf("initial listen = %q, want 3000", RouterConfig().Listen)
 	}
 
 	go notify(cfgPath)
@@ -43,10 +43,10 @@ func TestNotifyReloadOnAtomicSave(t *testing.T) {
 	// 防抖 200ms + 事件延迟, 轮询等待重载生效
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if RouterConfig.Listen == "4000" {
+		if RouterConfig().Listen == "4000" {
 			return // 重载成功
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("config not reloaded after atomic save: listen = %q, want 4000", RouterConfig.Listen)
+	t.Fatalf("config not reloaded after atomic save: listen = %q, want 4000", RouterConfig().Listen)
 }

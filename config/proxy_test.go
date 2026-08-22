@@ -35,8 +35,8 @@ func TestSetProxyServer(t *testing.T) {
 
 	t.Run("suffix stripped", func(t *testing.T) {
 		reset()
-		SetProxyServer("socks5://192.168.122.11:10808, socks5://192.168.122.1:10808 local")
-		if ProxyScheme != "socks5" || ProxyServer != "192.168.122.11" || ProxyPort != 10808 {
+		SetProxyServer("socks5://192.168.1.11:10808, socks5://192.168.1.1:10808 local")
+		if ProxyScheme != "socks5" || ProxyServer != "192.168.1.11" || ProxyPort != 10808 {
 			t.Fatalf("got %s://%s:%d", ProxyScheme, ProxyServer, ProxyPort)
 		}
 	})

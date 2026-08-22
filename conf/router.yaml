@@ -1,9 +1,9 @@
-# 监听端口IP, 优先级低于启动传参
+# 监听端口IP, 优先级低于启动传参，不监听设置为off
 listen:
 # 日志目录
 log:
   dir: ./logs/
-# 监听配置文件变化  
+# 监听配置文件变化
 watcher: true
 # anyproxy 和 tunnel通信密钥, 必须16位长度
 token: anyproxyproxyany
@@ -21,7 +21,7 @@ firstLine:
   #注意：域名和端口中间的冒号改为点，如localhost:5173配置为localhost.5173
   custom:
     localhost.5173: off
-    
+
 # tcpcopy 端口转发的目标地址(配合 mode: tcpcopy)。开启后 hosts 域名代理不再生效,
 # allowIP 仍有效。ip/port 为转发目标。(enable 为旧写法, 等价 mode: tcpcopy, 仍兼容)
 tcpcopy:
@@ -32,9 +32,11 @@ tcpcopy:
 #   proxy   : 客户端/代理模式(默认, 留空即此)
 #   tunnel  : 服务端 tunneld, 带 token 验证, 只处理 anyproxy 请求
 #   tun     : 建TUN虚拟网卡做全局代理(需管理员/root; windows 用 WinDivert, 需 WinDivert.dll/.sys)
-#   bypass  : 不建网卡, 仅把出向连接绑定物理网卡绕行
+#   bypass  : 不建网卡, 仅把出向连接绑定物理网卡绕行(仅 Linux 支持)
 #             用于本机已有另一个 anyproxy TUN 进程时, 让本进程 target=local 的请求
 #             逃出对方 TUN 的 0/1 路由, 避免被再次劫持成死循环
+#             macOS/Windows 已移除该模式: macOS 入站回包用 tun.inboundPorts,
+#             Windows 用 WinDivert 的 tun.windows.excludeProcs/bypassIPs
 #   tcpcopy : 端口转发, 每个连接改投到上面 tcpcopy.ip:port
 mode:
 
@@ -55,6 +57,11 @@ tun:
 #    bypassIPs:               # 这些目标直连(自动加 /32 路由), 填上级代理/VPN服务器IP
 #      - 192.168.199.1
 #    # 说明: 外网SSH等入站服务的回包由内置源策略路由(ip rule)自动放行, 无需配置。
+#    # 下面两项仅 mode=bypass(物理网卡绕行, 不建TUN网卡)时生效, 与 mode=tun 互斥:
+#    excludeNics:             # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
+#      - anytun0
+#    device:                  # 手动指定物理网卡名, 留空则自动探测默认路由网卡
+#      # eth0
 #
 #  # ===== macOS (gVisor utun) =====
 #  darwin:
@@ -76,33 +83,8 @@ tun:
 #    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)
 #      - openvpn.exe
 
-# mode=bypass 时生效: 物理网卡绕行
-# 推荐「按系统分块」写法: bypass.linux / bypass.darwin / bypass.windows 各只填本系统
-# 用得到的字段, 程序按当前系统取对应块。
-bypass:
-#  # ===== Linux (绑定物理网卡逃逸 0/1 路由) =====
-#  linux:
-#    excludeNics:              # 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
-#      - anytun0
-#    device:                   # 手动指定物理网卡名, 留空则自动探测默认路由网卡
-#      # eth0
-#
-#  # ===== macOS (IP_BOUND_IF 绑物理网卡逃逸 0/1 路由) =====
-#  darwin:
-#    excludeNics:
-#      - utun0
-#    device:                   # 留空则自动探测, 如 en0
-#      # en0
-#
-#  # ===== Windows (bypass 模式仅记录, 实际逃逸请配在 TUN 进程的 tun.windows 下) =====
-#  windows:
-#    excludeProcs:             # 记录用, 实际逃逸配在 tun.windows
-#      - openvpn.exe
-#    bypassIPs:                # 记录用, 实际逃逸配在 tun.windows
-#      - 203.0.113.10
-
-# 死循环兜底熔断器(最后防线, 非主方案)。
-# 同机 A(mode=tun)+B(mode=bypass) 部署时, 正常应由 bypass 从路由层根治环路;
+# 死循环兜底熔断器(不仅仅应用于全局代理，经过anyproxy的死循环都有效)。
+# 同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署时, 正常应由 bypass 从路由层根治环路;
 # 若 bypass 未生效, 句柄会堆积且都指向同一目标。判定: 全局在传连接数达到 minActive
 # (闸门)后, 若某个 host:port 占用的在传连接超过 total*ratio%, 判为环路并拒绝其新连接。
 # 常态(总连接数低于闸门)只做一次 int 比较, 无额外开销。
@@ -115,21 +97,31 @@ loopGuard:
 #  # 单目标占全局在传连接的百分比阈值(如80=80%); <=0 用默认80
 #  ratio: 80
 
-# geoip/geosite 数据集, 按「类别 -> 文件」配置(每类别一个文件), 配了才启用 hosts 的
-# geoip:/geosite: 匹配。文件按扩展名区分:
-#   .dat : protobuf 数据集(一个文件多类别), 取与配置键同名的类别;
-#   其它 : 纯文本列表(整个文件即该类别)。geoip 每行 CIDR/IP; geosite 每行域名,
-#          支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀), # 注释,
-#          keyword/regexp 当国外丢弃。如域名列表 direct-list.txt。
+# geoip/geosite 数据集, 配了才启用 hosts 的 geoip:/geosite: 匹配(见下面 hosts 说明)。
+# 只负责「加载数据」: 加载哪些类别在这里, 命中后干什么(target/dns/proxy)仍写在 hosts,
+# 由 hosts 里 geoip:xx / geosite:xx 规则的摆放位置决定优先级(保持排序灵活)。
+#
+# 顶层 geoip: / geosite:, 每项一个文件, 一个文件可含多类别、只解析一次。
+# 文件按扩展名区分:
+#   .dat : protobuf 数据集(一个文件多类别)。cats 列出要用的类别; cats 留空=加载文件内全部类别。
+#   其它 : 纯文本列表(整个文件即一个类别), cats 须恰好给一个类别名。geoip 每行 CIDR/IP;
+#          geosite 每行域名, 支持 full:/domain:/keyword:/regexp: 前缀(无前缀默认 domain 后缀),
+#          # 注释, keyword/regexp 当国外丢弃。如域名列表 direct-list.txt。
+# 同一类别可由多个文件合并取并集(重复项去重): 如上面 geosite.dat 的 cn 与 direct-list.txt(整文件=cn)
+# 都加载后, hosts 里 geosite:cn 命中两者内容之和。按列表顺序逐项合并, 类名大小写不敏感(cn=CN);
+# 某项加载失败(如 .dat 无该类别)只打日志提示、不中断启动, 该项内容不生效。
 # .dat 可先用命令离线提取所需类别成小文件随发布携带(运行时只读小文件):
 #   anyproxy -geo-extract -geo-in geosite.dat -geo-cat cn,google -geo-out geosite-cn.dat
-geo:
-#  ip:
-#    cn: ./geoip-cn.dat        # .dat: 取其中的 cn 类别
-#    # cn: ./china-cidr.txt    # 或文本 CIDR 列表(整文件=cn)
-#  site:
-#    cn: ./direct-list.txt     # 文本域名列表(整文件=cn)
-#    google: ./geosite.dat     # .dat: 取其中的 google 类别
+#geoip:
+#  - file: ./geoip.dat          # .dat 一个文件多类别, 只解析一次
+#    cats: [cn, us]             # 要用的类别; 留空则加载该 .dat 内全部类别
+#  - file: ./cloudflare.txt     # 文本 CIDR 列表, 整文件即一个类别
+#    cats: [cloudflare]         # 文本列表必须恰好一个类别名
+#geosite:
+#  - file: ./geosite.dat
+#    cats: [google, cn]
+#  - file: ./direct-list.txt    # 文本域名列表(整文件=cn)
+#    cats: [cn]
 
 # 默认操作，可热加载
 default:
@@ -154,6 +146,16 @@ default:
   # (全部代理都连不通时: local 走本地直连, deny 拒绝)。例:
   #   proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 local
   proxy:
+  # 黑洞哨兵IP, 不配默认 192.0.0.0; 设 off/none/disable 关闭。
+  # 用法: 把域名指向它, 如系统 hosts 写 `192.0.0.0 example.com`。达成两个效果:
+  #   ① 没开代理时: 192.0.0.0 不可路由, 本机连它必然失败 = 天然屏蔽该域名。
+  #   ② 开了 tun/WinDivert 代理(未设系统代理)时: 命中该 IP 的连接被强制拦截进引擎,
+  #      并强制按 target=remote + dns=remote 处理 —— 不直连哨兵, 而是从 SNI 取域名交下级
+  #      代理远程解析真实 IP 连出, 于是该域名经代理可正常访问。
+  # windows WinDivert 下该 IP 强制进引擎(不受 tun.windows.bypassPrivate 影响)。
+  # 注意: 哨兵必须用 192.0.0.0(不能用 127.0.0.1 或私网, 否则不进 TUN/引擎); ②依赖能嗅到
+  # SNI/Host 域名(ECH 等嗅不到则拒绝), 且需有可用下级代理。专题详见 docs/blackhole-sentinel.md。
+  #blackholeIP: 192.0.0.0
 
 # 域名，可热加载
 # name 支持首/尾 * 通配，无需再配 match(去掉星号的部分记为 X)：
@@ -162,7 +164,7 @@ default:
 #   name: "google.com*"  开头一致(前缀) → google.com/google.com.hk 命中，www.google.com 不命中
 #   name: "*google.com*" 子串包含       → 含 google.com 的任意位置都命中
 # yaml 中以 * 开头的值需加引号；显式配 match 时仍以 match 为准(兼容旧配置)
-# name 还支持 geoip:xx / geosite:xx 按 geo 数据集匹配(需配上面的 geo.ip / geo.site):
+# name 还支持 geoip:xx / geosite:xx 按 geo 数据集匹配(需配上面的顶层 geoip: / geosite:):
 #   - name: geoip:cn      # 目标 IP 命中 geoip 类别 cn → target 生效(如 local 直连)
 #     target: local
 #   - name: geosite:cn    # 目标域名命中 geosite 类别 cn → target 生效
@@ -172,7 +174,7 @@ hosts:
     # 参考全局target
     # 如果有用proxy自定义代理可用，target强制当remote使用，proxy代理不可用，target按原逻辑处理
     target: remote
-    # 参考全局localDns 
+    # 参考全局localDns
     dns: remote
     # 支持 http:// , tunnel:// , socks5:// 三种协议，默认 tunnel://
     #proxy:  http://127.0.0.1:8888
@@ -194,24 +196,172 @@ hosts:
         to: 88
     allowIP:
      # - 172.17.0.12
+  # 黑洞哨兵用法(配置 hosts 版, 对 DoH 客户端也生效): 把域名 ip 指到 default.blackholeIP。
+  # 效果同系统 hosts 写 192.0.0.0, 但因走 DNS 层劫持, DoH/系统解析都拿到哨兵 IP;
+  # 命中后强制 remote+remote 经下级代理远程解析访问, 无代理时不可达=屏蔽。
+  #- name: blocked-but-proxyable.com
+  #  ip: 192.0.0.0
 
-#websocket配置
-#对于服务端需要配置 listen, user, pass 三个参数
-#对于客户端未配置connect / user / email 都不发起连接
+#websocket 配置, 按角色分 server(服务端) / client(客户端) 两块
+#  server: 需配 listen, users 才起服务
+#  client: 未配 connect / user / email 则不发起连接; 要同时订阅多台 server 用 clients(数组)代替, 见下方注释
 websocket:
-  # 监听端口
-  listen:
-  # ip 端口
-  connect:
-  # connect 域名
-  host:
-  # 用户名
-  user:
-  # 密码
-  pass:
-  # Email用于定位用户，不鉴权
-  email:
-  # 订阅头部信息
-  subscribe:
-    - key:
-      val:
+  # ===== 服务端(tunnel侧) =====
+  server:
+    # 监听端口
+    listen:
+    # 鉴权账号数组(校验接入的订阅方), 每条 user + (pass 或 key) + disable
+    # pass 与 key 二选一(都配时用 key): key 是 anyproxy -genkey 生成的公钥, 走挑战-应答,
+    # 不依赖两端时钟同步, 且服务端只存公钥, 配置泄露也登录不了; disable: true 临时停用账号
+    # pass 要求至少 18 位, 且英文字母、数字都要有; 不达标(含没配 pass 又没配 key)的账号
+    # 加载时会被自动置为 disable, 不会悄悄放行一个弱密码/空密码账号
+    users:
+      # - user:
+      #   pass:
+      #   key:
+      #   disable: false
+    # 可接入来源IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
+    # 同时约束: websocket 订阅方接入 与 下面 forward 裸TCP转发入口(listen)的来源
+    allowIP:
+    #  - 172.17.0.0/16
+    # 端口转发入口(内网穿透): 在 listen 端口收连接, 转给该 email 的订阅方
+    # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://。两种协议各走各的
+    # 通道, 不共用:
+    #   tcp -> 经 websocket 转发(原有)
+    #   udp -> 另起一条 UDP 中继, 全程还是 UDP(见 docs/websocket.md)
+    # both 适合 RDP: 主通道 TCP 3389 + RDP 8+ 图形通道 UDP 3389, 两个监听同端口
+    forward:
+      # - listen: "both://:2222"
+      #   email: someone@example.com
+  # ===== 客户端(proxy侧) =====
+  client:
+    # ip 端口
+    connect:
+    # connect 域名(Host头)
+    host:
+    # 经由的上游 HTTP/SOCKS5 代理, scheme://host:port(socks5:// 或 http://)。用于
+    # connect 是内网/回环地址、不能直连的场景: 先连对方已经暴露的代理端口, 由它
+    # CONNECT/SOCKS5 到对方本机没暴露的 websocket.server, 对方就只用暴露一个端口
+    # (见 docs/websocket.md "只暴露一个端口")。不配则和以前一样直连 connect
+    #proxy: http://<server公网IP>:3000
+    # 用户名(发给服务端)
+    user:
+    # 密码(与 key 二选一), 要求至少 18 位、英文字母和数字都要有; 但这条强度校验只在
+    # 服务端做(见 websocket.server.users[].pass), 本机不判断、弱密码照样会拿去发起
+    # 连接——这样新版本订阅端也能连尚未升级的旧服务端, 服务端那一关本来就够了
+    pass:
+    # 私钥(与 pass 二选一, 都配时用 key), anyproxy -genkey 生成, 对应公钥配在服务端 users[].key
+    key:
+    # Email用于定位用户，不鉴权
+    email:
+    # 这台机器的身份凭证, 只在文件传输(-send)收发双方之间用, 服务端完全不感知。
+    # 这项不可在此配置——启动时自动生成并持久化到配置文件同目录、同名的隐藏文件
+    # (这份配置若叫 router.yaml 就是 .router.uuid; 打在启动日志里), 重启不变; 同一份
+    # 配置下多个 client 块(clients[])共用这一个; 用 -c 指到不同配置文件则各自独立,
+    # 不共用
+    # 订阅头部信息
+    subscribe:
+      - key:
+        val:
+    # 裸TCP端口转发目标: 收到服务端 port 入口来的连接时, dial 写死的 target
+    # 直连(direct)落地也复用这张表: 未在此映射的 port 一律拒绝
+    forward:
+      # - port: 2222
+      #   target: 127.0.0.1:22
+    # ===== QUIC 直连/中继(数据不经服务端, 详见 docs/websocket.md 路径 C), 全部挂在一个 direct 块下 =====
+    direct:
+      # 允许别的订阅方直连本机(监听按需起, 平时不占端口); 落地目标仍受上面 forward 白名单约束
+      accept: false
+      # 本机直连入口: 在 listen 起监听, 连接直接送给 email 对应的订阅方, 由对方按 forwardPort 查它的 forward
+      # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://; both 适合 RDP
+      # (主通道 TCP 3389 + Enhanced RDP 的 UDP 3389)
+      rules:
+        # - listen: "both://:13389"
+        #   email: someone@example.com
+        #   forwardPort: 3389  # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个端口就拒绝(白名单), 别人不能靠瞎填端口探到对方的其它转发目标
+        #   via: relay@example.com  # 可选: 经这个 email 的公网 VPS(需开 direct.relay)盲转发到 email(最终目标 C),
+        #                           # 而非直连。适用 A、C 都在受限 CGNAT 后彼此打不通、但各自能连通 VPS 的场景。
+        #                           # QUIC/TLS 仍端到端在 A<->C, VPS 只盲转发不透明 UDP 包(看不到明文); C 侧要在
+        #                           # receive.allow 里配 A 的 uuid(中继鉴权复用它)。不填=直连。详见 docs/direct-relay-design.md
+      # encrypt: false  # true 时本机作为发起方(A)发出的打洞控制包(PUNCH/PONG)都额外加一层加密,
+      #                 # 防运营商设备按明文特征串识别丢包; 纯 opt-in, 不开完全不变。按本机一次性开关
+      #                 # (不是按上面每条 rules 规则单独配), 对 rules[] 与 -send/-recv 文件传输同时生效。
+      #                 # 密钥从本次会话 token 派生, 不依赖 uuid/receive.allow——纯开关, 打开即用;
+      #                 # 只防 DPI、不承担鉴权。注意两端要都开(或都不开)才对得上。
+      # portmap: false  # true 时直连候选收集才会去尝试 UPnP/PCP/NAT-PMP 端口映射; 默认不试。
+      #                 # 命中率低(多数路由器默认关闭或不支持)又要等三个协议各自的超时,
+      #                 # 多数机器上开了也只是白等一两秒。只能救对称 NAT, 救不了 CGNAT;
+      #                 # 确认自己路由器支持、且怀疑自己是对称 NAT 时再打开
+      # punchFirst: false # 声明"本机在受限运营商 CGNAT 后、主动发起直连时必须先发第一个包"。
+      #                  # 这类 CGNAT 若在自己发包前先收到对端的包, 映射会被毒化、双向全灭;
+      #                  # 而默认是"接受方先打", 所以家宽机器主动去连公网/云主机时会连不上。
+      #                  # 设 true 让对端(接受方)推迟打洞、本机先打。按机器设(家宽侧设、公网侧
+      #                  # 别设), 对 rules[] 与 -send/-recv 同时生效。详见 docs/direct-punch-order.md
+      # relay: false     # 本机(一台公网 VPS)允许作为 A<->C 之间的盲转发中继。收到中继请求就为这一对开一个
+      #                  # 专用 UDP socket、探到自己的公网端点、让 A/C 都朝它打洞, 之后在两个来源地址间盲
+      #                  # 转发不透明 UDP 包。QUIC/TLS 端到端在 A<->C, 本机看不到明文。关键: 本机**不需要**为
+      #                  # 每对 A-C 配 forward/rules/receive.allow, 只要这一个开关; 目标 C 由 A 用 via 指定
+      # relayAllow:      # 可选, 收紧 relay: 只允许这些来源 email(发起中继的 A, 经 B 认证)用本机中继。
+      #   - office@example.com # 留空(且 relay=true)=不限制。仅 email 准入名单, 不涉及 uuid(鉴权在 A<->C 的 e2e 层)
+      # relayPublic:     # 可选。只写 IP 时每个 binding 使用随机端口，并把该端口与全部 IP 组合成候选：
+      #   - "192.0.2.10"       # 适合按目标选择不同公网源 IP 的多出口 VPS，不占固定端口槽位
+      #   - "198.51.100.10"    # IPv6 同样只写裸地址。若写 IP:port，则切换成下面的固定端口模式：
+      #   # - "203.0.113.10:40000"  # 用于本机挂在**出口 IP 逐流随机(对称)的 NAT 网关**后：
+      #   # - "203.0.113.10:40001"  # 反射器探到的出口 ≠ A/C 发包对应的入向映射时，改配固定 DNAT 入站规则
+      #                        # (公网 IP:端口 -> 本机同一 UDP 端口)并把该公网端点填这里, 入站恒开、与出口随机无关。
+      #                        # 一个端口一个 socket, 配几个不同端口就最多几对并发中继(都占满则新中继失败)。
+      #                        # 假定 DNAT 端口保留; 直接公网 IP 无 NAT 时同样适用(放行该端口即可)。留空=默认反射器探测
+      #                        # 裸 IP 与 IP:port 两种形态不能混写；两者都会跳过反射器探测
+      # 直连默认吃 quic-go 对 UDP 的批量收发/ECN 优化; 极少数机器上(常见于某些网卡
+      # 驱动/虚拟网卡)这条优化本身会导致丢包、拥塞窗口涨不起来, 症状是直连传输明显
+      # 偏慢且丢包率异常高(排查: 加 -debug 2 若反而更快更干净就是这个问题)。不配则
+      # 跟随命令行 -direct-plain-udp 的全局默认值; 一台机器配了多条 client 分别走不同
+      # 网络路径时, 可以只给撞上问题的这一条显式配 true, 不影响其它路径
+      #plainUdp: false
+      # 手工补充本机的局域网/内网 IP(不带端口), 打洞/QUIC 拨号竞速时额外拼上当前 QUIC
+      # 端口当一条候选。不做网卡自动扫描——一台机器常有多张网卡, 真正有用的那个网段
+      # 用户自己一眼就知道。不可达的地址跟其它候选一样超时静默落选, 无副作用
+      #lanAddrs:
+      #  - 192.168.1.10
+    # 与别人交换文件的目录。本机不需要装 sshd/rsync 之类的服务 —— anyproxy 自己收发。
+    # 两个方向共用这一份配置:
+    #   收: 对端跑 anyproxy -send, 文件落到 dir 下
+    #   取: 对端跑 anyproxy -recv 本机email:路径, 把 dir 下的东西拿走(本机不用有人操作)
+    # 默认走打洞直连(此时本机需同时开 direct.accept), 打洞不通时对端可以加 -via relay
+    # 改走服务端中继(本机不需要开 direct.accept); 两条路径都是端到端加密, 服务端看不到内容
+    receive:
+      # dir: /data/incoming      # 收到的文件放这里, 也是允许被取走的根目录; 不配则收发都拒绝
+      # readonly: false          # true 时 dir 只能被取走、不接受任何人写入(-send 过来一律拒收)。
+      #                          # 用于"对外放一份东西让几台机器自己来拿"这种场景: 不开的话
+      #                          # allow 一填就是读写一起给, 没法只给读
+      # allow:                   # 一条一个 {email, uuid}; 留空=谁都不接受。
+      #                          # 注意这份名单是双向的: 列在这里的人既能往 dir 里发文件,
+      #                          # 也能取走 dir 下的任何东西, 只配一个方向要靠上面的 readonly
+      #   - email: someone@example.com    # 仅备注/查找用, 不是安全边界
+      #     uuid: 3fa85f64-5717-4562-b3fc-2c963f66afa6  # 真正的凭证, 抄对方的 websocket.client.uuid
+    # true 时强制这条配置只用来给 -send/-recv 命令行取凭证(以及生成/持久化上面的 uuid),
+    # 常驻的 anyproxy 进程不会为它发起连接, 哪怕配了 subscribe/forward/direct/
+    # receive 中的几项也照样跳过。
+    # 通常不需要手动开它: 这几项全空时(这份 client 块本来就只是给 -send/-recv 用)
+    # 常驻进程会自动判断出没什么可连的而跳过, 不开这个开关效果一样。留着是给"配了
+    # 其中一项、但现在仍只想给 -send/-recv 用"这种少见场景用的显式开关。
+    sendRecvOnly: false
+  # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
+  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/direct(含
+  # accept/rules/encrypt/portmap/punchFirst/relay/relayAllow/relayPublic/lanAddrs/plainUdp)/
+  # receive/sendRecvOnly; uuid 不可配, 自动生成)
+  # clients:
+  #   - connect:
+  #     user:
+  #     pass:
+  #     email:
+  #     forward:
+  #       - port: 2222
+  #         target: 127.0.0.1:22
+  #   - connect:
+  #     user:
+  #     pass:
+  #     email:
+  #     forward:
+  #       - port: 2222
+  #         target: 192.168.1.10:3389

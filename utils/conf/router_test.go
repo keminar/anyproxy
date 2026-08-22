@@ -29,7 +29,7 @@ func TestModeTcpcopyNormalize(t *testing.T) {
 	}
 
 	// 旧写法: tcpcopy.enable: true 仍然生效
-	r2, err := LoadRouterConfig(write("tcpcopy:\n  enable: true\n  ip: 1.2.3.4\n  port: 80\n"))
+	r2, err := LoadRouterConfig(write("tcpcopy:\n  enable: true\n  ip: 192.0.2.10\n  port: 80\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +44,43 @@ func TestModeTcpcopyNormalize(t *testing.T) {
 	}
 	if r3.TcpCopy.Enable {
 		t.Fatalf("proxy mode should not enable tcpcopy")
+	}
+}
+
+// TestLoadRouterConfigToleratesFieldTypeErrors receive.allow 从旧版的纯 email 字符串
+// 列表改成了 {email,uuid} 结构, 存量配置文件升级后这一个字段会解析失败(见
+// utils/conf/uuid.go 上下文)——这不该拖累整个服务起不来: 出错的字段留空(=不生效,
+// 不是"悄悄按旧值用"), 其余配置照常加载, LoadRouterConfig 只应打警告、不返回错误。
+func TestLoadRouterConfigToleratesFieldTypeErrors(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "router.yaml")
+	y := "listen: :3000\n" +
+		"websocket:\n" +
+		"  client:\n" +
+		"    connect: 192.0.2.10:3002\n" +
+		"    email: a@example.com\n" +
+		"    receive:\n" +
+		"      dir: /tmp\n" +
+		"      allow:\n" +
+		"        - old-style-plain-email@example.com\n" // 旧格式, 解不进 AllowedSender
+	if err := os.WriteFile(p, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := LoadRouterConfig(p)
+	if err != nil {
+		t.Fatalf("a field type error must not fail the whole load, got: %v", err)
+	}
+	if r.Listen != ":3000" {
+		t.Fatalf("unrelated top-level field should still parse, got Listen=%q", r.Listen)
+	}
+	if r.Websocket.Client.Email != "a@example.com" {
+		t.Fatalf("sibling fields in the same block should still parse, got Email=%q", r.Websocket.Client.Email)
+	}
+	if r.Websocket.Client.Receive.Dir != "/tmp" {
+		t.Fatalf("sibling field receive.dir should still parse, got %q", r.Websocket.Client.Receive.Dir)
+	}
+	if len(r.Websocket.Client.Receive.Allow) != 0 {
+		t.Fatalf("the malformed allow list should end up empty, not partially garbage: %+v", r.Websocket.Client.Receive.Allow)
 	}
 }
 
@@ -89,7 +126,7 @@ tun:
     excludeProcs:
       - openvpn.exe
     bypassIPs:
-      - 2.2.2.2
+      - 198.51.100.2
 `
 	load := func() Router {
 		var r Router
@@ -118,7 +155,7 @@ tun:
 	if len(rw.Tun.ExcludeProcs) != 1 || rw.Tun.ExcludeProcs[0] != "openvpn.exe" {
 		t.Fatalf("windows excludeProcs: %v", rw.Tun.ExcludeProcs)
 	}
-	if len(rw.Tun.BypassIPs) != 1 || rw.Tun.BypassIPs[0] != "2.2.2.2" {
+	if len(rw.Tun.BypassIPs) != 1 || rw.Tun.BypassIPs[0] != "198.51.100.2" {
 		t.Fatalf("windows bypassIPs: %v", rw.Tun.BypassIPs)
 	}
 
@@ -130,77 +167,253 @@ tun:
 	}
 }
 
-// TestBypassFlatConfig 确认旧的扁平写法(向后兼容)仍能正确解析到内嵌 BypassOS 字段。
-func TestBypassFlatConfig(t *testing.T) {
+// TestBypassConfig 确认 bypass 配置能正确解析(仅 Linux 支持, 写在 tun.linux 下,
+// 经 applyOS("linux") 压平进 Tun 扁平字段供消费者读取)。
+func TestBypassConfig(t *testing.T) {
 	y := `
-bypass:
-  excludeNics:
-    - anytun0
-  device: eth0
+tun:
+  linux:
+    excludeNics:
+      - anytun0
+    device: eth0
 `
 	var r Router
 	if err := yaml.Unmarshal([]byte(y), &r); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	r.Bypass.applyOS("linux") // 无系统块, 应保持扁平值不变
-	if len(r.Bypass.ExcludeNics) != 1 || r.Bypass.ExcludeNics[0] != "anytun0" {
-		t.Fatalf("flat excludeNics lost: %v", r.Bypass.ExcludeNics)
+	r.Tun.applyOS("linux")
+	if len(r.Tun.ExcludeNics) != 1 || r.Tun.ExcludeNics[0] != "anytun0" {
+		t.Fatalf("excludeNics lost: %v", r.Tun.ExcludeNics)
 	}
-	if r.Bypass.Device != "eth0" {
-		t.Fatalf("flat device lost: %q", r.Bypass.Device)
+	if r.Tun.Device != "eth0" {
+		t.Fatalf("device lost: %q", r.Tun.Device)
 	}
 }
 
-// TestBypassPerOSConfig 确认按系统分块 + applyOS 整块覆盖生效。
-func TestBypassPerOSConfig(t *testing.T) {
-	y := `
-bypass:
-  device: en0               # 扁平默认(无对应系统块时才用)
-  linux:
-    excludeNics:
-      - anytun0
-    device: eth0
-  windows:
-    excludeProcs:
-      - openvpn.exe
-    bypassIPs:
-      - 203.0.113.10
-`
-	load := func() Router {
-		var r Router
-		if err := yaml.Unmarshal([]byte(y), &r); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+// TestWsClientDirectPlainUDP 确认 directPlainUdp 是三态的: 不配时 nil(消费者据此
+// 落到命令行 -direct-plain-udp 的全局默认值, 见 nat.directPlainUDP), 显式 true/false
+// 都要能如实解出来, 不能被 YAML 的零值搞丢——那样就没法用它覆盖全局默认了。
+func TestWsClientDirectPlainUDP(t *testing.T) {
+	cases := map[string]*bool{
+		`client:
+  connect: a:1
+`: nil,
+		`client:
+  connect: a:1
+  direct:
+    plainUdp: true
+`: boolPtr(true),
+		`client:
+  connect: a:1
+  direct:
+    plainUdp: false
+`: boolPtr(false),
+	}
+	for y, want := range cases {
+		var w struct {
+			Client WsClient `yaml:"client"`
 		}
-		return r
+		if err := yaml.Unmarshal([]byte(y), &w); err != nil {
+			t.Fatalf("unmarshal %q: %v", y, err)
+		}
+		got := w.Client.Direct.PlainUDP
+		switch {
+		case want == nil && got != nil:
+			t.Fatalf("%q: got %v, want nil", y, *got)
+		case want != nil && got == nil:
+			t.Fatalf("%q: got nil, want %v", y, *want)
+		case want != nil && got != nil && *want != *got:
+			t.Fatalf("%q: got %v, want %v", y, *got, *want)
+		}
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// TestListenProtocolPrefix 覆盖 listen 字段的协议前缀解析(ClientDirect/ServerForward
+// 共用同一套 splitListenScheme/protoWantTCP/protoWantUDP/protoValid): 不写前缀按
+// tcp 处理(向后兼容旧配置写法), tcp://、udp://、both:// 各自决定要不要起 TCP/UDP
+// 入口, 写了不认识的前缀要能被 ValidProtocol() 识别出来而不是静默当 tcp。
+func TestListenProtocolPrefix(t *testing.T) {
+	cases := []struct {
+		listen    string
+		wantAddr  string
+		wantProto string
+		wantTCP   bool
+		wantUDP   bool
+		wantValid bool
+	}{
+		{":13389", ":13389", "", true, false, true},
+		{"tcp://:13389", ":13389", "tcp", true, false, true},
+		{"udp://:13389", ":13389", "udp", false, true, true},
+		{"both://:13389", ":13389", "both", true, true, true},
+		{"bogus://:13389", ":13389", "bogus", true, false, false}, // WantTCP 无所谓, ValidProtocol 说了算
+	}
+	for _, c := range cases {
+		t.Run(c.listen, func(t *testing.T) {
+			d := ClientDirect{Listen: c.listen}
+			if got := d.Addr(); got != c.wantAddr {
+				t.Errorf("ClientDirect.Addr() = %q, want %q", got, c.wantAddr)
+			}
+			if got := d.Protocol(); got != c.wantProto {
+				t.Errorf("ClientDirect.Protocol() = %q, want %q", got, c.wantProto)
+			}
+			if got := d.WantUDP(); got != c.wantUDP {
+				t.Errorf("ClientDirect.WantUDP() = %v, want %v", got, c.wantUDP)
+			}
+			if got := d.ValidProtocol(); got != c.wantValid {
+				t.Errorf("ClientDirect.ValidProtocol() = %v, want %v", got, c.wantValid)
+			}
+			if c.wantValid {
+				if got := d.WantTCP(); got != c.wantTCP {
+					t.Errorf("ClientDirect.WantTCP() = %v, want %v", got, c.wantTCP)
+				}
+			}
+
+			f := ServerForward{Listen: c.listen}
+			if got := f.Addr(); got != c.wantAddr {
+				t.Errorf("ServerForward.Addr() = %q, want %q", got, c.wantAddr)
+			}
+			if got := f.Protocol(); got != c.wantProto {
+				t.Errorf("ServerForward.Protocol() = %q, want %q", got, c.wantProto)
+			}
+			if got := f.WantUDP(); got != c.wantUDP {
+				t.Errorf("ServerForward.WantUDP() = %v, want %v", got, c.wantUDP)
+			}
+			if got := f.ValidProtocol(); got != c.wantValid {
+				t.Errorf("ServerForward.ValidProtocol() = %v, want %v", got, c.wantValid)
+			}
+		})
+	}
+}
+
+// TestListenProtocolPrefixYAML 确认协议前缀写进 YAML 后能原样解出来——"://" 里的
+// 冒号不能被 YAML 误当成键值分隔符解析掉(实际写法建议加引号, 这里连未加引号的写法
+// 也一并测一遍, 确认不引号也不会被拆坏)。
+func TestListenProtocolPrefixYAML(t *testing.T) {
+	y := `
+client:
+  direct:
+    rules:
+      - listen: "both://:13389"
+        email: c@example.com
+        port: 3389
+      - listen: udp://:13390
+        email: c@example.com
+        port: 3390
+`
+	var w struct {
+		Client WsClient `yaml:"client"`
+	}
+	if err := yaml.Unmarshal([]byte(y), &w); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(w.Client.Direct.Rules) != 2 {
+		t.Fatalf("got %d direct rules, want 2", len(w.Client.Direct.Rules))
+	}
+	if got := w.Client.Direct.Rules[0].Protocol(); got != "both" {
+		t.Errorf("quoted both://: Protocol() = %q, want \"both\"", got)
+	}
+	if got := w.Client.Direct.Rules[0].Addr(); got != ":13389" {
+		t.Errorf("quoted both://: Addr() = %q, want \":13389\"", got)
+	}
+	if got := w.Client.Direct.Rules[1].Protocol(); got != "udp" {
+		t.Errorf("unquoted udp://: Protocol() = %q, want \"udp\"", got)
+	}
+	if got := w.Client.Direct.Rules[1].Addr(); got != ":13390" {
+		t.Errorf("unquoted udp://: Addr() = %q, want \":13390\"", got)
+	}
+}
+
+// TestWebsocketClientList 确认 Websocket.ClientList() 的合并/回退逻辑:
+// 配了 clients 就用 clients(忽略旧 client); 只配旧 client 时回退为单元素列表;
+// 都不配(或旧 client.connect 为空)时返回空, 不应凭空多出一条要连接的 server。
+func TestWebsocketClientList(t *testing.T) {
+	cA := WsClient{Connect: "a:1", Email: "a"}
+	cB := WsClient{Connect: "b:2", Email: "b"}
+	legacy := WsClient{Connect: "legacy:3", Email: "legacy"}
+
+	// 只配 clients
+	w := Websocket{Clients: []WsClient{cA, cB}}
+	got := w.ClientList()
+	if len(got) != 2 || got[0].Connect != "a:1" || got[1].Connect != "b:2" {
+		t.Fatalf("clients-only: %+v", got)
 	}
 
-	// linux: 取 linux 块
-	rl := load()
-	rl.Bypass.applyOS("linux")
-	if len(rl.Bypass.ExcludeNics) != 1 || rl.Bypass.ExcludeNics[0] != "anytun0" {
-		t.Fatalf("linux excludeNics: %v", rl.Bypass.ExcludeNics)
-	}
-	if rl.Bypass.Device != "eth0" {
-		t.Fatalf("linux device: %q", rl.Bypass.Device)
+	// 只配旧 client
+	w = Websocket{Client: legacy}
+	got = w.ClientList()
+	if len(got) != 1 || got[0].Connect != "legacy:3" {
+		t.Fatalf("legacy-only: %+v", got)
 	}
 
-	// windows: 取 windows 块(不含 device, 整块覆盖后 device 应为空, 非扁平的 en0)
-	rw := load()
-	rw.Bypass.applyOS("windows")
-	if rw.Bypass.Device != "" {
-		t.Fatalf("windows block should fully replace flat; device=%q", rw.Bypass.Device)
-	}
-	if len(rw.Bypass.ExcludeProcs) != 1 || rw.Bypass.ExcludeProcs[0] != "openvpn.exe" {
-		t.Fatalf("windows excludeProcs: %v", rw.Bypass.ExcludeProcs)
-	}
-	if len(rw.Bypass.BypassIPs) != 1 || rw.Bypass.BypassIPs[0] != "203.0.113.10" {
-		t.Fatalf("windows bypassIPs: %v", rw.Bypass.BypassIPs)
+	// 两者都配: 以 clients 为准
+	w = Websocket{Client: legacy, Clients: []WsClient{cA}}
+	got = w.ClientList()
+	if len(got) != 1 || got[0].Connect != "a:1" {
+		t.Fatalf("clients should win over legacy client: %+v", got)
 	}
 
-	// darwin: 无 darwin 块, 回退扁平默认
-	rd := load()
-	rd.Bypass.applyOS("darwin")
-	if rd.Bypass.Device != "en0" {
-		t.Fatalf("darwin should fall back to flat; device=%q", rd.Bypass.Device)
+	// 都不配
+	w = Websocket{}
+	got = w.ClientList()
+	if len(got) != 0 {
+		t.Fatalf("expected empty list, got: %+v", got)
+	}
+}
+
+// TestWsServerLookupUser 确认 WsServer.LookupUser 的多用户查找与停用逻辑:
+// disable=true 的账号能查到(found=true)但调用方应据此拒绝; 都不匹配或 user 为空返回 found=false。
+func TestWsServerLookupUser(t *testing.T) {
+	s := WsServer{
+		Users: []ServerUser{
+			{User: "alice", Pass: "alicepass"},
+			{User: "bob", Pass: "bobpass", Disable: true},
+		},
+	}
+
+	if u, ok := s.LookupUser("alice"); !ok || u.Pass != "alicepass" || u.Disable {
+		t.Fatalf("alice: %+v ok=%v", u, ok)
+	}
+	// 停用的账号: 查得到, 但 Disable=true, 由调用方拒绝
+	if u, ok := s.LookupUser("bob"); !ok || u.Pass != "bobpass" || !u.Disable {
+		t.Fatalf("bob: %+v ok=%v", u, ok)
+	}
+	// 未配置的 user
+	if _, ok := s.LookupUser("nobody"); ok {
+		t.Fatalf("nobody should not match")
+	}
+	// 空 user
+	if _, ok := s.LookupUser(""); ok {
+		t.Fatalf("empty user should not match")
+	}
+}
+
+// TestWsClientWantsPersistentConnect 常驻进程该不该为一条 client 配置发起连接:
+// subscribe/forward/direct/directAccept/receive.dir 任意一项非空就该连(服务端也会
+// 因为同一项放行空订阅, 见 nat/conn.go emptySubscribeAllowed); 全空则不该连——连了
+// 也只会被服务端一直拒绝。SendRecvOnly 是显式的强制跳过, 不管其它项配没配都优先生效。
+func TestWsClientWantsPersistentConnect(t *testing.T) {
+	cases := []struct {
+		name string
+		c    WsClient
+		want bool
+	}{
+		{"nothing configured", WsClient{}, false},
+		{"subscribe", WsClient{Subscribe: []Subscribe{{Key: "k", Val: "v"}}}, true},
+		{"forward", WsClient{Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, true},
+		{"direct rule", WsClient{Direct: DirectSettings{Rules: []ClientDirect{{Listen: ":1", Email: "a@example.com", ForwardPort: 1}}}}, true},
+		{"direct.accept", WsClient{Direct: DirectSettings{Accept: true}}, true},
+		{"receive.dir", WsClient{Receive: ClientReceive{Dir: "/data"}}, true},
+		{"sendRecvOnly alone", WsClient{SendRecvOnly: true}, false},
+		{"sendRecvOnly overrides forward", WsClient{SendRecvOnly: true, Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, false},
+		{"sendRecvOnly overrides receive.dir", WsClient{SendRecvOnly: true, Receive: ClientReceive{Dir: "/data"}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.c.WantsPersistentConnect(); got != c.want {
+				t.Errorf("WantsPersistentConnect() = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
