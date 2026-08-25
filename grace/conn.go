@@ -82,9 +82,9 @@ func (c *conn) serve(ctx context.Context) {
 	}
 }
 
-// TraceID 日志ID
+// TraceID 日志ID。与 trace.ID 一致: 方括号 token, 避免尾逗号被当成 CSV。
 func traceID(id uint) string {
-	return fmt.Sprintf("ID #%d,", id)
+	return fmt.Sprintf("[ID #%d]", id)
 }
 
 // A ConnState represents the state of a client connection to a server.
