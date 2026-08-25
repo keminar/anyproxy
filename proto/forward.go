@@ -42,6 +42,7 @@ func ForwardTCP(ctx context.Context, id uint, clientConn net.Conn, srcIP, dstIP 
 		DstIP:   dstIP,
 		DstPort: dstPort,
 		TUN:     true,
+		Raw:     true, // 原始字节透传, http 上级代理须走 CONNECT 隧道
 	}
 	s := &tunnel{req: req}
 	// 不走 newTunnel，来源IP由协议栈提供

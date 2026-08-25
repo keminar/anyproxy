@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync/atomic"
 
 	"github.com/keminar/anyproxy/grace"
 	"github.com/keminar/anyproxy/proto"
@@ -24,8 +23,6 @@ type proxyServer struct {
 	rl  *rateLimiter // per-destination new-connection cap (nil = unlimited)
 }
 
-// connSeq generates a per-connection trace id, mirroring tun/stack.go's handleTCP.
-var connSeq uint64
 
 // startProxy binds the local listener. If cfg.ProxyPort is 0 an ephemeral port
 // is chosen and written back into cfg so the WinDivert filter can reference it.
@@ -109,7 +106,7 @@ func (s *proxyServer) handle(c net.Conn) {
 		return
 	}
 
-	id := uint(atomic.AddUint64(&connSeq, 1))
+	id := grace.NextTraceID()
 	ctx := context.WithValue(context.Background(), grace.TraceIDContextKey, id)
 	srcIP := "127.0.0.1"
 	if ent.srcIP.IsValid() {

@@ -19,6 +19,13 @@ func init() {
 	autoInc = autoinc.New(1, 1)
 }
 
+// NextTraceID 返回全局唯一的连接追踪ID。
+// 供不经过 Listener(grace.conn.serve) 的入口(如 TUN 虚拟网卡)复用同一号段,
+// 避免各入口各自发号导致跨入口 ID 撞号, 便于日志按 ID 唯一定位一条连接。
+func NextTraceID() uint {
+	return autoInc.ID()
+}
+
 // A conn represents the server side of an HTTP connection.
 type conn struct {
 	// server is the server on which the connection arrived.

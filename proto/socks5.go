@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/keminar/anyproxy/utils/trace"
 )
@@ -61,7 +62,17 @@ func (that *socks5Stream) response() error {
 	}
 
 	that.showIP()
-	err = tunnel.handshake(protoTCP, that.req.DstName, that.req.DstIP, that.req.DstPort)
+	// socks5 原样透传原始字节, 走 http 上级代理时须用 CONNECT 隧道(见 tunnel.go)
+	that.req.Raw = true
+	// 探测首包应用层协议(https/http), 让 socks5 与 TUN 一致地按 default.target 分流,
+	// 而非一律当裸 tcp 只按 default.tcpTarget。探不出时保持 tcp。
+	proto, closed := that.sniffProto()
+	if closed {
+		// 客户端未发数据即关闭(如浏览器放弃的预连接), 无需拨后端
+		return nil
+	}
+	that.req.Proto = proto
+	err = tunnel.handshake(proto, that.req.DstName, that.req.DstIP, that.req.DstPort)
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
 		return err
@@ -69,6 +80,33 @@ func (that *socks5Stream) response() error {
 
 	tunnel.transfer(-1)
 	return nil
+}
+
+// sniffProto 在回复 socks5 成功应答后、握手前, 探测客户端首包判定应用层协议(https/http)。
+// 与 TUN(forward.go sniffClientHead)对齐:
+//   - 按端口给不同读超时: 80/443 一定客户端先说话, 等 5s(覆盖预连接静默); 其余端口大量是
+//     "服务端先说话"协议(SSH/MySQL 等), 只等 200ms, 超时即按 tcp 继续, 不卡它们的握手。
+//   - 区分超时与客户端已关: 超时 -> 无首包按 tcp 继续拨后端(closed=false);
+//     EOF/RST -> 客户端放弃连接, closed=true, 调用方直接结束不拨后端。
+//
+// 用带缓冲的 Peek, 不消费数据, 缓冲里的首包随后由 transfer 原样转发, 无需像 TUN 那样补发。
+func (that *socks5Stream) sniffProto() (proto string, closed bool) {
+	timeout := sniffTimeout
+	if that.req.DstPort == 80 || that.req.DstPort == 443 {
+		timeout = sniffTimeoutHTTP
+	}
+	_ = that.req.conn.SetReadDeadline(time.Now().Add(timeout))
+	_, err := that.req.reader.Peek(1) // 阻塞到首字节到达; fill 会顺带把整段首包读进缓冲
+	_ = that.req.conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		that.req.reader.ResetErr() // 清掉探测超时留下的挂起错误, 不影响后续正常转发
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return protoTCP, false // 超时: 静默/服务端先说话, 继续
+		}
+		return protoTCP, true // EOF/RST: 客户端已关, 不拨后端
+	}
+	head, _ := that.req.reader.Peek(that.req.reader.Buffered())
+	return sniffProto(head), false
 }
 
 func (that *socks5Stream) showIP() {
