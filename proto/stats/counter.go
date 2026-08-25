@@ -1,12 +1,13 @@
 package stats
 
 import (
-	"fmt"
 	"log"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/keminar/anyproxy/utils/trace"
 )
 
 type Counter struct {
@@ -63,7 +64,7 @@ func (c *Counter) Flush(id uint) {
 
 // logBytes 按大小选择单位打印一条统计日志。
 func logBytes(id uint, name string, v int64) {
-	tag := fmt.Sprintf("ID #%d,", id)
+	tag := trace.ID(id)
 	if v > 1e6 {
 		log.Println(tag, name, v/1e6, "MB")
 	} else if v > 1e3 {
