@@ -61,7 +61,6 @@ func (that *socks5Stream) response() error {
 		return err
 	}
 
-	that.showIP()
 	// socks5 原样透传原始字节, 走 http 上级代理时须用 CONNECT 隧道(见 tunnel.go)
 	that.req.Raw = true
 	// 探测首包应用层协议(https/http), 让 socks5 与 TUN 一致地按 default.target 分流,
@@ -72,6 +71,9 @@ func (that *socks5Stream) response() error {
 		return nil
 	}
 	that.req.Proto = proto
+	// 嗅探后再打连接行, 带上协议(tcp/http/https), 与 TUN 的 "TUN https ..." 对齐,
+	// 一眼看出本条按哪类分流(tcp 走 default.tcpTarget, http/https 走 default.target)。
+	that.showIP(proto)
 	err = tunnel.handshake(proto, that.req.DstName, that.req.DstIP, that.req.DstPort)
 	if err != nil {
 		log.Println(trace.ID(that.req.ID), "handshake err", err.Error())
@@ -109,12 +111,12 @@ func (that *socks5Stream) sniffProto() (proto string, closed bool) {
 	return sniffProto(head), false
 }
 
-func (that *socks5Stream) showIP() {
-	if that.req.DstName != "" {
-		log.Println(trace.ID(that.req.ID), fmt.Sprintf("%s %s -> %s:%d", "Socks5", that.req.conn.RemoteAddr().String(), that.req.DstName, that.req.DstPort))
-	} else {
-		log.Println(trace.ID(that.req.ID), fmt.Sprintf("%s %s -> %s:%d", "Socks5", that.req.conn.RemoteAddr().String(), that.req.DstIP, that.req.DstPort))
+func (that *socks5Stream) showIP(proto string) {
+	dst := that.req.DstName
+	if dst == "" {
+		dst = that.req.DstIP
 	}
+	log.Println(trace.ID(that.req.ID), fmt.Sprintf("Socks5 %s %s -> %s:%d", proto, that.req.conn.RemoteAddr().String(), dst, that.req.DstPort))
 }
 
 // parsing socks5 header, and return address and parsing error
