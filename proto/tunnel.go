@@ -434,10 +434,17 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	} else {
 		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
 	}
-	// 未命中带 target 的 host 规则(host.Target 为空)即走了 default: 标出本次按哪类默认分流——
-	// tcp 用 default.tcpTarget, http/https 用 default.target, 便于排查两类默认策略不一致导致的分叉。
+	// routeTag: 未命中带 target 的 host 规则(host.Target 为空)即走了 default, 标出本次按哪类
+	// 默认分流及其策略值(tcp 用 default.tcpTarget, http/https 用 default.target)。不单独占一行,
+	// 而是拼到下面 PROXY/direct/auto 决策行末尾, 便于排查两类默认不一致导致的分叉。命中 host 规则则为空。
+	// 取此处的 confTarget(default 原始值, 尚未被 localport/auto 改写), 反映默认到底怎么配的。
+	routeTag := ""
 	if host.Target == "" {
-		log.Println(trace.ID(s.req.ID), fmt.Sprintf("default %s target=%s", proto, confTarget))
+		field := "target"
+		if proto == protoTCP {
+			field = "tcpTarget"
+		}
+		routeTag = fmt.Sprintf(" (default.%s=%s)", field, confTarget)
 	}
 	// localport: 命中的端口走本地直连，其余走代理。内置 21/22/3306(ftp/ssh/mysql)，可在配置追加。
 	if confTarget == "localport" {
@@ -487,7 +494,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 					forName = " for " + dstName
 				}
 				if e := s.dail(network, connAddr, autoDirectSec); e == nil {
-					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s", connAddr, forName))
+					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s%s", connAddr, forName, routeTag))
 					s.curState = stateNew
 					return
 				} else {
@@ -591,20 +598,20 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		s.registerCounter(dstName, dstIP, dstPort, fmt.Sprintf("%s:%d", proxyServer, proxyPort))
 		switch proxyScheme {
 		case "socks5":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 			err = s.socks5(network, connAddr, targetNet, targetAddr)
 		case "tunnel":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 			err = s.httpConnect(network, connAddr, targetAddr, true)
 		case "http":
 			// 直发原始请求这条分支要求请求已被 http.go 解析改写成绝对形式(absolute-form)，
 			// 仅适用于监听入口的 HTTP 流。TUN 是原始字节转发(origin-form: GET /path)，
 			// http 代理不认，故 TUN 的 http 也必须用 CONNECT 隧道。
 			if proto == protoHTTP && !s.req.Raw { //可避免转发到charles显示2次域名，且部分电脑请求出错
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s", connAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s%s", connAddr, routeTag))
 				err = s.dail(network, connAddr, 0)
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 				err = s.httpConnect(network, connAddr, targetAddr, false)
 			}
 		default:
@@ -615,9 +622,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		network, connAddr := s.buildAddress(dstName, dstIP, dstPort, true)
 		if connAddr != "" {
 			if dstName == "" {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s", connAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s%s", connAddr, routeTag))
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s", connAddr, dstName))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s%s", connAddr, dstName, routeTag))
 			}
 			err = s.dail(network, connAddr, 0)
 		} else {
