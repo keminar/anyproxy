@@ -20,6 +20,7 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/cache"
 	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/dnsutil"
 	"github.com/keminar/anyproxy/utils/tools"
 	"github.com/keminar/anyproxy/utils/trace"
 	"golang.org/x/net/proxy"
@@ -35,11 +36,6 @@ const (
 const protoTCP = "tcp"
 const protoHTTP = "http"
 const protoHTTPS = "https"
-
-// proxyFailTTL 上级代理探测失败后, 标记为不可用的缓存时长。
-// 有效期内对该代理直接跳过 300ms 拨号探测; 过期后再探测一次以便及时发现其恢复。
-// 取值权衡: 太短则频繁重探浪费时间, 太长则代理恢复后要等更久才被重新使用。
-const proxyFailTTL = 20 * time.Second
 
 // autoDirectFailTTL 是 auto 模式下「直连失败」的缓存时长: 有效期内后续请求跳过直连、
 // 直接走代理, 只为省掉一次页面并发请求里的重复直连。刻意取短(而非缓存很久), 避免一次偶发
@@ -61,21 +57,15 @@ var outbound *stats.Manager
 func init() {
 	inbound = stats.NewManager()
 	outbound = stats.NewManager()
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			//log.Println("ticker...")
-			inbound.UnregisterCounter()
-			outbound.UnregisterCounter()
-		}
-	}()
+	// 1 分钟一次的 stats ticker 改为懒启动, 见 stats.Manager.startTicker:
+	// 一次性进程 (-send/-recv 等) 不走 tunnel, 不会调用 RegisterCounter,
+	// 也就不会空转起 ticker / 打出 "stats links: 0"。
 }
 
 // 转发实体
 type tunnel struct {
 	req      *Request
-	conn     *net.TCPConn // 后端服务
+	conn     net.Conn // 后端服务
 	curState int
 
 	inboundIP string // 来源IP
@@ -103,6 +93,14 @@ func newTunnel(req *Request) *tunnel {
 	return s
 }
 
+// closeWrite 安全地半关闭连接写端。s.conn 可能是 *net.TCPConn（直连），
+// 也可能是包装类型（如 macOS 上的 *dynConn），通过类型断言兼容二者。
+func (s *tunnel) closeWrite() {
+	if cw, ok := s.conn.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+}
+
 // copyBuffer 传输数据
 func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (written int64, err error) {
 	//如果设置过大会耗内存高，4k比较合理
@@ -123,7 +121,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 					// 如果包是http协议则认为http复用
 					if isKeepAliveHttp(s.req.ctx, s.req.conn, buf[0:nr]) {
 						// 关闭与旧的服务器的连接的写
-						s.conn.CloseWrite()
+						s.closeWrite()
 						// 状态变成已空闲，不能为关闭，会导致下面逻辑的Client也被关闭
 						s.curState = stateIdle
 
@@ -149,11 +147,11 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
-			if srcname == "request" {
-				s.inbountCounter.Add(s.req.ID, int64(nw))
-			} else {
-				s.outbountCounter.Add(s.req.ID, int64(nw))
-			}
+				if srcname == "request" {
+					s.inbountCounter.Add(s.req.ID, int64(nw))
+				} else {
+					s.outbountCounter.Add(s.req.ID, int64(nw))
+				}
 			}
 			if ew != nil {
 				err = ew
@@ -188,7 +186,7 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 
 			if srcname == "request" {
 				// 当客户端断开或出错了，服务端也不用再读了，可以关闭，解决读Server卡住不能到EOF的问题
-				s.conn.CloseWrite()
+				s.closeWrite()
 				s.curState = stateClosed
 			}
 			break
@@ -205,6 +203,8 @@ func (s *tunnel) transfer(clientUnRead int) {
 	// 计入 loopguard 在传连接, 结束时释放(key 为空则跳过, 如 tcpcopy)
 	guard.enter(s.guardKey)
 	defer guard.leave(s.guardKey)
+	// 结束时补记残余字节, 避免同一分钟内快速完成的连接漏统计
+	defer s.flushCounters()
 	s.curState = stateActive
 	s.clientUnRead = clientUnRead
 	done := make(chan struct{})
@@ -269,7 +269,7 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 	if err != nil {
 		return err
 	}
-	s.conn = conn.(*net.TCPConn)
+	s.conn = conn
 	// 出向本地址(实际 egress)是排查 TUN 环路的关键证据: 若它落在 TUN 网段
 	// (如 10.9.0.x)而非物理网卡 IP, 说明出向没能逃出 TUN, 就是环路根因。
 	if config.DebugLevel >= config.LevelLong {
@@ -279,7 +279,10 @@ func (s *tunnel) dail(network, connAddr string, second int64) error {
 }
 
 // 注册计数器, 日志地址优先使用域名
-func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
+// registerCounter 按「来源IP × 目标地址 × 方向」注册上下行流量计数器。
+// 统计始终以「最终目标」为主地址; 走上级代理时用 viaProxy 附上经由的代理地址
+// 直连时 viaProxy 传空。
+func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16, viaProxy string) {
 	// 日志地址优先使用域名
 	var logAddr string
 	if dstName != "" {
@@ -291,10 +294,24 @@ func (s *tunnel) registerCounter(dstName, dstIP string, dstPort uint16) {
 			logAddr = fmt.Sprintf("%s:%d", dstIP, dstPort)
 		}
 	}
+	if viaProxy != "" {
+		logAddr = logAddr + " via " + viaProxy
+	}
 	uplink := fmt.Sprintf("inbound>>>%s>>>%s>>>uplink", s.inboundIP, logAddr)
 	downlink := fmt.Sprintf("inbound>>>%s>>>%s>>>downlink", s.inboundIP, logAddr)
 	s.inbountCounter = inbound.RegisterCounter(uplink)
 	s.outbountCounter = outbound.RegisterCounter(downlink)
+}
+
+// flushCounters 在连接结束时把上/下行计数器里「还没到分钟翻转、尚未打印」的残余
+// 字节立即补记进日志, 避免快速完成的连接漏统计(见 stats.Counter.Flush)。
+func (s *tunnel) flushCounters() {
+	if s.inbountCounter != nil {
+		s.inbountCounter.Flush(s.req.ID)
+	}
+	if s.outbountCounter != nil {
+		s.outbountCounter.Flush(s.req.ID)
+	}
 }
 
 // 连接地址优先使用IP
@@ -312,7 +329,7 @@ func (s *tunnel) buildAddress(dstName, dstIP string, dstPort uint16, addCounter 
 	}
 
 	if addCounter && connAddr != "" {
-		s.registerCounter(dstName, dstIP, dstPort)
+		s.registerCounter(dstName, dstIP, dstPort, "")
 	}
 	return
 }
@@ -344,7 +361,7 @@ var defaultLocalPorts = []int{21, 22}
 // isLocalTCPPort 判断端口在 localport 模式下是否走本地直连。
 // 未配置 default.localPort 时用默认的 21/22；一旦配置则完全以配置为准(覆盖而非追加)。
 func isLocalTCPPort(port uint16) bool {
-	ports := conf.RouterConfig.Default.LocalPort
+	ports := conf.RouterConfig().Default.LocalPort
 	if len(ports) == 0 {
 		ports = defaultLocalPorts
 	}
@@ -358,8 +375,8 @@ func isLocalTCPPort(port uint16) bool {
 
 // 查询配置
 func findHost(dstName, dstIP string) conf.Host {
-	defMatch := conf.RouterConfig.Default.Match
-	for _, h := range conf.RouterConfig.Hosts {
+	defMatch := conf.RouterConfig().Default.Match
+	for _, h := range conf.RouterConfig().Hosts {
 		if h.Matched(dstName, defMatch) || h.Matched(dstIP, defMatch) {
 			return h
 		}
@@ -380,7 +397,7 @@ func getString(val string, def string, def2 string) string {
 
 // handshake 和server握手
 func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) (err error) {
-	// 死循环兜底: 同机 A(TUN)+B(bypass) 若 bypass 未生效, 句柄会堆积且都指向同一目标,
+	// 死循环兜底: 同机 A(TUN)+B(bypass, 仅Linux) 若 bypass 未生效, 句柄会堆积且都指向同一目标,
 	// 全局在传连接冲高后某目标占比过大即判为环路, 拒绝其新连接以解开环路。
 	// 正常应由 mode=bypass 根治, 此为最后防线。
 	guardKey := dstName
@@ -408,9 +425,21 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	}
 	var confTarget string
 	if proto == protoTCP {
-		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig().Default.TCPTarget, "auto")
 	} else {
-		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig().Default.Target, "auto")
+	}
+	// routeTag: 未命中带 target 的 host 规则(host.Target 为空)即走了 default, 标出本次按哪类
+	// 默认分流及其策略值(tcp 用 default.tcpTarget, http/https 用 default.target)。不单独占一行,
+	// 而是拼到下面 PROXY/direct/auto 决策行末尾, 便于排查两类默认不一致导致的分叉。命中 host 规则则为空。
+	// 取此处的 confTarget(default 原始值, 尚未被 localport/auto 改写), 反映默认到底怎么配的。
+	routeTag := ""
+	if host.Target == "" {
+		field := "target"
+		if proto == protoTCP {
+			field = "tcpTarget"
+		}
+		routeTag = fmt.Sprintf(" (default.%s=%s)", field, confTarget)
 	}
 	// localport: 命中的端口走本地直连，其余走代理。内置 21/22/3306(ftp/ssh/mysql)，可在配置追加。
 	if confTarget == "localport" {
@@ -420,15 +449,30 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			confTarget = "remote"
 		}
 	}
-	confDNS := getString(host.DNS, conf.RouterConfig.Default.DNS, "local")
+	confDNS := getString(host.DNS, conf.RouterConfig().Default.DNS, "local")
 
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
-	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
+	// 例如域名解析到 192.0.2.10 不可达时，可配置为另一个可达地址。
 	if host.IP != "" {
 		dstIP = host.IP
 	} else if dstName != "" && confDNS != "remote" && !s.req.TUN {
 		// http请求的dns解析；TUN 连接的目标 IP 已由内核路由确定，无需重新解析
 		dstIP, state = s.lookup(dstName, dstIP)
+	}
+
+	// 黑洞哨兵 IP: 目标 IP 命中黑洞地址(系统 hosts 或本配置把域名指向不可路由的哨兵 IP,
+	// 如 192.0.0.0)。语义: 无代理时该 IP 不可达=本地拦截; 走到这里说明已被引擎接管, 强制
+	// target=remote + dns=remote —— 必须经下级代理、由下级按域名解析真实 IP 连出(绝不直连
+	// 哨兵 IP)。显式 deny 的规则优先, 不被覆盖。需要域名才能远程解析, 嗅不到则拒绝。
+	blackhole := dnsutil.IsBlackholeIP(dstIP)
+	if blackhole && confTarget != "deny" {
+		if dstName == "" {
+			err = fmt.Errorf("blackhole ip %s but no domain to proxy, deny", dstIP)
+			return
+		}
+		confTarget = "remote"
+		confDNS = "remote"
+		log.Println(trace.ID(s.req.ID), fmt.Sprintf("blackhole ip %s -> force remote dns for %s", dstIP, dstName))
 	}
 
 	// 检查是否要换端口
@@ -460,7 +504,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 					forName = " for " + dstName
 				}
 				if e := s.dail(network, connAddr, autoDirectSec); e == nil {
-					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s", connAddr, forName))
+					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s%s", connAddr, forName, routeTag))
 					s.curState = stateNew
 					return
 				} else {
@@ -485,7 +529,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	// 误伤(local 应始终直连)。proxyServer 保持空, 下方走 else 分支直连。
 	if confTarget != "local" {
 		// 全局代理实时取值以支持热加载: 命令行 -p(固定) 优先于配置 default.proxy(可热改)。
-		globalSpec := config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig.Default.Proxy, "")
+		globalSpec := config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig().Default.Proxy, "")
 		proxyConfigured := host.Proxy != "" || globalSpec != ""
 		// localFallback: 链路上出现过 " local" 后缀, 代理都不通时「显式允许」走本地直连。
 		localFallback := false
@@ -542,6 +586,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		logSelfProxy(s.req.ID, proxyServer, proxyPort)
 		proxyServer, proxyPort = "", 0
 	}
+	// 黑洞 IP 必须经代理出去: 走到这里仍无可用代理, 直连只会连向不可路由的哨兵 IP,
+	// 直接判失败, 避免徒劳拨号超时。等价于"无代理时该域名不可访问"。
+	if blackhole && (proxyServer == "" || proxyPort == 0) {
+		err = fmt.Errorf("blackhole ip %s requires an upstream proxy, none available for %s", dstIP, dstName)
+		return
+	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
 		// remote 请求(auto 的直连探测已在前面完成, 到这里说明要走代理)
 		var targetAddr string
@@ -559,23 +609,25 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			return
 		}
 
-		network, connAddr := s.buildAddress(proxyServer, "", proxyPort, true)
+		network, connAddr := s.buildAddress(proxyServer, "", proxyPort, false)
+		// 统计以最终目标为主, 附带经由的上级代理(而非只记代理地址), 便于识别真实下载地址
+		s.registerCounter(dstName, dstIP, dstPort, fmt.Sprintf("%s:%d", proxyServer, proxyPort))
 		switch proxyScheme {
 		case "socks5":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 			err = s.socks5(network, connAddr, targetNet, targetAddr)
 		case "tunnel":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 			err = s.httpConnect(network, connAddr, targetAddr, true)
 		case "http":
 			// 直发原始请求这条分支要求请求已被 http.go 解析改写成绝对形式(absolute-form)，
 			// 仅适用于监听入口的 HTTP 流。TUN 是原始字节转发(origin-form: GET /path)，
 			// http 代理不认，故 TUN 的 http 也必须用 CONNECT 隧道。
-			if proto == protoHTTP && !s.req.TUN { //可避免转发到charles显示2次域名，且部分电脑请求出错
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s", connAddr))
+			if proto == protoHTTP && !s.req.Raw { //可避免转发到charles显示2次域名，且部分电脑请求出错
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s%s", connAddr, routeTag))
 				err = s.dail(network, connAddr, 0)
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 				err = s.httpConnect(network, connAddr, targetAddr, false)
 			}
 		default:
@@ -586,9 +638,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		network, connAddr := s.buildAddress(dstName, dstIP, dstPort, true)
 		if connAddr != "" {
 			if dstName == "" {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s", connAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s%s", connAddr, routeTag))
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s", connAddr, dstName))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s%s", connAddr, dstName, routeTag))
 			}
 			err = s.dail(network, connAddr, 0)
 		} else {
@@ -646,9 +698,10 @@ func logSelfProxy(id uint, server string, port uint16) {
 // 单域名 host.proxy 与全局 default.proxy 共用同一套逻辑。
 // 依次对每个代理做连通性探测(getProxyServer 内含 300ms 拨号), 返回第一个能连通的;
 // 都不可用时 ok=false, opName 指示兜底动作:
-//   "local": 忽略代理走本地直连(调用方把 proxyServer 置空)
-//   "deny" : 拒绝请求
-//   ""     : 无后缀, 由调用方决定(host 情况回退全局代理)
+//
+//	"local": 忽略代理走本地直连(调用方把 proxyServer 置空)
+//	"deny" : 拒绝请求
+//	""     : 无后缀, 由调用方决定(host 情况回退全局代理)
 func resolveProxySpec(id uint, spec string) (scheme, server string, port uint16, opName string, ok bool) {
 	switch {
 	case strings.HasSuffix(spec, " local"):
@@ -727,21 +780,14 @@ func getProxyServer(proxySpec string) (string, string, uint16, error) {
 		return "", "", 0, err
 	}
 	key := fmt.Sprintf("%s:%d", proxyServer, proxyPort)
-	// 不可用缓存: 有效期内直接判失败, 跳过 300ms 拨号探测, 不浪费时间在挂掉的代理上
-	if cache.ProxyDial.Bad(key) {
-		return "", "", 0, fmt.Errorf("proxy %s unavailable (cached)", key)
-	}
-	// 检查是否可连通, 内网不好时100毫秒不够，调整到300
-	connTimeout := time.Duration(300) * time.Millisecond
+	// 不缓存「不可用」状态: 每次都实拨探测。否则上级代理重启恢复后, 仍会在旧失败缓存
+	// 有效期内被判死、导致请求无响应。探测很轻量(200ms 内建连即返回)。
+	connTimeout := time.Duration(200) * time.Millisecond
 	conn, err := tunDial("tcp", key, connTimeout)
 	if err != nil {
-		// 探测失败, 记入不可用缓存, 有效期内后续请求直接跳过
-		cache.ProxyDial.MarkBad(key, proxyFailTTL)
 		return "", "", 0, err
 	}
 	conn.Close()
-	// 探测成功, 清除可能存在的旧失败标记, 让恢复的代理立即可用
-	cache.ProxyDial.Clear(key)
 	return proxyScheme, proxyServer, proxyPort, nil
 }
 
@@ -767,7 +813,7 @@ func (s *tunnel) socks5(network, connAddr string, targetNet, targetAddr string) 
 		log.Println(trace.ID(s.req.ID), "dail err", err.Error())
 		return
 	}
-	s.conn = conn.(*net.TCPConn)
+	s.conn = conn
 	return
 }
 
@@ -819,7 +865,7 @@ func (s *tunnel) isAllowed(allows []string) (string, bool) {
 		return "", true
 	}
 
-	allows = append(allows, conf.RouterConfig.AllowIP...)
+	allows = append(allows, conf.RouterConfig().AllowIP...)
 	if len(allows) == 0 {
 		return "", true
 	}

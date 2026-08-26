@@ -109,7 +109,7 @@ func TestGeoSiteDat(t *testing.T) {
 func TestGeoIPDat(t *testing.T) {
 	reset()
 	data := list(
-		geoIPMsg("CN", cidrMsg([]byte{1, 2, 0, 0}, 16), cidrMsg([]byte{114, 114, 114, 114}, 32)),
+		geoIPMsg("CN", cidrMsg([]byte{198, 18, 0, 0}, 16), cidrMsg([]byte{114, 114, 114, 114}, 32)),
 		geoIPMsg("US", cidrMsg([]byte{8, 8, 8, 0}, 24)),
 	)
 	p := writeTmp(t, "geoip.dat", data)
@@ -123,10 +123,10 @@ func TestGeoIPDat(t *testing.T) {
 		cat, ip string
 		want    bool
 	}{
-		{"cn", "1.2.0.0", true},     // 网络地址
-		{"cn", "1.2.128.55", true},  // 段内
-		{"cn", "1.2.255.255", true}, // 广播地址(边界)
-		{"cn", "1.3.0.0", false},    // 段外
+		{"cn", "198.18.0.0", true},     // 网络地址
+		{"cn", "198.18.128.55", true},  // 段内
+		{"cn", "198.18.255.255", true}, // 广播地址(边界)
+		{"cn", "198.19.0.0", false},    // 段外
 		{"cn", "114.114.114.114", true},
 		{"cn", "8.8.8.8", false}, // 属 US
 		{"us", "8.8.8.8", true},
@@ -137,8 +137,8 @@ func TestGeoIPDat(t *testing.T) {
 			t.Errorf("MatchIP(%q,%q)=%v want %v", c.cat, c.ip, got, c.want)
 		}
 	}
-	if last := lastAddr(netip.MustParsePrefix("1.2.0.0/16")); last.String() != "1.2.255.255" {
-		t.Errorf("lastAddr=%v want 1.2.255.255", last)
+	if last := lastAddr(netip.MustParsePrefix("198.18.0.0/16")); last.String() != "198.18.255.255" {
+		t.Errorf("lastAddr=%v want 198.18.255.255", last)
 	}
 }
 
@@ -146,7 +146,7 @@ func TestGeoIPDat(t *testing.T) {
 func TestGeoIPv6(t *testing.T) {
 	reset()
 	// 文本列表: 同一类别混 v4 + v6
-	txt := "1.2.0.0/16\n2001:db8::/32\n2402:4e00::/32\n"
+	txt := "198.18.0.0/16\n2001:db8::/32\n2001:2::/48\n"
 	if err := LoadIP("cn", writeTmp(t, "cn-cidr.txt", []byte(txt))); err != nil {
 		t.Fatal(err)
 	}
@@ -163,13 +163,13 @@ func TestGeoIPv6(t *testing.T) {
 	}{
 		{"cn", "2001:db8::1", true},           // v6 段内
 		{"cn", "2001:db8:ffff:ffff::1", true}, // v6 段内(近广播)
-		{"cn", "2001:db9::1", false},          // v6 段外
-		{"cn", "2402:4e00::1234", true},       // 另一 v6 段
-		{"cn", "1.2.3.4", true},               // 同类别 v4 仍命中(v4/v6 混存)
-		{"cn", "3.4.5.6", false},              // v4 段外
+		{"cn", "100::1", false},               // v6 段外
+		{"cn", "2001:2::1234", true},          // 另一 v6 段
+		{"cn", "198.18.3.4", true},            // 同类别 v4 仍命中(v4/v6 混存)
+		{"cn", "198.19.5.6", false},           // v4 段外
 		{"v6", "2001:db8::abcd", true},        // .dat 的 v6
-		{"v6", "2001:db9::1", false},          // .dat v6 段外
-		{"v6", "1.2.3.4", false},              // v4 查 v6-only 类别不命中
+		{"v6", "100::1", false},               // .dat v6 段外
+		{"v6", "198.18.3.4", false},           // v4 查 v6-only 类别不命中
 	}
 	for _, c := range cases {
 		if got := MatchIP(c.cat, c.ip); got != c.want {
@@ -197,7 +197,7 @@ func TestTextLists(t *testing.T) {
 	if err := LoadSite("cn", sp); err != nil {
 		t.Fatal(err)
 	}
-	ip := "# china cidr\n1.2.0.0/16\n114.114.114.114\n"
+	ip := "# china cidr\n198.18.0.0/16\n114.114.114.114\n"
 	ipp := writeTmp(t, "china-cidr.txt", []byte(ip))
 	if err := LoadIP("cn", ipp); err != nil {
 		t.Fatal(err)
@@ -214,7 +214,7 @@ func TestTextLists(t *testing.T) {
 			t.Errorf("text MatchSite(cn,%q)=%v want %v", d, got, want)
 		}
 	}
-	if !MatchIP("cn", "1.2.3.4") || !MatchIP("cn", "114.114.114.114") || MatchIP("cn", "8.8.8.8") {
+	if !MatchIP("cn", "198.18.3.4") || !MatchIP("cn", "114.114.114.114") || MatchIP("cn", "8.8.8.8") {
 		t.Error("text geoip 匹配错误")
 	}
 }
@@ -257,5 +257,154 @@ func TestExtractRoundTrip(t *testing.T) {
 	}
 	if err := Extract(in, []string{"kr"}, out); err == nil {
 		t.Error("提取不存在的类别应报错")
+	}
+}
+
+// TestLoadIPFile 校验新写法: 一个 .dat 一次加载多类别; cats 留空=全部; 文本列表 cats 约束。
+func TestLoadIPFile(t *testing.T) {
+	reset()
+	dat := writeTmp(t, "geoip.dat", list(
+		geoIPMsg("CN", cidrMsg([]byte{198, 18, 0, 0}, 16)),
+		geoIPMsg("US", cidrMsg([]byte{8, 8, 8, 0}, 24)),
+		geoIPMsg("JP", cidrMsg([]byte{9, 9, 9, 0}, 24)),
+	))
+	// 一个文件一次取多个类别
+	if err := LoadIPFile(dat, []string{"cn", "us"}); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchIP("cn", "198.18.3.4") || !MatchIP("us", "8.8.8.8") {
+		t.Error("cn/us 应命中")
+	}
+	if MatchIP("jp", "9.9.9.9") {
+		t.Error("未加载的 jp 不应命中")
+	}
+	if err := LoadIPFile(dat, []string{"kr"}); err == nil {
+		t.Error("缺失类别应报错")
+	}
+
+	// cats 留空 = 加载全部类别
+	reset()
+	if err := LoadIPFile(dat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchIP("cn", "198.18.3.4") || !MatchIP("us", "8.8.8.8") || !MatchIP("jp", "9.9.9.9") {
+		t.Error("cats 留空应加载全部类别")
+	}
+	if ic, _ := Stat(); ic != 3 {
+		t.Errorf("应加载 3 个类别, 实际 %d", ic)
+	}
+
+	// 文本列表: cats 必须恰好一个
+	reset()
+	txt := writeTmp(t, "cn.txt", []byte("198.18.0.0/16\n"))
+	if err := LoadIPFile(txt, nil); err == nil {
+		t.Error("文本列表 cats 留空应报错")
+	}
+	if err := LoadIPFile(txt, []string{"a", "b"}); err == nil {
+		t.Error("文本列表 cats 多个应报错")
+	}
+	if err := LoadIPFile(txt, []string{"cn"}); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchIP("cn", "198.18.3.4") {
+		t.Error("文本列表单类别应命中")
+	}
+}
+
+// TestLoadSiteFile 校验 geosite 新写法的多类别与 cats 留空=全部。
+func TestLoadSiteFile(t *testing.T) {
+	reset()
+	dat := writeTmp(t, "geosite.dat", list(
+		geoSiteMsg("CN", domainMsg(2, "baidu.com")),
+		geoSiteMsg("GOOGLE", domainMsg(2, "google.com")),
+	))
+	if err := LoadSiteFile(dat, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !MatchSite("cn", "www.baidu.com") || !MatchSite("google", "www.google.com") {
+		t.Error("cats 留空应加载全部 geosite 类别")
+	}
+}
+
+// TestDatSiteCatsSkipsUnwanted 校验指定 cats 时, 未请求类别的域名不会被解码进结果
+// (避免大文件只用一个类别时仍解码全部类别、造成内存/CPU 浪费)。
+func TestDatSiteCatsSkipsUnwanted(t *testing.T) {
+	data := list(
+		geoSiteMsg("cn", domainMsg(2, "baidu.com")),
+		geoSiteMsg("google", domainMsg(2, "google.com")),
+	)
+	all, err := datSiteCats(data, []string{"cn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("只请求 cn 时应只解码 1 个类别, got %d: %v", len(all), all)
+	}
+	if _, ok := all["cn"]; !ok {
+		t.Error("缺少请求的 cn 类别")
+	}
+	if _, ok := all["google"]; ok {
+		t.Error("不应解码未请求的 google 类别")
+	}
+}
+
+// TestDomainIndex 校验"排序数组+原始字节偏移"这个压缩存储本身的正确性:
+// 空集合、前缀互相包含(baidu.com / baidu.com.cn)、构建后再次合并去重。
+func TestDomainIndex(t *testing.T) {
+	empty := domainIndex{}
+	if empty.contains("a.com") {
+		t.Error("空索引不应命中任何域名")
+	}
+
+	idx := buildDomainIndex(map[string]struct{}{
+		"baidu.com":    {},
+		"baidu.com.cn": {}, // 与 baidu.com 互为前缀, 但应各自独立
+		"qq.com":       {},
+		"a.com":        {},
+	})
+	for _, d := range []string{"baidu.com", "baidu.com.cn", "qq.com", "a.com"} {
+		if !idx.contains(d) {
+			t.Errorf("contains(%q)=false, want true", d)
+		}
+	}
+	for _, d := range []string{"baidu.co", "baidu.com.c", "aa.com", "", "z"} {
+		if idx.contains(d) {
+			t.Errorf("contains(%q)=true, want false", d)
+		}
+	}
+
+	merged := mergeIndex(idx, map[string]struct{}{
+		"qq.com":  {}, // 已存在, 应去重不影响结果
+		"163.com": {}, // 新增
+	})
+	if len(merged.entries) != 5 {
+		t.Fatalf("合并去重后应有 5 条, got %d", len(merged.entries))
+	}
+	if !merged.contains("163.com") || !merged.contains("qq.com") {
+		t.Error("合并后应同时命中旧域名与新域名")
+	}
+	if len(idx.entries) != 4 {
+		t.Error("mergeIndex 不应修改原索引(old 应保持不变)")
+	}
+}
+
+// TestDatIPCatsSkipsUnwanted 同上, 校验 geoip 一侧同样的过滤行为。
+func TestDatIPCatsSkipsUnwanted(t *testing.T) {
+	data := list(
+		geoIPMsg("cn", cidrMsg([]byte{1, 2, 3, 0}, 24)),
+		geoIPMsg("us", cidrMsg([]byte{4, 5, 6, 0}, 24)),
+	)
+	all, err := datIPCats(data, []string{"cn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("只请求 cn 时应只解码 1 个类别, got %d: %v", len(all), all)
+	}
+	if _, ok := all["cn"]; !ok {
+		t.Error("缺少请求的 cn 类别")
+	}
+	if _, ok := all["us"]; ok {
+		t.Error("不应解码未请求的 us 类别")
 	}
 }

@@ -26,6 +26,7 @@ type Request struct {
 	DstIP   string //目标ip
 	DstPort uint16 //目标端口
 	TUN     bool   // 来自 TUN 设备，DstIP 已由内核路由确定，无需本地 DNS 重解析
+	Raw     bool   // 原始字节流透传(socks5/tun): 不是 http.go 解析改写成绝对形式的请求，走 http 上级代理时须用 CONNECT 隧道而非直发
 }
 
 // NewRequest 请求类
@@ -57,8 +58,8 @@ func NewRequestWithBuf(ctx context.Context, conn *net.TCPConn, buf []byte) *Requ
 // ReadRequest 分析请求内容
 func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 	//如果启用了tcpcopy 且目标地址也有配置，则进行tcpcopy转发
-	if conf.RouterConfig.TcpCopy.Enable {
-		if conf.RouterConfig.TcpCopy.IP != "" && conf.RouterConfig.TcpCopy.Port > 0 {
+	if conf.RouterConfig().TcpCopy.Enable {
+		if conf.RouterConfig().TcpCopy.IP != "" && conf.RouterConfig().TcpCopy.Port > 0 {
 			s := newTCPCopy(that)
 			that.Proto = "tcp"
 			that.Stream = s
@@ -101,8 +102,8 @@ func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 
 // 加密Token
 func getToken() string {
-	if conf.RouterConfig.Token == "" {
+	if conf.RouterConfig().Token == "" {
 		return AesToken
 	}
-	return conf.RouterConfig.Token
+	return conf.RouterConfig().Token
 }

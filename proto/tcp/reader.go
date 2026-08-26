@@ -74,6 +74,11 @@ func (b *Reader) readErr() error {
 	return err
 }
 
+// ResetErr 清除挂起的读错误。
+// 供"探测首包"这类一次性带读超时的读取使用: 探测超时会把 timeout 错误存进 b.err,
+// 清掉后不影响后续的正常转发读取(连接真断了下次 Read 会自然重新读到 EOF/RST)。
+func (b *Reader) ResetErr() { b.err = nil }
+
 // 一次性读一些数据，如果读出的数据大于要返回的数据则放入buf，否则不放buf
 func (b *Reader) Read(p []byte) (n int, err error) {
 	n = len(p)

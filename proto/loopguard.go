@@ -6,7 +6,7 @@ import (
 	"github.com/keminar/anyproxy/utils/conf"
 )
 
-// loopguard 是同机 A(mode=tun)+B(mode=bypass) 部署下的死循环兜底熔断器。
+// loopguard 是同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署下的死循环兜底熔断器。
 // 正常应由 bypass 从路由层根治环路; 本熔断器仅作最后防线。
 //
 // 判定思路(避免对每个域名做每秒计数的浪费):
@@ -36,7 +36,7 @@ var guard = &loopGuard{
 
 // loopGuardConf 解析配置。minActive<0 表示关闭。
 func loopGuardConf() (minActive, ratio int) {
-	c := conf.RouterConfig.LoopGuard
+	c := conf.RouterConfig().LoopGuard
 	minActive = c.MinActive
 	if minActive == 0 {
 		minActive = loopGuardDefaultMinActive

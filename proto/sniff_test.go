@@ -125,7 +125,7 @@ func TestSniffConnect(t *testing.T) {
 	}{
 		{"无Host头", "CONNECT www.baidu.com:443 HTTP/1.1\r\n\r\n", "www.baidu.com"},
 		{"带Host头", "CONNECT www.baidu.com:443 HTTP/1.1\r\nHost: www.baidu.com:443\r\n\r\n", "www.baidu.com"},
-		{"纯IP不当域名", "CONNECT 1.2.3.4:443 HTTP/1.1\r\n\r\n", ""},
+		{"纯IP不当域名", "CONNECT 192.0.2.10:443 HTTP/1.1\r\n\r\n", ""},
 		{"仅请求行未完(无换行)", "CONNECT www.baidu.com:443 HTTP/1.1", ""},
 	}
 	for _, c := range cases {
@@ -146,7 +146,7 @@ func TestConnectTarget(t *testing.T) {
 		ok   bool
 	}{
 		{"域名带端口", "CONNECT www.baidu.com:443 HTTP/1.1\r\n\r\n", "www.baidu.com", 443, true},
-		{"IP带端口", "CONNECT 1.2.3.4:8443 HTTP/1.1\r\n\r\n", "1.2.3.4", 8443, true},
+		{"IP带端口", "CONNECT 192.0.2.10:8443 HTTP/1.1\r\n\r\n", "192.0.2.10", 8443, true},
 		{"粘连TLS数据", "CONNECT a.com:443 HTTP/1.1\r\n\r\n\x16\x03\x01", "a.com", 443, true},
 		{"非CONNECT", "GET / HTTP/1.1\r\nHost: a.com\r\n\r\n", "", 0, false},
 		{"无端口", "CONNECT badhostnoport HTTP/1.1\r\n\r\n", "", 0, false},

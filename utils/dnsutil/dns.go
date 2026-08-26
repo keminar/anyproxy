@@ -16,6 +16,36 @@ import (
 // Port 是 DNS 使用的 UDP 端口。
 const Port = 53
 
+// defaultBlackholeIP 是黑洞哨兵 IP 的默认值。192.0.0.0 属 IANA 特殊用途(IETF Protocol
+// Assignments), 不会是真实业务目标, 不可路由, 适合作"本地拦截、经代理才可达"的哨兵。
+const defaultBlackholeIP = "192.0.0.0"
+
+// BlackholeIP 返回配置的黑洞哨兵 IP(default.blackholeIP)。不配默认 192.0.0.0;
+// 显式配 off/none/disable 则返回空串(功能关闭)。
+func BlackholeIP() string {
+	s := ""
+	if conf.RouterConfig() != nil {
+		s = strings.TrimSpace(conf.RouterConfig().Default.BlackholeIP)
+	}
+	switch strings.ToLower(s) {
+	case "":
+		return defaultBlackholeIP
+	case "off", "none", "disable":
+		return ""
+	default:
+		return s
+	}
+}
+
+// IsBlackholeIP 判断给定 IP 是否为当前生效的黑洞哨兵 IP。
+func IsBlackholeIP(ip string) bool {
+	if ip == "" {
+		return false
+	}
+	bh := BlackholeIP()
+	return bh != "" && ip == bh
+}
+
 // DNS 查询类型
 const (
 	TypeA    = 1  // IPv4 地址记录
@@ -166,11 +196,11 @@ func BuildEmpty(query []byte) []byte {
 // MatchHostDNS 在 hosts 配置中查找域名的 IP 映射。
 // 返回: IP(如匹配到ip配置), deny(如target为deny), matched(是否匹配到任何规则)。
 func MatchHostDNS(domain string) (ip string, deny bool, matched bool) {
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		return
 	}
-	defMatch := conf.RouterConfig.Default.Match
-	for _, h := range conf.RouterConfig.Hosts {
+	defMatch := conf.RouterConfig().Default.Match
+	for _, h := range conf.RouterConfig().Hosts {
 		if h.Matched(domain, defMatch) {
 			return h.IP, h.Target == "deny", true
 		}
@@ -187,10 +217,10 @@ func MatchHostDNS(domain string) (ip string, deny bool, matched bool) {
 // 一个 IP 可对应多个域名(CDN/共用IP)，反查不唯一、不能作为安全判定依据。
 // deny 域名在 DNS 层已返回 NXDOMAIN、客户端拿不到 IP，天然发不出 QUIC，无需在此处理。
 func HostBlocksUDP(dstIP string) bool {
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		return false
 	}
-	for _, h := range conf.RouterConfig.Hosts {
+	for _, h := range conf.RouterConfig().Hosts {
 		if h.IP != "" && h.IP == dstIP {
 			return true
 		}
@@ -200,10 +230,10 @@ func HostBlocksUDP(dstIP string) bool {
 
 // BlockQUICEnabled 返回是否启用 QUIC(UDP443) 阻断, 不配置默认 true。
 func BlockQUICEnabled() bool {
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		return false
 	}
-	b := conf.RouterConfig.Tun.BlockQUIC
+	b := conf.RouterConfig().Tun.BlockQUIC
 	return b == nil || *b
 }
 

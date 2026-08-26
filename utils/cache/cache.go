@@ -17,14 +17,9 @@ var ResolveLookup *resolveLookupCache
 // 按目标 IP 还原出客户端实际解析过的真实域名，供按域名匹配代理规则。
 var SniffName *sniffNameCache
 
-// ProxyDial 上游代理连通性缓存: 记录最近探测失败(不可用)的代理地址,
-// 有效期内直接跳过 300ms 拨号探测, 避免每个请求都对已知挂掉的代理白等一次。
-var ProxyDial *proxyDialCache
-
 func init() {
 	ResolveLookup = newResolveLookupCache()
 	SniffName = newSniffNameCache()
-	ProxyDial = newProxyDialCache()
 }
 
 // DialState 状态
@@ -148,48 +143,4 @@ func (c *sniffNameCache) Lookup(ip string) string {
 		return ""
 	}
 	return hit.name
-}
-
-// proxyDialCache 记录不可用代理地址(key 为 host:port)。
-// 代理地址基数很小(通常几个), 故用普通 map 惰性删除过期项, 无需环形缓冲。
-type proxyDialCache struct {
-	m  map[string]time.Time //key -> 不可用状态过期时间
-	mu sync.Mutex
-}
-
-func newProxyDialCache() *proxyDialCache {
-	return &proxyDialCache{m: make(map[string]time.Time)}
-}
-
-// Bad 报告该代理是否处于「不可用」缓存有效期内(命中即可跳过拨号探测)。
-// 顺带删除已过期项。
-func (c *proxyDialCache) Bad(key string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	exp, ok := c.m[key]
-	if !ok {
-		return false
-	}
-	if !exp.After(time.Now()) {
-		delete(c.m, key)
-		return false
-	}
-	return true
-}
-
-// MarkBad 标记代理不可用, d 为有效期。探测失败时调用。
-func (c *proxyDialCache) MarkBad(key string, d time.Duration) {
-	if key == "" {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.m[key] = time.Now().Add(d)
-}
-
-// Clear 清除代理的不可用标记。探测成功时调用, 让恢复的代理立即可用。
-func (c *proxyDialCache) Clear(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.m, key)
 }
