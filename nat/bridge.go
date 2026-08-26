@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -18,8 +19,20 @@ type Bridge struct {
 	typ   uint8 //连接类型(ConnHTTP/ConnTCP), 与 reqID 组成复合键
 	conn  *net.TCPConn
 
+	// 本连接累计流量(原子, 供存活心跳/关闭汇总实时读取):
+	//   copyBytes: CopyBuffer 写出方向(请求端->websocket)
+	//   pumpBytes: WritePump 写入方向(websocket->请求端)
+	copyBytes int64
+	pumpBytes int64
+
 	// Buffered channel of outbound messages.
 	send chan []byte
+}
+
+// Stats 返回本连接两个方向的累计字节(原子读), 供调用方打存活/汇总日志。
+// 服务端入口连接视角: copyBytes 为上行(请求端->内网), pumpBytes 为下行(内网->请求端)。
+func (b *Bridge) Stats() (copyBytes, pumpBytes int64) {
+	return atomic.LoadInt64(&b.copyBytes), atomic.LoadInt64(&b.pumpBytes)
 }
 
 // Unregister 包外面调用取消注册
@@ -87,6 +100,7 @@ func (b *Bridge) WritePump() (written int64, err error) {
 				return
 			}
 			written += int64(nw)
+			atomic.AddInt64(&b.pumpBytes, int64(nw))
 		}
 	}
 }
@@ -111,6 +125,7 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
+				atomic.AddInt64(&b.copyBytes, int64(nw))
 			}
 			if ew != nil {
 				err = ew

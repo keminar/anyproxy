@@ -7,7 +7,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/grace/autoinc"
 	"github.com/keminar/anyproxy/utils/conf"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -16,6 +15,10 @@ import (
 // forwardInc 裸TCP路径的连接采番器。与 HTTP 路径(req.ID)各自从 1 起,
 // 靠 Message.Type(ConnTCP/ConnHTTP) 区分, 复合键不会撞号。
 var forwardInc = autoinc.New(1, 1)
+
+// forwardAliveInterval 裸TCP转发长连接的存活心跳间隔: 未关闭的连接每隔该时长打一行
+// 累计流量+时长, 便于发现长期挂着的会话(如RDP)。可按需调整。
+const forwardAliveInterval = 60 * time.Second
 
 // buildForward 订阅方按自己这条连接的配置构建 端口->target 映射(见 conf.ClientForward)。
 // 每条 server 连接各自持有一份(见 nat/handler.go 的 wsClientConn.forward), 互不干扰。
@@ -139,33 +142,65 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	id := forwardInc.ID()
 	// 服务端入口端口: 从监听地址解析, 供订阅方查固定 target
 	port := listenPort(r.Listen)
-	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d)", conn.RemoteAddr(), r.Email, port))
-	defer log.Println(trace.ID(id), "nat forward closed")
+	src := conn.RemoteAddr()
+	start := time.Now()
+	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d)", src, r.Email, port))
 
 	b := ServerBridge.Register(c, id, ConnTCP, conn)
 	defer b.Unregister()
+
+	// 存活心跳: 未关闭的连接每隔 forwardAliveInterval 打一行累计流量+时长, 便于发现长期
+	// 挂着的会话(如RDP), 也能和"秒级RST"的扫描噪声区分开。连接结束时 close(alive) 停掉。
+	alive := make(chan struct{})
+	defer close(alive)
+	go func() {
+		t := time.NewTicker(forwardAliveInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-alive:
+				return
+			case <-t.C:
+				up, down := b.Stats()
+				log.Println(trace.ID(id), fmt.Sprintf("nat forward alive %s up=%d down=%d dur=%s", src, up, down, time.Since(start).Round(time.Second)))
+			}
+		}
+	}()
 
 	// 通知订阅方创建到内网目标的连接
 	b.Open(port)
 
 	done := make(chan struct{})
+	var upErr error
 	// 请求端 -> websocket
 	go func() {
 		defer close(done)
-		readSize, err := b.CopyBuffer(b, conn, "forward")
-		logCopyErr(trace.ID(id), "nat forward request->websocket", err)
-		if config.DebugLevel >= config.LevelDebug {
-			log.Println(trace.ID(id), "nat forward request size", readSize)
-		}
+		_, upErr = b.CopyBuffer(b, conn, "forward")
+		logCopyErr(trace.ID(id), "nat forward request->websocket", upErr)
 		b.CloseWrite()
 	}()
 	// websocket -> 请求端
-	written, err := b.WritePump()
-	logCopyErr(trace.ID(id), "nat forward websocket->request", err)
-	if config.DebugLevel >= config.LevelDebug {
-		log.Println(trace.ID(id), "nat forward response size", written)
-	}
+	_, downErr := b.WritePump()
+	logCopyErr(trace.ID(id), "nat forward websocket->request", downErr)
 	<-done
+
+	// 关闭汇总: 无条件打一行, 含累计上/下行字节、连接时长、关闭原因, 用来判断这条连接
+	// 到底传没传数据、活了多久、怎么断的(TCP连通≠真登录, 登录审计仍以内网机器为准)。
+	up, down := b.Stats()
+	log.Println(trace.ID(id), fmt.Sprintf("nat forward closed %s up=%d down=%d dur=%s reason=%s",
+		src, up, down, time.Since(start).Round(time.Second), forwardCloseReason(upErr, downErr)))
+}
+
+// forwardCloseReason 归纳裸TCP转发连接的关闭原因: CopyBuffer/WritePump 正常结束(含对端EOF)
+// 返回 nil, 此时记 normal; 任一方向有真错误则标出方向与错误。
+func forwardCloseReason(up, down error) string {
+	if up != nil {
+		return "up:" + up.Error()
+	}
+	if down != nil {
+		return "down:" + down.Error()
+	}
+	return "normal"
 }
 
 // listenPort 从监听地址(如 ":2222" / "0.0.0.0:2222")解析端口号。
