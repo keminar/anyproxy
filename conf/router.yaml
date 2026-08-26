@@ -153,8 +153,8 @@ default:
   #      并强制按 target=remote + dns=remote 处理 —— 不直连哨兵, 而是从 SNI 取域名交下级
   #      代理远程解析真实 IP 连出, 于是该域名经代理可正常访问。
   # windows WinDivert 下该 IP 强制进引擎(不受 tun.windows.bypassPrivate 影响)。
-  # 注意: ②依赖能嗅到 SNI/Host 域名(ECH 等嗅不到则拒绝), 且需有可用下级代理。详见
-  # docs/tun-dns-resolution.md 第5节。
+  # 注意: 哨兵必须用 192.0.0.0(不能用 127.0.0.1 或私网, 否则不进 TUN/引擎); ②依赖能嗅到
+  # SNI/Host 域名(ECH 等嗅不到则拒绝), 且需有可用下级代理。专题详见 docs/blackhole-sentinel.md。
   #blackholeIP: 192.0.0.0
 
 # 域名，可热加载

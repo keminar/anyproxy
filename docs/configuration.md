@@ -94,7 +94,7 @@ hosts:
 | `default.dns` | `local` | DNS 服务器：`local` 当前环境 / `remote` 远程（仅 `target=remote` 有效） |
 | `default.match` | `equal` | 默认域名比对方式：`contain`/`equal`（仅 `name` 无星号且未显式配 `match` 时生效） |
 | `default.proxy` | 空 | 全局代理服务器，优先级低于 `-p`；支持多代理与 `local`/`deny` 后缀，见 [routing.md](routing.md#proxy-字段) |
-| `default.blackholeIP` | `192.0.0.0` | 黑洞哨兵 IP：把域名(系统 hosts 或本配置)指向它，达成「无代理时本地不可达=拦截、有代理时强制走代理并远程解析」。命中该 IP 的连接强制 `target=remote`+`dns=remote`；Windows WinDivert 下强制拦截进引擎(不受 `bypassPrivate` 影响)。设 `off`/`none`/`disable` 关闭。详见 [tun-dns-resolution.md](tun-dns-resolution.md#5-黑洞哨兵-ip解决系统-hosts--代理并存的问题) |
+| `default.blackholeIP` | `192.0.0.0` | 黑洞哨兵 IP：把域名(系统 hosts 或本配置)指向它，达成「无代理时本地不可达=拦截、有代理时强制走代理并远程解析」。命中该 IP 的连接强制 `target=remote`+`dns=remote`；Windows WinDivert 下强制拦截进引擎(不受 `bypassPrivate` 影响)。设 `off`/`none`/`disable` 关闭。专题详见 [blackhole-sentinel.md](blackhole-sentinel.md) |
 
 ## hosts（域名规则列表，可热加载）
 

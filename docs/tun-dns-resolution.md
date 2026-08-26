@@ -167,96 +167,27 @@ DoH 拿到的是**真实公网 IP**（非私网），所以 `BypassPrivate` 对 
 
 ## 5. 黑洞哨兵 IP：解决「系统 hosts + 代理」并存的问题
 
-前面几节暴露了一个两难：想用**系统 hosts** 把某域名「本地屏蔽」，一旦开了 WinDivert 代理，这个域名
-又希望能**经代理正常访问**。直接在 hosts 写真实 IP 做不到二者兼得。**黑洞哨兵 IP** 就是为此设计的。
-
-### 用法
-
-在系统 hosts（或 anyproxy 配置 hosts）里，把域名指向一个**不可路由的哨兵 IP**（默认 `192.0.0.0`）：
+上面几节暴露了一个两难：想用 **hosts 把域名本地屏蔽**，一旦开了代理，这个域名又希望能**经代理正常访问**。
+直接写死一个 IP 做不到两全。**黑洞哨兵 IP**（默认 `192.0.0.0`）就是解法——把域名指向它：
 
 ```
-# C:\Windows\System32\drivers\etc\hosts
+# hosts：C:\Windows\System32\drivers\etc\hosts 或 /etc/hosts
 192.0.0.0 example.com
 ```
 
-哨兵 IP 由 `default.blackholeIP` 配置，**不配默认 `192.0.0.0`**；设 `off`/`none`/`disable` 关闭。
-`192.0.0.0` 属 IANA 特殊用途地址，不会撞真实业务目标，且不可路由。
+- **没开代理**：`192.0.0.0` 不可路由 → 连它必然失败 → 域名本机被屏蔽。
+- **开了 anyproxy（tun/WinDivert）**：连接被拦截进引擎 → 从 SNI/Host 还原真实域名 → 强制
+  `target=remote`+`dns=remote` → 下级代理解析真实 IP 连出 → 正常访问。
 
-### ⚠️ 哨兵必须用 192.0.0.0，不能用 127.0.0.1 或私网
+关键点：**检测靠 `dstIP`（哨兵就是浏览器实际连的目的地，总是有），SNI 只用来还原真实域名交给下级解析**；
+哨兵**必须用 `192.0.0.0`**，用 `127.0.0.1`（loopback 不进 TUN）或私网（可能被 bypass）都不行。
 
-哨兵能生效的前提是**目标 IP 会被路由进 TUN/引擎**。常见误用是把域名指到 `127.0.0.1`——**这不会被拦截**：
-
-- **`127.0.0.1`（loopback）**：内核用内置路由 `127.0.0.0/8 dev lo`（/8）把它送到 loopback，比
-  autoRoute 的 `0.0.0.0/1`+`128.0.0.0/1`（/1）**更具体、必然优先**；且内核特判 127/8 不往 lo 以外发。
-  结果**数据包根本不进 TUN**，anyproxy 看不到、日志无记录；本机 `127.0.0.1:80` 又无人监听，于是
-  立刻 `Connection refused`。典型现象是 `curl` **几毫秒内**就失败（走 TUN 经代理应是几十~几百 ms）。
-- **私网/LAN（`10.x`/`192.168.x` 等）**：Windows 默认 `bypassPrivate=true` 会在捕获阶段直连、不进引擎；
-  Linux 若落在本机直连子网也可能被 bypass。都不稳定。
-- **`192.0.0.0`**：非 loopback、非私网、不可路由，落在 `128.0.0.0/1` 会被路由进 TUN；WinDivert 下又被
-  哨兵规则强制进引擎。**这才是唯一稳妥的选择**（也是默认值）。
-
-| 哨兵候选 | 是否进 TUN/引擎 | 结论 |
-|---|---|---|
-| `127.0.0.1`（loopback） | ❌ 走 lo，不进 TUN | 无法捕获，秒级 refused |
-| `10.x`/`192.168.x`（私网） | △ 可能被 bypass 直连 | 不稳定 |
-| **`192.0.0.0`** | ✅ 进 TUN；WinDivert 强制进引擎 | **正解（默认）** |
-
-### 达成的两个效果
-
-**① 没开代理时：本地不可达 = 天然屏蔽。**
-`192.0.0.0` 不可路由，浏览器连它必然失败，等于把 example.com 在本机屏蔽掉——无需防火墙规则。
-
-**② 开了 WinDivert 代理（未设系统代理）时：拦截进 anyproxy 并以 `dns:remote` 出去 = 可访问。**
-分两个阶段：
-
-- **捕获阶段**（[`tun/wdengine/redirect.go`](../tun/wdengine/redirect.go) `isDirect`）：哨兵 IP 被标记为
-  **必须进引擎**，不受 `bypassPrivate`/`SkipPorts` 影响（即便你把哨兵配成私网地址也照拦不误）。
-- **转发阶段**（[`proto/tunnel.go`](../proto/tunnel.go) `handshake`）：**目标 IP == 哨兵**即判定为黑洞连接，
-  **强制 `target=remote` + `dns=remote`**——绝不直连 `192.0.0.0`，而是把**域名**交给下级代理，由下级
-  远程解析真实 IP 并连出。于是 example.com 经代理正常访问。
-
-  > **检测靠 `dstIP`，不靠 SNI。** 哨兵 IP 是浏览器**实际连接的目的地**（系统 hosts 把 example.com
-  > 解析成 `192.0.0.0`，浏览器就朝 `192.0.0.0` 发起连接），WinDivert 捕获还原后 `dstIP` 就是它——
-  > 这个信号**总是有**，判定黑洞不需要 SNI。SNI 是**另一路独立信号**，只用来还原「背后真实域名是谁」，
-  > 好把域名交给下级远程解析（`192.0.0.0` 本身不能拨、也不能反查——多个域名可指向同一哨兵，反查不唯一）。
-
-  | 要判断的事 | 信号来源 | 是否总是有 |
-  |---|---|---|
-  | 是不是黑洞连接 | `dstIP`（内核路由/捕获得到） | **总是有** |
-  | 背后真实域名 | SNI / Host 首包 | 可能嗅不到（ECH、非 TLS、无首包） |
-
-```
-浏览器 → example.com(hosts→192.0.0.0) → TCP 192.0.0.0:443
-      → WinDivert 捕获(哨兵强制进引擎) → anyproxy 嗅 SNI=example.com
-      → 强制 remote+remote → 下级代理按域名解析真实 IP → 连通
-```
-
-### 边界与注意
-
-- **有哨兵 dstIP 但嗅不到域名 → 拒绝**（不是死代码，正为这种情形准备）：会出现「`dstIP==192.0.0.0`
-  但 `dstName==""`」的真实情况——浏览器开 **ECH**（加密 ClientHello）照样从 hosts 拿到 `192.0.0.0`
-  并连过去，但 SNI 被加密；还有非 TLS/HTTP、非 80/443 无首包等。此时**确知是黑洞连接**（dstIP 命中），
-  却**不知道让下级解析哪个域名**，又绝不能直连 `192.0.0.0`——三者叠加只能**拒绝**
-  （`blackhole ip ... but no domain to proxy`）。
-  - 细节：若哨兵是通过 **anyproxy 配置 hosts**（非系统 hosts）映射的，DNS 劫持时已把 `192.0.0.0→域名`
-    记进 `cache.SniffName`，即便无 SNI，`ForwardTCP` 也能反查回域名，不会走到拒绝。**只有系统 hosts
-    哨兵 + 无 SNI** 才真正落到拒绝分支（系统 hosts 不经 UDP 劫持，SniffName 无记录）。
-- **必须有可用的下级代理**：走到转发阶段仍无可用代理时**直接判失败**
-  （`blackhole ip ... requires an upstream proxy`），不会徒劳拨号 `192.0.0.0` 等超时。等价于"无代理即不可访问"。
-- **显式 `deny` 优先**：若配置规则已把该域名判 `deny`，不被哨兵逻辑覆盖（仍然拒绝）。
-- **端口范围**：捕获仍受 WinDivert 过滤器端口约束（默认 80/443）。哨兵主要面向 Web 域名；
-  其它端口若未纳入捕获则不生效。
-- **跨平台**：转发阶段的强制 `remote+remote` 逻辑是三平台共用的（[`proto/tunnel.go`](../proto/tunnel.go)）；
-  Linux/macOS gVisor TUN 同样适用（`192.0.0.0` 非私网，本就会被捕获）。捕获阶段的"强制不 bypass"
-  仅 Windows WinDivert 需要（其它平台哨兵非私网、本就进栈）。
-
-### 与 DoH 的关系
-
-若客户端用 DoH，解析 example.com 时**不查系统 hosts**，拿到的是真实公网 IP（不是哨兵）——此时效果①
-（本地屏蔽）失效。要对 DoH 客户端也生效，需改用 anyproxy 配置 hosts 把域名映射到哨兵（DNS 层劫持，
-见第 1 节②），或屏蔽 DoH 服务器逼其回退明文 DNS。
+> 📖 完整专题（动机、两阶段原理、配置、跨平台、示例、排错 FAQ）见
+> **[blackhole-sentinel.md](blackhole-sentinel.md)**。
 
 ## 相关文档
+
+- [blackhole-sentinel.md](blackhole-sentinel.md) — **黑洞哨兵 IP 专题**：一个哨兵 IP 同时实现「无代理时本地屏蔽」+「有代理时经下级远程解析访问」。
 
 - [tun-features.md](tun-features.md) — TUN 特性总览、DNS 劫持与 `blockQUIC`（QUIC/UDP443 对配了 `ip` 域名的 drop）。
 - [windows-windivert-redirect.md](windows-windivert-redirect.md) — WinDivert 捕获→NAT→本地代理→恢复目的地的转发链路。
