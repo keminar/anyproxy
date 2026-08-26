@@ -182,6 +182,11 @@ type Default struct {
 	DNS       string `yaml:"dns"`       //默认的DNS服务器
 	Proxy     string `yaml:"proxy"`     //全局代理服务器
 	TCPTarget string `yaml:"tcpTarget"` //tcp默认访问策略: auto/local/remote/deny/localport
+	//黑洞哨兵IP: 系统hosts或本配置里把域名指向它(如 192.0.0.0 example.com), 达成"无代理时本地不可达(拦截)、
+	//有代理时强制走代理并由下级远程DNS解析"。不配默认 192.0.0.0; 设为 off/none/disable 关闭。命中该IP的连接
+	//强制按 target=remote + dns=remote 处理(见 proto/tunnel.go handshake), 并在 windows WinDivert 捕获阶段
+	//强制拦截进引擎(不受 bypassPrivate 影响)。
+	BlackholeIP string `yaml:"blackholeIP"`
 	//tcpTarget=localport 时，这些端口走本地直连、其余走代理。
 	//不配置则默认 21(ftp)/22(ssh)；一旦配置则完全以此为准(覆盖默认)。
 	LocalPort []int `yaml:"localPort"`

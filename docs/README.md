@@ -24,7 +24,7 @@
 - [geo.md](geo.md) — geoip/geosite 分流：用 `geoip.dat`/`geosite.dat`(protobuf) 或文本列表按国家 IP 段/域名类别匹配（`name: geoip:cn` / `geosite:cn`），`-geo-extract` 离线提取小文件、零依赖 protobuf 解析、只用 Domain+Full。
 - [caching.md](caching.md) — 进程内缓存：DNS 解析缓存(10min，配了 `ip` 的域名不吃缓存)、auto 直连失败缓存(20s)、嗅探域名缓存(10min，救预连接场景的按域名匹配)；上级代理连通性缓存已移除(改每次实探)。
 - [tun-features.md](tun-features.md) — TUN 全局代理特性：跨平台(Linux/Windows/macOS utun)、自动路由 `autoRoute`、QUIC(UDP443) 拦截 `blockQUIC`、UDP 转发行为、`target`/`proxy` 优先级。
-- [tun-dns-resolution.md](tun-dns-resolution.md) — TUN 下域名解析优先级：系统 hosts / anyproxy 配置 hosts / DoH-DoT 三条路径谁生效；解析阶段(UDP53 劫持) vs 转发阶段(按 SNI 重查配置、`host.IP` 覆盖、TUN 不做本地 DNS 重解析)；DoH 绕过与 `ip:` 才能强制改写的边界；及私网/LAN 目标 `BypassPrivate`(Windows 默认 true)在捕获阶段就直连、不进引擎的例外。
+- [tun-dns-resolution.md](tun-dns-resolution.md) — TUN 下域名解析优先级：系统 hosts / anyproxy 配置 hosts / DoH-DoT 三条路径谁生效；解析阶段(UDP53 劫持) vs 转发阶段(按 SNI 重查配置、`host.IP` 覆盖、TUN 不做本地 DNS 重解析)；DoH 绕过与 `ip:` 才能强制改写的边界；及私网/LAN 目标 `BypassPrivate`(Windows 默认 true)在捕获阶段就直连、不进引擎的例外；含**黑洞哨兵 IP**(`default.blackholeIP`, 默认 192.0.0.0)：把域名指向它=无代理时本地屏蔽、有代理时强制拦截进引擎并 `remote+remote` 经下级代理远程解析访问。
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治(仅Linux)、`loopGuard` 熔断器兜底、macOS/Windows 替代方案。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。
 - [windows-winDivert.md](windows-winDivert.md) — Windows WinDivert 运行依赖：`WinDivert.dll`/`.sys` 放置、管理员权限、路径含空格/中文的驱动加载问题、bypass 模式在 Windows 已移除。

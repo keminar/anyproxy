@@ -20,6 +20,7 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/cache"
 	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/dnsutil"
 	"github.com/keminar/anyproxy/utils/tools"
 	"github.com/keminar/anyproxy/utils/trace"
 	"golang.org/x/net/proxy"
@@ -465,6 +466,21 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		dstIP, state = s.lookup(dstName, dstIP)
 	}
 
+	// 黑洞哨兵 IP: 目标 IP 命中黑洞地址(系统 hosts 或本配置把域名指向不可路由的哨兵 IP,
+	// 如 192.0.0.0)。语义: 无代理时该 IP 不可达=本地拦截; 走到这里说明已被引擎接管, 强制
+	// target=remote + dns=remote —— 必须经下级代理、由下级按域名解析真实 IP 连出(绝不直连
+	// 哨兵 IP)。显式 deny 的规则优先, 不被覆盖。需要域名才能远程解析, 嗅不到则拒绝。
+	blackhole := dnsutil.IsBlackholeIP(dstIP)
+	if blackhole && confTarget != "deny" {
+		if dstName == "" {
+			err = fmt.Errorf("blackhole ip %s but no domain to proxy, deny", dstIP)
+			return
+		}
+		confTarget = "remote"
+		confDNS = "remote"
+		log.Println(trace.ID(s.req.ID), fmt.Sprintf("blackhole ip %s -> force remote dns for %s", dstIP, dstName))
+	}
+
 	// 检查是否要换端口
 	for _, p := range host.Port {
 		if p.From == dstPort {
@@ -575,6 +591,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	if proxyServer != "" && proxyPort > 0 && isSelfProxy(proxyServer, proxyPort) {
 		logSelfProxy(s.req.ID, proxyServer, proxyPort)
 		proxyServer, proxyPort = "", 0
+	}
+	// 黑洞 IP 必须经代理出去: 走到这里仍无可用代理, 直连只会连向不可路由的哨兵 IP,
+	// 直接判失败, 避免徒劳拨号超时。等价于"无代理时该域名不可访问"。
+	if blackhole && (proxyServer == "" || proxyPort == 0) {
+		err = fmt.Errorf("blackhole ip %s requires an upstream proxy, none available for %s", dstIP, dstName)
+		return
 	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
 		// remote 请求(auto 的直连探测已在前面完成, 到这里说明要走代理)

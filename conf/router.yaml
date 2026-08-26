@@ -146,6 +146,16 @@ default:
   # (全部代理都连不通时: local 走本地直连, deny 拒绝)。例:
   #   proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 local
   proxy:
+  # 黑洞哨兵IP, 不配默认 192.0.0.0; 设 off/none/disable 关闭。
+  # 用法: 把域名指向它, 如系统 hosts 写 `192.0.0.0 example.com`。达成两个效果:
+  #   ① 没开代理时: 192.0.0.0 不可路由, 本机连它必然失败 = 天然屏蔽该域名。
+  #   ② 开了 tun/WinDivert 代理(未设系统代理)时: 命中该 IP 的连接被强制拦截进引擎,
+  #      并强制按 target=remote + dns=remote 处理 —— 不直连哨兵, 而是从 SNI 取域名交下级
+  #      代理远程解析真实 IP 连出, 于是该域名经代理可正常访问。
+  # windows WinDivert 下该 IP 强制进引擎(不受 tun.windows.bypassPrivate 影响)。
+  # 注意: ②依赖能嗅到 SNI/Host 域名(ECH 等嗅不到则拒绝), 且需有可用下级代理。详见
+  # docs/tun-dns-resolution.md 第5节。
+  #blackholeIP: 192.0.0.0
 
 # 域名，可热加载
 # name 支持首/尾 * 通配，无需再配 match(去掉星号的部分记为 X)：
@@ -186,6 +196,11 @@ hosts:
         to: 88
     allowIP:
      # - 172.17.0.12
+  # 黑洞哨兵用法(配置 hosts 版, 对 DoH 客户端也生效): 把域名 ip 指到 default.blackholeIP。
+  # 效果同系统 hosts 写 192.0.0.0, 但因走 DNS 层劫持, DoH/系统解析都拿到哨兵 IP;
+  # 命中后强制 remote+remote 经下级代理远程解析访问, 无代理时不可达=屏蔽。
+  #- name: blocked-but-proxyable.com
+  #  ip: 192.0.0.0
 
 #websocket 配置, 按角色分 server(服务端) / client(客户端) 两块
 #  server: 需配 listen, users 才起服务

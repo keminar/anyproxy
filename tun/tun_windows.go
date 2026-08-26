@@ -46,6 +46,15 @@ func Run(ctx context.Context, cfg Config) error {
 		BypassPrivate:          cfg.BypassPrivate, // 不配默认 true: 私网/LAN(含虚拟机网段)一律直连不进引擎; 配 tun.windows.bypassPrivate=false 则私网 80/443 进引擎按 router 规则。loopback 始终直连
 		MaxConnPerDomainPerSec: 50,
 	}
+	// 黑洞哨兵 IP(default.blackholeIP, 默认 192.0.0.0): 命中该 IP 的连接强制拦截进引擎,
+	// 由转发层强制 remote+remote 走下级代理。off/none/disable 关闭时返回空串, 不启用。
+	if bh := dnsutil.BlackholeIP(); bh != "" {
+		if a, err := netip.ParseAddr(bh); err == nil {
+			engCfg.BlackholeIP = a.Unmap()
+		} else {
+			log.Printf("tun(windivert): ignore invalid blackholeIP %q: %v", bh, err)
+		}
+	}
 	// 上游代理排除: 若全局上游服务器是 IPv4 字面量, 把 anyproxy→上游 那条腿排除出捕获,
 	// 避免自环。是域名/为空时留空, 由 SOCKET 层 guard 兜底。
 	if ip, err := netip.ParseAddr(config.ProxyServer); err == nil {
