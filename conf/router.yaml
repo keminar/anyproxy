@@ -200,7 +200,8 @@ websocket:
       # - user:
       #   pass:
       #   disable: false
-    # 可接入的客户端IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
+    # 可接入来源IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
+    # 同时约束: websocket 订阅方接入 与 下面 forward 裸TCP转发入口(listen)的来源
     allowIP:
     #  - 172.17.0.0/16
     # 裸TCP端口转发入口(内网穿透): 在 listen 端口收连接, 经 websocket 转给该 email 的订阅方

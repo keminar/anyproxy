@@ -127,7 +127,7 @@ type ServerUser struct {
 type WsServer struct {
 	Listen  string          `yaml:"listen"`  //websocket 监听地址
 	Users   []ServerUser    `yaml:"users"`   //鉴权账号数组, 每条 {user, pass, disable}, 不同订阅方各用各的账号
-	AllowIP []string        `yaml:"allowIP"` //可接入的客户端IP(CIDR/单IP), 为空不限制; 按真实TCP来源判定
+	AllowIP []string        `yaml:"allowIP"` //可接入来源IP(CIDR/单IP), 为空不限制; 按真实TCP来源判定; 同时约束 websocket 订阅方接入与裸TCP转发入口(forward.listen)的来源
 	Forward []ServerForward `yaml:"forward"` //裸TCP端口转发入口(见 ServerForward)
 }
 

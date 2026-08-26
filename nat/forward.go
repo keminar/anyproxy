@@ -111,6 +111,15 @@ func listenForward(r conf.ServerForward) {
 
 // handleForward 处理一条进来的裸TCP连接: 选订阅方 -> 建 bridge -> 双向转发。
 func handleForward(conn *net.TCPConn, r conf.ServerForward) {
+	// server.allowIP 白名单同样约束裸TCP入口(:listen)的来源: 按真实TCP来源判定,
+	// 为空不限制, loopback 始终放行(见 serverIPAllowed)。否则入口端口对公网全开,
+	// 会被扫描器不断连入并触发到内网目标的无谓转发。
+	peerIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	if !serverIPAllowed(peerIP) {
+		log.Printf("nat forward deny ip %s on %s, not in websocket.server.allowIP", peerIP, r.Listen)
+		conn.Close()
+		return
+	}
 	if r.Email == "" {
 		log.Printf("nat forward %s email empty, close", r.Listen)
 		conn.Close()
