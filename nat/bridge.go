@@ -106,7 +106,7 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 		if nr > 0 {
 			if config.DebugLevel >= config.LevelDebugBody {
 				md5Val, _ := md5Byte(buf[0:nr])
-				log.Println("net_debug_copy_buffer", trace.ID(b.reqID), srcname, i, nr, md5Val)
+				log.Println(trace.ID(b.reqID), "net_debug_copy_buffer", srcname, i, nr, md5Val)
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {

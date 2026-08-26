@@ -123,7 +123,7 @@ func (c *Client) localReadPump() {
 		}
 		if config.DebugLevel >= config.LevelDebugBody {
 			md5Val, _ := md5Byte(msg.Body)
-			log.Println(c.tag, "nat_local_read_from_websocket_message", msg.ID, msg.Method, md5Val)
+			log.Println(trace.ID(msg.ID), c.tag, "nat_local_read_from_websocket_message", msg.Method, md5Val)
 		}
 
 		if msg.Method == METHOD_CREATE {
@@ -131,7 +131,7 @@ func (c *Client) localReadPump() {
 			// 查不到 target 或 dial 失败: 不建 bridge, 回 CLOSE 让服务端拆链。
 			proxConn, derr := dialForCreate(c, msg)
 			if derr != nil {
-				log.Println(c.tag, trace.ID(msg.ID), "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
+				log.Println(trace.ID(msg.ID), c.tag, "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
 				closeMsg := &Message{ID: msg.ID, Type: msg.Type, Method: METHOD_CLOSE}
 				c.hub.broadcast <- &CMessage{client: c, message: closeMsg}
 				continue
@@ -141,7 +141,7 @@ func (c *Client) localReadPump() {
 				written, err := b.WritePump()
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug websocket->local", err)
 				if config.DebugLevel >= config.LevelDebug {
-					log.Println(c.tag, trace.ID(msg.ID), "nat debug response size", written)
+					log.Println(trace.ID(msg.ID), c.tag, "nat debug response size", written)
 				}
 			}()
 
@@ -149,12 +149,12 @@ func (c *Client) localReadPump() {
 			go func() {
 				defer b.Unregister()
 				if msg.Type == ConnTCP {
-					defer log.Println(c.tag, trace.ID(msg.ID), "local tcp forward closed")
+					defer log.Println(trace.ID(msg.ID), c.tag, "local tcp forward closed")
 				}
 				readSize, err := b.CopyBuffer(b, proxConn, "local")
 				logCopyErr(trace.ID(msg.ID), "nat_local_debug local->websocket", err)
 				if config.DebugLevel >= config.LevelDebug {
-					log.Println(c.tag, trace.ID(msg.ID), "nat debug request body size", readSize)
+					log.Println(trace.ID(msg.ID), c.tag, "nat debug request body size", readSize)
 				}
 				b.CloseWrite()
 			}()

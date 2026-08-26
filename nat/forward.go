@@ -60,7 +60,7 @@ func dialForCreate(c *Client, msg *Message) (*net.TCPConn, error) {
 		}
 		conn, err = bypassDial("tcp", target, 5*time.Second)
 		if err == nil {
-			log.Println(c.tag, trace.ID(msg.ID), fmt.Sprintf("local tcp forward connecting to %s (entry port %d)", target, msg.Port))
+			log.Println(trace.ID(msg.ID), c.tag, fmt.Sprintf("local tcp forward connecting to %s (entry port %d)", target, msg.Port))
 		}
 	} else {
 		conn = dialProxy() //创建本地与本地代理端口之间的连接
