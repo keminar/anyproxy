@@ -106,6 +106,11 @@ func runListen(ctx context.Context, emitter *telemetry.Emitter, streams int, for
 	if _, err := conns[0].Write([]byte("echo: " + line)); err != nil {
 		log.Fatalf("write: %v", err)
 	}
+	// Give the write time to actually reach the peer before the deferred
+	// Close() tears the group down — over a relayed (non-direct) path the
+	// close frame can otherwise race the data and the dial side sees
+	// "attach group complete" instead of the echoed reply.
+	time.Sleep(2 * time.Second)
 
 	printStats("listener", group.Stats())
 }
