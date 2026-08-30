@@ -46,7 +46,7 @@ func main() {
 	token := flag.String("token", "", "token printed by -mode=listen; required for -mode=dial")
 	streams := flag.Int("streams", session.DefaultAttachGroupStreams, "stream count for the attach group")
 	forceRelay := flag.Int("force-relay", 0, "1 to force relay-only (baseline comparison, skips punching)")
-	timeout := flag.Duration("timeout", 2*time.Minute, "how long to wait for the peer")
+	timeout := flag.Duration("timeout", 10*time.Minute, "how long to wait for the peer (keep this generous: it starts counting at process launch, not when you paste the token, so a slow copy-paste between two machines can burn most of a short budget before the peer even dials in)")
 	flag.Parse()
 
 	emitter := telemetry.WithStatusHook(nil, func(status string) {
