@@ -94,6 +94,11 @@ func (r *dnsRelay) forward(payload []byte, srcIP, dstIP tcpip.Address, srcPort, 
 	txid := binary.BigEndian.Uint16(payload[0:2])
 	resolverKey := dstIP.String()
 
+	// macOS: 给解析器加 /32 via 物理网关 例外路由逃出 TUN 的 0/1 全量路由(TTL 缓存,
+	// 其他平台空操作)。必须发生在 WriteToUDP 之前——socket 只绑了物理 IP/IP_BOUND_IF,
+	// 压不过 0/1 路由, 不加 /32 时 sendto 返回 EHOSTUNREACH(no route to host)。
+	ensureUDPDynRoute(resolverKey)
+
 	r.mu.Lock()
 	// 硬上限保护: pending 过多说明解析器普遍无响应或遭洪泛, 拒新并限流告警。
 	if len(r.pend) >= maxDNSPending {

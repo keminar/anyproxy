@@ -60,6 +60,12 @@ func setupTUNRoutes(tunName, tunIP, gw, dev string, bypassIPs []string) error {
 		if !strings.Contains(ip, "/") {
 			ip += "/32"
 		}
+		// 落在本机直连子网(物理或虚拟网卡)内的例外无需显式路由: pref 110 已让它
+		// 走 main 命中内核直连路由。强行 via 物理网关会盖掉虚拟网卡的正确路由 → 不可达。
+		if ipInBypassNets(ip) {
+			log.Printf("autoRoute: bypass %s is within a directly-connected subnet, skipping explicit route (kernel direct route)\n", ip)
+			continue
+		}
 		if err := run("ip", "route", "add", ip, "via", gw, "dev", dev); err != nil {
 			log.Printf("autoRoute: bypass route %s skipped: %v\n", ip, err)
 		}
@@ -73,7 +79,7 @@ func setupTUNRoutes(tunName, tunIP, gw, dev string, bypassIPs []string) error {
 	// pref 100: 物理网卡 IP 源(入站回包)走 main, 不进 TUN
 	linTunPhysIPs = physIPv4s(dev)
 	if len(linTunPhysIPs) == 0 {
-		log.Printf("autoRoute: WARN 未能取到物理网卡 %q 的 IPv4, 入站连接(如外网SSH)回包可能被 TUN 吸走\n", dev)
+		log.Printf("autoRoute: WARN could not get IPv4 for physical NIC %q; inbound connections (e.g. external SSH) reply packets may be pulled into TUN\n", dev)
 	}
 	for _, ip := range linTunPhysIPs {
 		if err := run("ip", "rule", "add", "from", ip+"/32", "lookup", "main", "pref", ruleFromPhys); err != nil {

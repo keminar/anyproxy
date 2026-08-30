@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/keminar/anyproxy/proto"
 	"github.com/keminar/anyproxy/tun/windivert"
 	"github.com/keminar/anyproxy/utils/dnsutil"
 )
@@ -247,7 +248,18 @@ func (e *Engine) process(pkt []byte, addr *windivert.Address) bool {
 
 	// anyproxy's own direct-egress connections must also go out untouched.
 	// Capturing them would loop: app→proxy→anyproxy-egress→captured→proxy→…
-	// The guard identifies them by source port via the SOCKET layer.
+	//
+	// Primary, deterministic identification: the Windows dialer binds every
+	// anyproxy egress connection's source port into a dedicated band
+	// (proto.EgressPortLo..Hi), so any captured packet from that band is our own.
+	// This is happens-before the SYN and IP-version-agnostic, so it catches IPv6
+	// direct — which the SOCKET-layer guard below races and misses.
+	if p.srcPort >= proto.EgressPortLo && p.srcPort <= proto.EgressPortHi {
+		return true
+	}
+	// Backstop for the rare unbound fallback dial and for extra helper processes
+	// (SocksProcessNames): the guard identifies egress by source port via the
+	// SOCKET layer.
 	if e.guard.ownsPort(p.srcPort) {
 		return true
 	}
@@ -270,6 +282,11 @@ func (e *Engine) process(pkt []byte, addr *windivert.Address) bool {
 func (e *Engine) isDirect(dstIP netip.Addr, dstPort uint16) bool {
 	if dstIP.IsLoopback() {
 		return true
+	}
+	// 黑洞哨兵 IP 必须进引擎(强制走代理), 不受 SkipPorts / BypassPrivate 影响。
+	// 即便用户把哨兵配成私网地址, 也仍拦截进引擎, 由转发层强制 remote+remote 出去。
+	if e.cfg.BlackholeIP.IsValid() && dstIP == e.cfg.BlackholeIP {
+		return false
 	}
 	if containsPort(e.cfg.SkipPorts, dstPort) {
 		return true

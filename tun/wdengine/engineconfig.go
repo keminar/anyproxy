@@ -28,6 +28,13 @@ type Config struct {
 	// Loopback (127.0.0.0/8, ::1) is always bypassed regardless of this flag.
 	BypassPrivate bool
 
+	// BlackholeIP is the sentinel destination (e.g. 192.0.0.0) that a domain is
+	// mapped to — in the system hosts file or anyproxy's own hosts config — so the
+	// domain is unreachable without a proxy yet forced through the proxy (with
+	// remote DNS) when the engine is up. Traffic to it must always be captured
+	// (never bypassed by BypassPrivate/SkipPorts). Zero value (invalid) disables it.
+	BlackholeIP netip.Addr
+
 	// BlockQUIC makes the WinDivert filter also capture outbound UDP/443 so
 	// process() can drop QUIC to hosts-hijacked IPs (forcing TCP+TLS fallback).
 	BlockQUIC bool
