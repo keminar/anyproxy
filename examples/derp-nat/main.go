@@ -96,7 +96,7 @@ func runListen(ctx context.Context, emitter *telemetry.Emitter, streams int, for
 		log.Fatal("attach group has no connections")
 	}
 	log.Printf("peer attached: %d stream(s)", len(conns))
-	logConnAddrs("listener", conns)
+	logConnAddrs("listener", conns, group.Stats().Mode)
 
 	// Echo whatever the dial side sends, once, to prove the data plane works.
 	reader := bufio.NewReader(conns[0])
@@ -135,7 +135,7 @@ func runDial(ctx context.Context, emitter *telemetry.Emitter, token string, stre
 		log.Fatal("attach group has no connections")
 	}
 	log.Printf("attached: %d stream(s)", len(conns))
-	logConnAddrs("dialer", conns)
+	logConnAddrs("dialer", conns, group.Stats().Mode)
 
 	if _, err := conns[0].Write([]byte("hello from dial side\n")); err != nil {
 		log.Fatalf("write: %v", err)
@@ -151,10 +151,22 @@ func runDial(ctx context.Context, emitter *telemetry.Emitter, token string, stre
 }
 
 // logConnAddrs prints the local/remote endpoint each stream's underlying
-// socket is actually talking to. When path==direct these remote addrs are
-// the peer's real punched-through public IP:port (no relay in the data
-// path); when path==relay they'll all point at the DERP server instead.
-func logConnAddrs(who string, conns []net.Conn) {
+// socket is actually talking to. This is only trustworthy in
+// AttachGroupModeRawDirect: that mode's conns wrap the real QUIC/UDP socket,
+// so remote is the peer's actual punched-through public IP:port. In
+// AttachGroupModeManager, transport.Manager.remotePeerAddr() (derphole
+// pkg/transport/peer.go) returns the hardcoded relay sentinel
+// 127.0.0.1:1 (pkg/session/external.go relayTransportAddr) whenever relay
+// fallback capability is configured — which is always, unless
+// -force-relay=1 — regardless of whether that manager session actually
+// ended up direct. So a manager-mode remote of 127.0.0.1:1 tells you
+// nothing about the real peer address; don't read it as "went via
+// loopback" or as evidence either way.
+func logConnAddrs(who string, conns []net.Conn, mode session.AttachGroupMode) {
+	if mode != session.AttachGroupModeRawDirect {
+		log.Printf("%s: mode=%s, not raw-direct — remote addrs below are unreliable placeholders, skipping", who, mode)
+		return
+	}
 	seen := make(map[string]bool)
 	for i, c := range conns {
 		key := fmt.Sprintf("%s->%s", c.LocalAddr(), c.RemoteAddr())
