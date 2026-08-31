@@ -33,6 +33,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"time"
 
@@ -95,6 +96,7 @@ func runListen(ctx context.Context, emitter *telemetry.Emitter, streams int, for
 		log.Fatal("attach group has no connections")
 	}
 	log.Printf("peer attached: %d stream(s)", len(conns))
+	logConnAddrs("listener", conns)
 
 	// Echo whatever the dial side sends, once, to prove the data plane works.
 	reader := bufio.NewReader(conns[0])
@@ -133,6 +135,7 @@ func runDial(ctx context.Context, emitter *telemetry.Emitter, token string, stre
 		log.Fatal("attach group has no connections")
 	}
 	log.Printf("attached: %d stream(s)", len(conns))
+	logConnAddrs("dialer", conns)
 
 	if _, err := conns[0].Write([]byte("hello from dial side\n")); err != nil {
 		log.Fatalf("write: %v", err)
@@ -145,6 +148,22 @@ func runDial(ctx context.Context, emitter *telemetry.Emitter, token string, stre
 	log.Printf("reply: %q", reply)
 
 	printStats("dialer", group.Stats())
+}
+
+// logConnAddrs prints the local/remote endpoint each stream's underlying
+// socket is actually talking to. When path==direct these remote addrs are
+// the peer's real punched-through public IP:port (no relay in the data
+// path); when path==relay they'll all point at the DERP server instead.
+func logConnAddrs(who string, conns []net.Conn) {
+	seen := make(map[string]bool)
+	for i, c := range conns {
+		key := fmt.Sprintf("%s->%s", c.LocalAddr(), c.RemoteAddr())
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		log.Printf("%s stream[%d] local=%s remote=%s", who, i, c.LocalAddr(), c.RemoteAddr())
+	}
 }
 
 func printStats(who string, stats session.AttachGroupStats) {
