@@ -203,6 +203,12 @@ func runSource(w io.Writer, rate time.Duration, payloadSize int, duration time.D
 	if _, err := w.Write(buf); err != nil {
 		log.Printf("source: write fin marker: %v", err)
 	}
+	// Give the fin marker time to actually cross the network before the
+	// caller's deferred close tears the hop down — over a real WAN link
+	// (as opposed to loopback) the close can otherwise race the write,
+	// especially on the QUIC hop where Close() doesn't linger like a TCP
+	// socket's does.
+	time.Sleep(2 * time.Second)
 	log.Printf("source: done, sent %d packets", seq)
 }
 

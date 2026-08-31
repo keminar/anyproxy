@@ -76,15 +76,71 @@ export DERPHOLE_DERP_SERVER=https://<你的域名>
 
 `derphole` 读到这个环境变量后会把该节点注册成一个自定义 region（`pkg/derpbind/route.go`），DERP 端口取 URL 里的端口，**STUN 端口固定用默认的 3478**——所以自建节点的防火墙除了 TCP 443，还必须放行 **UDP 3478**，否则候选收集（`candidate gather` 阶段）拿不到公网映射地址，打洞必然失败。
 
-用公共 DERP 集群时曾遇到 `connect derp client: derphttp.Client.Connect connect to https://derp1c.tailscale.com/derp: context deadline exceeded`；自建节点可以绕开这类第三方节点可达性问题。
+用公共 DERP 集群时曾遇到 `connect derp client: derphttp.Client.Connect connect to https://derp1c.tailscale.com/derp: context deadline exceeded`；自建节点可以绕开这类第三方节点可达性问题。(也可能是下面坑4相同原因，需要绑定host)
 
-**2. 测试机必须关闭 anyproxy 的 TUN 模式**
+**2. 测试机关闭 anyproxy 的 TUN 模式**
 
 TUN 开启（autoRoute 生效）时，derp-nat 作为一个普通第三方进程，它的出站 UDP 会命中 TUN 的兜底策略路由（`tun/route_linux.go` 的 `ip rule pref 120`）被吸进 `anytun0`，由 anyproxy 的 `udpForwarder`（`tun/udp.go`）用另一个 socket 重新发出去。表现是 derp-nat 打印的本地地址变成 TUN 的虚拟地址（如 `local=10.9.0.1:58496`）而不是物理网卡地址。
 
 Linux 上 anyproxy 并**不会**主动丢弃这些包（`udpDirectBlocked` 在非 darwin 平台恒为 false，见 `tun/udp_dynroute.go`），所以打洞不是必然失败、而是**时好时坏**：多出来的这层用户态 NAT 转发（进 TUN → gVisor 解析 → 查/建 session → 从物理网卡重发 → 回包再构造 IP 包写回 TUN）推高了每条 lane 的 RTT 和抖动，网络稍差就压不进 derphole 那 1200ms 的打洞观测窗口（`externalV2RawDirectPunchWait`），报 `raw-punch-insufficient-paths` 回退 manager 模式。
 
 把对端 IP 加进 `bypassIPs` 并不能解决：候选地址是拿**同一个 socket** 去 STUN 探测反射出来的，给对端 IP 开了直连例外、探测流量却仍走 TUN 的话，上报的候选地址和实际发包呈现的公网地址对不上，反而更糟。
+
+## 排查记录：这些诡异报错都是环境干扰，不是打洞本身失败
+
+跟"打洞成不成功"没关系，纯粹是"在装了 anyproxy TUN 模式的机器上测 derp-nat"这个组合本身会踩到的坑，单独整理一下，免得下次又当成打洞失败去分析。下面域名/IP 全部替换成示例值。
+
+### 坑 1：环境变量意外劫持了 DERP 服务器地址
+
+`derphole` 支持 `DERPHOLE_DERP_SERVER` 环境变量指定自定义 DERP 节点(见上面"自建 derper"那节，是我们主动用的功能)。但如果这个变量是**宿主机环境里本来就有的**(比如云厂商在系统里预置了这个变量，给他们自己别的内部工具用)，会在你完全没主动配置的情况下，把 derp-nat 悄悄劫持到一个跟你毫无关系、当前也未必可达的自定义节点上，报错看起来像是打洞环境的问题，其实是环境变量污染：
+
+### 坑 2：Windows 上没有"TUN 帮忙整容 NAT"这个效应
+
+上面"测试机必须关闭 anyproxy TUN 模式"那节说的用户态 UDP 转发(`tun/udp.go` 的 `udpForwarder`)，NAT 表**只按源端口建键、不按目标区分**，相当于把物理网卡背后真实的 NAT 类型在应用层伪装成了 Full-cone——这份代码文件头是 `//go:build !windows`，**Linux 和 macOS 共用同一份实现，Windows 完全没有**。
+
+Windows 用的是 WinDivert 引擎(`tun/wdengine/`)，抓包规则只处理 `udp.DstPort == 53`(DNS)和可选的 `udp.DstPort == 443`(QUIC，且只是丢弃逼回退 TCP)，除此之外的 UDP(包括 derp-nat 打洞用的随机高位端口)根本不会被 anyproxy 碰到，直接走物理网卡原生 NAT 出去。所以同一套 derp-nat 测试，在 Linux/macOS 上开着 TUN 模式测出来的打洞成功率，不能直接套到 Windows 订阅端头上——Windows 上开不开 TUN 对打洞结果没有影响，纯粹看真实路由器的 NAT 类型。
+
+### 坑 3：手动加路由绕过 TUN，打洞反而失败了(实测案例)
+
+内网机器 A(Linux，装着 anyproxy TUN 模式 + `derp-nat -mode=dial`)访问服务器 B(公网 IP 203.0.113.20，`derp-nat -mode=listen`)：
+
+```bash
+# A 机器上
+sudo ip route add 203.0.113.20 via 192.168.1.1 dev enp3s0   # 加了这条，打洞失败
+sudo ip route del 203.0.113.20 via 192.168.1.1 dev enp3s0   # 删掉这条，打洞恢复正常
+```
+
+这条路由把"去 B 的流量"从 TUN 默认路由里挖出来，强制走物理网卡直连，看起来应该更容易打洞，实测却相反——正是坑 2 提到的机制：不走 TUN 就没有那层"整容"过的 Full-cone NAT，直接暴露出物理网卡背后路由器真实的(大概率对称型的)NAT，打洞反而更难成功。这跟坑 2 是同一个原理的两个角度，一个是理论(代码怎么写的)，一个是实测(真的复现了)。
+
+### 坑 4：DNS 能解析、ping 能通，但拨自定义 DERP 服务器的 TCP 一直超时
+
+同样是"内网机器开着 anyproxy TUN 模式 + 测试用了自定义 DERP 服务器(`DERPHOLE_DERP_SERVER`)"这个组合下遇到的：
+
+```
+[root@example-host derp-nat]$ ./derp-nat -mode=dial -token=<...>
+dial: connect custom DERP derp1.example.com:443: connect derp client: derphttp.Client.Connect connect to derp1.example.com:443: dial tcp6 derp1.example.com:443: dial tcp6: lookup derp1.example.com on 198.51.100.53:53: no such host
+dial tcp4 derp1.example.com:443: context deadline exceeded
+
+[root@example-host derp-nat]$ ping derp1.example.com
+PING derp1.example.com (203.0.113.10) 56(84) bytes of data.
+64 bytes from 203.0.113.10: icmp_seq=1 ttl=53 time=163 ms
+```
+
+`ping` 能正常解析域名、收到真实回包(163ms，走的是真实公网路径)，但 `dial tcp4` 却是 `context deadline exceeded`(完全没收到回应，不是 `connection refused` 那种明确拒绝)——DNS 和 TCP 这两层在 TUN 模式下走的不是同一套处理逻辑，只看 DNS/ICMP 通不通判断不了 TCP 通不通：
+
+- DNS(UDP/53)走 `tun/udp.go` 的 `dnsRelay`，直接中继真实解析结果
+- TCP 连接一旦被 TUN 捕获，会先被 gVisor 用户态协议栈本地接住(`tun/stack.go` 的 `handleTCP`)，再交给 anyproxy 自己的 `proto.ForwardTCP` 去做 SNI 嗅探/路由规则匹配/实际拨号——这中间任何一步卡住(比如没有匹配的路由规则、SNI 嗅探对这个特殊的 TLS 握手识别有问题)，derp-nat 那头看到的现象就是连接一直不进不出，直到自己的 context 超时，跟真实网络可达性没关系
+
+这条**还没有确认到底是哪一步卡住的**(需要在那台机器上开 anyproxy 的 debug 日志、看 `tun capture tcp` 那行日志和 `ForwardTCP` 具体走到哪一步才能实锤)，先记录现象和大致方向，排查建议：
+
+```bash
+# 1. 确认 TUN 模式是不是真开着
+# 2. 开 anyproxy debug 日志，看这条连接有没有被 tun/stack.go 的 handleTCP 打印出来
+# 3. 如果确认是 TUN 模式导致，最直接的绕过方式跟坑 3 类似：
+sudo ip route add <derp1.example.com 解析出的真实IP> via <网关> dev <物理网卡>
+# 但注意：这样绕过后，UDP 打洞会退回坑 2/3 描述的"没有整容 NAT"状态，两个坑会同时出现，
+# 得自己权衡先解决哪个
+```
 
 ## 注意：`path` 字段在 raw-direct 模式下不可信
 
