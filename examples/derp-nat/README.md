@@ -59,3 +59,35 @@ fallback reason:    "raw-selection-timeout"
 ## 依赖公共基础设施
 
 `UsePublicDERP: true` 用的是 Tailscale 运营的公共 DERP 服务器集群，不需要自建；代价是候选交换、打洞失败后的中继转发都经第三方服务器，且受制于对方的可用性/限速策略。真要生产化，可以评估自建 DERP 节点（`derphole`/Tailscale 都支持指定自定义 DERP map）。
+
+## 跨网络实测成功的条件（已验证）
+
+在两个不同真实网络下跨机实测打洞成功（`mode: raw-direct` / `raw path count: 4`，两端 `local`/`remote` 都是真实公网映射地址），前提是下面两条**同时**满足：
+
+**1. 用 `DERPHOLE_DERP_SERVER` 指向自建 derper 节点**
+
+```bash
+# 公网机器上起自建 DERP 节点
+go run tailscale.com/cmd/derper@v1.96.5 -hostname=<你的域名> -certmode=letsencrypt -a=:443
+
+# 两端测试机都设这个环境变量后再跑 derp-nat
+export DERPHOLE_DERP_SERVER=https://<你的域名>
+```
+
+`derphole` 读到这个环境变量后会把该节点注册成一个自定义 region（`pkg/derpbind/route.go`），DERP 端口取 URL 里的端口，**STUN 端口固定用默认的 3478**——所以自建节点的防火墙除了 TCP 443，还必须放行 **UDP 3478**，否则候选收集（`candidate gather` 阶段）拿不到公网映射地址，打洞必然失败。
+
+用公共 DERP 集群时曾遇到 `connect derp client: derphttp.Client.Connect connect to https://derp1c.tailscale.com/derp: context deadline exceeded`；自建节点可以绕开这类第三方节点可达性问题。
+
+**2. 测试机必须关闭 anyproxy 的 TUN 模式**
+
+TUN 开启（autoRoute 生效）时，derp-nat 作为一个普通第三方进程，它的出站 UDP 会命中 TUN 的兜底策略路由（`tun/route_linux.go` 的 `ip rule pref 120`）被吸进 `anytun0`，由 anyproxy 的 `udpForwarder`（`tun/udp.go`）用另一个 socket 重新发出去。表现是 derp-nat 打印的本地地址变成 TUN 的虚拟地址（如 `local=10.9.0.1:58496`）而不是物理网卡地址。
+
+Linux 上 anyproxy 并**不会**主动丢弃这些包（`udpDirectBlocked` 在非 darwin 平台恒为 false，见 `tun/udp_dynroute.go`），所以打洞不是必然失败、而是**时好时坏**：多出来的这层用户态 NAT 转发（进 TUN → gVisor 解析 → 查/建 session → 从物理网卡重发 → 回包再构造 IP 包写回 TUN）推高了每条 lane 的 RTT 和抖动，网络稍差就压不进 derphole 那 1200ms 的打洞观测窗口（`externalV2RawDirectPunchWait`），报 `raw-punch-insufficient-paths` 回退 manager 模式。
+
+把对端 IP 加进 `bypassIPs` 并不能解决：候选地址是拿**同一个 socket** 去 STUN 探测反射出来的，给对端 IP 开了直连例外、探测流量却仍走 TUN 的话，上报的候选地址和实际发包呈现的公网地址对不上，反而更糟。
+
+## 注意：`path` 字段在 raw-direct 模式下不可信
+
+`printStats` 里的 `path` 来自 `manager.PathState()`，而这个 `manager` 是走 DERP 做候选协商/控制信令的**另一条并行连接**，和真正承载数据的 raw UDP/QUIC 连接是两回事。raw-direct 握手成功后只会调 `manager.StopDirectReads()` 停掉这条并行通道的读取，并不会把它的 path 状态刷成 direct，所以它的残留值是相对独立甚至偶然的——实测出现过打洞明明成功、一端却显示 `path: relay`，两端还互相矛盾的情况。
+
+**判断打洞是否成功要看 `mode == raw-direct && raw path count > 0`**（再辅以两端打印的 `local`/`remote` 是真实公网地址、echo 数据确实收发成功），不要看 `path`。同理，`logConnAddrs` 只在 raw-direct 模式下打印地址，就是因为 manager 模式下 `RemoteAddr()` 返回的是硬编码哨兵值 `127.0.0.1:1`，读不出任何信息。
