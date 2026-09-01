@@ -47,8 +47,13 @@ func main() {
 	token := flag.String("token", "", "token printed by -mode=listen; required for -mode=dial")
 	streams := flag.Int("streams", session.DefaultAttachGroupStreams, "stream count for the attach group")
 	forceRelay := flag.Int("force-relay", 0, "1 to force relay-only (baseline comparison, skips punching)")
+	rawBudget := flag.Duration("raw-budget", 0, "raw-direct punch window (listen side only; 0 = library default of 3s). Bump this if punching consistently lands right at the edge — a network with higher RTT to the DERP signaling server may need more than 3s for candidate exchange + punch + selection to converge")
 	timeout := flag.Duration("timeout", 10*time.Minute, "how long to wait for the peer (keep this generous: it starts counting at process launch, not when you paste the token, so a slow copy-paste between two machines can burn most of a short budget before the peer even dials in)")
 	flag.Parse()
+
+	if *mode == "dial" && *rawBudget != 0 {
+		log.Printf("warning: -raw-budget has no effect on -mode=dial (AttachGroupDialConfig has no such field; the listen side alone decides the raw-direct window) — set it on the -mode=listen command instead")
+	}
 
 	emitter := telemetry.WithStatusHook(nil, func(status string) {
 		log.Printf("[derp status] %s", status)
@@ -59,7 +64,7 @@ func main() {
 
 	switch *mode {
 	case "listen":
-		runListen(ctx, emitter, *streams, *forceRelay == 1)
+		runListen(ctx, emitter, *streams, *forceRelay == 1, *rawBudget)
 	case "dial":
 		if *token == "" {
 			log.Fatal("-token is required for -mode=dial")
@@ -70,12 +75,13 @@ func main() {
 	}
 }
 
-func runListen(ctx context.Context, emitter *telemetry.Emitter, streams int, forceRelay bool) {
+func runListen(ctx context.Context, emitter *telemetry.Emitter, streams int, forceRelay bool, rawBudget time.Duration) {
 	listener, err := session.ListenAttachGroup(ctx, session.AttachGroupListenConfig{
-		Emitter:       emitter,
-		ForceRelay:    forceRelay,
-		UsePublicDERP: true,
-		MaxStreams:    streams,
+		Emitter:         emitter,
+		ForceRelay:      forceRelay,
+		UsePublicDERP:   true,
+		MaxStreams:      streams,
+		RawDirectBudget: rawBudget,
 	})
 	if err != nil {
 		log.Fatalf("listen: %v", err)

@@ -39,6 +39,14 @@ go run . -mode=dial -token=<粘贴上面的 TOKEN>
 
 `-force-relay=1` 可以强制走纯中继路径，作为"打洞失败时最差情况"的对照组。
 
+**"偶尔成一次"很可能是 raw-direct 窗口太紧，不是 NAT 类型完全不支持**：`derphole` 库里候选交换+打洞+选定路径这套流程默认给 3 秒(`session.DefaultAttachGroupRawDirectBudget`)，这个值只由 `-mode=listen` 那端决定(`AttachGroupDialConfig` 没有这个字段，dial 端跟着 listen 端定的走)。如果测试链路 RTT 偏高，这几步加起来偶尔卡进 3 秒、偶尔卡不进，表现就是时好时坏，而不是稳定失败——这跟"NAT 类型完全不兼容"(稳定 0% 成功)是两种不同的失败模式，用 `-raw-budget` 调大这个窗口(只在 listen 端加)排除一下：
+
+```bash
+go run . -mode=listen -raw-budget=8s
+```
+
+如果调大之后成功率明显上去了，说明就是窗口太紧；如果怎么调都没用，才是真的 NAT 类型不支持，回去看上面"排查记录"那几条。
+
 **跨机器手动复制粘贴 token 会吃掉超时预算**：`-timeout` 是从进程启动那一刻开始计时的，不是从粘贴 token 那一刻开始。如果你复制 token、切窗口、粘贴这一套动作花了一两分钟，`-mode=listen` 那边的 `Accept()` 预算可能已经所剩无几，会在对端刚 `claimed`/`connected-relay` 时就报 `context deadline exceeded`——这只是超时预算不够，不代表打洞失败。默认已经调到 10 分钟；如果还遇到这种情况，看两边日志的时间戳：只要一边在另一边真正发起 dial **之前**就已经超时退出了，这次结果就不作数，加大 `-timeout` 重跑一次，两边日志里都出现 `connected-direct`（或都稳定停在 `connected-relay` 且不再报错）才是有效结果。
 
 ## 本地冒烟测试的结果（同机跑，只验证代码链路，不代表真实 NAT 场景）
