@@ -49,7 +49,7 @@ func main() {
 	listen := flag.String("listen", ":3478", "reflect mode: UDP address to listen on")
 	reflect := flag.String("reflect", "", "punch mode: comma-separated reflector addresses; give TWO on different IPs to classify the NAT")
 	local := flag.Int("local", 0, "punch mode: local UDP port to bind (0 = let the OS pick)")
-	duration := flag.Duration("duration", 30*time.Second, "punch mode: how long to keep sending/listening")
+	duration := flag.Duration("duration", 0, "punch mode: give up after this long (0 = keep punching until a packet arrives; recommended, since it removes the need to start both sides within seconds of each other)")
 	interval := flag.Duration("interval", 200*time.Millisecond, "punch mode: gap between outgoing punch packets")
 	flag.Parse()
 
@@ -136,15 +136,16 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) {
 			log.Printf("reflector %s: write: %v", r, err)
 			continue
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-		buf := make([]byte, 1024)
-		n, from, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			log.Printf("reflector %s: no reply (%v) — is it running, and is UDP open on that port?", r, err)
+		// Only the reflector's own reply may be read as our public address.
+		// The peer may already be punching at us while we are still probing,
+		// and treating one of its packets as the reply would silently corrupt
+		// the one value this whole test depends on.
+		seen, ok := readReflectorReply(conn, addr, 3*time.Second)
+		if !ok {
+			log.Printf("reflector %s: no reply — is it running, and is UDP open on that port?", r)
 			continue
 		}
-		seen := string(buf[:n])
-		log.Printf("reflector %s (replied from %s) sees me as %s", r, from, seen)
+		log.Printf("reflector %s sees me as %s", r, seen)
 		observed = append(observed, seen)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -172,13 +173,40 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) {
 	}
 }
 
-// punch blasts packets at the peer while listening for theirs. Both sides must
-// be doing this at the same time: the outgoing packets are what open each
-// NAT's return path for the other side.
+// readReflectorReply waits for a packet from exactly this reflector, skipping
+// anything else that lands on the socket meanwhile.
+func readReflectorReply(conn *net.UDPConn, reflector *net.UDPAddr, wait time.Duration) (string, bool) {
+	buf := make([]byte, 1024)
+	giveUp := time.Now().Add(wait)
+	for time.Now().Before(giveUp) {
+		_ = conn.SetReadDeadline(giveUp)
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return "", false
+		}
+		if from.IP.Equal(reflector.IP) && from.Port == reflector.Port {
+			return string(buf[:n]), true
+		}
+		log.Printf("ignoring packet from %s while probing reflector %s", from, reflector)
+	}
+	return "", false
+}
+
+// punch blasts packets at the peer while listening for theirs. Both sides have
+// to be sending during the same window — each side's outgoing packets are what
+// open its own NAT's return path for the other side — so this keeps going until
+// a packet arrives rather than stopping after a fixed time. Coordinating two
+// terminals to the second is the single most common reason a punch that would
+// have worked reports FAILED.
 func punch(conn *net.UDPConn, peer *net.UDPAddr, duration, interval time.Duration) {
-	log.Printf("punching to %s for %s (peer must be doing the same, now)", peer, duration)
+	if duration > 0 {
+		log.Printf("punching to %s, giving up after %s if nothing arrives", peer, duration)
+	} else {
+		log.Printf("punching to %s until a packet arrives (Ctrl-C to stop)", peer)
+	}
 	var received atomic.Int64
 	done := make(chan struct{})
+	success := make(chan struct{})
 
 	go func() {
 		buf := make([]byte, 1024)
@@ -193,27 +221,60 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, duration, interval time.Duratio
 					continue // read deadline, keep polling
 				}
 			}
-			if received.Add(1) == 1 {
-				log.Printf("FIRST PACKET IN from %s: %q", from, string(buf[:n]))
+			// Only packets from the address we are punching count. Anything
+			// else (a reflector reply still in flight, unrelated traffic)
+			// would otherwise be reported as a successful punch. A packet
+			// from the peer's IP but a different port is worth calling out:
+			// that is what a symmetric NAT on their side looks like.
+			switch {
+			case from.IP.Equal(peer.IP) && from.Port == peer.Port:
+				if received.Add(1) == 1 {
+					log.Printf("FIRST PACKET IN from %s: %q", from, string(buf[:n]))
+					close(success)
+				}
+			case from.IP.Equal(peer.IP):
+				log.Printf("packet from peer IP but port %d, not the expected %d — their NAT remapped the port (symmetric behavior)", from.Port, peer.Port)
+			default:
+				log.Printf("ignoring packet from unrelated source %s", from)
 			}
 		}
 	}()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	progress := time.NewTicker(5 * time.Second)
+	defer progress.Stop()
 	deadline := time.Now().Add(duration)
+	started := time.Now()
 	var sent int
-	for range ticker.C {
-		if time.Now().After(deadline) {
-			break
+	var drainDeadline time.Time
+loop:
+	for {
+		select {
+		case <-success:
+			// Keep sending for a moment rather than stopping dead: the peer may
+			// have started later and still needs packets from us to confirm its
+			// own receive direction. Nil the channel so this case stops firing
+			// (a closed channel would spin here).
+			drainDeadline = time.Now().Add(2 * time.Second)
+			success = nil
+		case <-progress.C:
+			log.Printf("still punching: sent=%d received=%d elapsed=%s", sent, received.Load(), time.Since(started).Truncate(time.Second))
+		case <-ticker.C:
+			if !drainDeadline.IsZero() && time.Now().After(drainDeadline) {
+				break loop
+			}
+			if duration > 0 && time.Now().After(deadline) {
+				break loop
+			}
+			msg := make([]byte, 16)
+			binary.BigEndian.PutUint64(msg, uint64(sent))
+			copy(msg[8:], "PUNCH")
+			if _, err := conn.WriteToUDP(msg, peer); err != nil {
+				log.Printf("send: %v", err)
+			}
+			sent++
 		}
-		msg := make([]byte, 16)
-		binary.BigEndian.PutUint64(msg, uint64(sent))
-		copy(msg[8:], "PUNCH")
-		if _, err := conn.WriteToUDP(msg, peer); err != nil {
-			log.Printf("send: %v", err)
-		}
-		sent++
 	}
 	close(done)
 	time.Sleep(100 * time.Millisecond)
