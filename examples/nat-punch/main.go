@@ -43,7 +43,14 @@ import (
 	"time"
 )
 
-const whoamiMagic = "WHOAMI?"
+const (
+	whoamiMagic  = "WHOAMI?"
+	statusPrefix = "STATUS "
+	// How recently the reflector must have heard from an address to call it
+	// active. Punching sends a status query every few seconds, so a peer that
+	// is really running will always fall inside this window.
+	peerActiveWindow = 15 * time.Second
+)
 
 func main() {
 	mode := flag.String("mode", "punch", "punch (machine under test) or reflect (public VPS helper)")
@@ -64,8 +71,12 @@ func main() {
 	}
 }
 
-// runReflect answers every packet with the source address it was seen coming
-// from. That observed address is the peer's NAT mapping for this socket.
+// runReflect answers "WHOAMI?" with the source address it observed, and
+// "STATUS <addr>" with whether it has heard from <addr> recently. The status
+// answer is what makes a failed punch interpretable: the reflector talks to
+// both machines, so it can say whether the peer was actually punching at the
+// same time — something wall-clock timestamps cannot settle when the two hosts'
+// clocks disagree.
 func runReflect(listen string) {
 	addr, err := net.ResolveUDPAddr("udp4", listen)
 	if err != nil {
@@ -77,6 +88,10 @@ func runReflect(listen string) {
 	}
 	defer conn.Close()
 	log.Printf("reflector listening on %s", conn.LocalAddr())
+
+	var mu sync.Mutex
+	seen := map[string]time.Time{}
+
 	buf := make([]byte, 1024)
 	for {
 		n, from, err := conn.ReadFromUDP(buf)
@@ -84,8 +99,28 @@ func runReflect(listen string) {
 			log.Printf("read: %v", err)
 			continue
 		}
-		log.Printf("saw %s (%d bytes)", from, n)
-		if _, err := conn.WriteToUDP([]byte(from.String()), from); err != nil {
+		payload := string(buf[:n])
+		mu.Lock()
+		seen[from.String()] = time.Now()
+		mu.Unlock()
+
+		var reply string
+		if target, ok := strings.CutPrefix(payload, statusPrefix); ok {
+			target = strings.TrimSpace(target)
+			mu.Lock()
+			last, known := seen[target]
+			mu.Unlock()
+			if known && time.Since(last) < peerActiveWindow {
+				reply = "ACTIVE"
+			} else {
+				reply = "IDLE"
+			}
+			log.Printf("status query from %s about %s -> %s", from, target, reply)
+		} else {
+			reply = from.String()
+			log.Printf("saw %s (%d bytes)", from, n)
+		}
+		if _, err := conn.WriteToUDP([]byte(reply), from); err != nil {
 			log.Printf("reply to %s: %v", from, err)
 		}
 	}
@@ -122,7 +157,11 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 	}
 	stopKeepalive()
 	verifyMappingUnchanged(conn, list, announced)
-	punch(conn, peer, duration, interval)
+	statusVia, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(list[0]))
+	if err != nil {
+		statusVia = nil
+	}
+	punch(conn, peer, statusVia, duration, interval)
 }
 
 // startKeepalive re-probes a reflector every 10s so the NAT mapping announced
@@ -281,13 +320,18 @@ func readReflectorReply(conn *net.UDPConn, reflector *net.UDPAddr, wait time.Dur
 // a packet arrives rather than stopping after a fixed time. Coordinating two
 // terminals to the second is the single most common reason a punch that would
 // have worked reports FAILED.
-func punch(conn *net.UDPConn, peer *net.UDPAddr, duration, interval time.Duration) {
+// statusVia, when non-nil, is a reflector asked every few seconds whether the
+// peer is punching right now, so a FAILED result can be told apart from "the
+// other side simply was not running".
+func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duration, interval time.Duration) {
 	if duration > 0 {
 		log.Printf("punching to %s, giving up after %s if nothing arrives", peer, duration)
 	} else {
 		log.Printf("punching to %s until a packet arrives (Ctrl-C to stop)", peer)
 	}
 	var received atomic.Int64
+	var peerSeenActive atomic.Bool
+	var staleReflector atomic.Bool
 	done := make(chan struct{})
 	success := make(chan struct{})
 
@@ -315,6 +359,27 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, duration, interval time.Duratio
 					log.Printf("FIRST PACKET IN from %s: %q", from, string(buf[:n]))
 					close(success)
 				}
+			// Checked before the peer-IP-only case below: when the reflector
+			// and the peer share an IP (loopback testing), an exact match on
+			// the reflector is the more specific answer, and misreading its
+			// status reply as a remapped peer port would be actively
+			// misleading.
+			case statusVia != nil && from.IP.Equal(statusVia.IP) && from.Port == statusVia.Port:
+				switch string(buf[:n]) {
+				case "ACTIVE":
+					if !peerSeenActive.Swap(true) {
+						log.Printf("reflector confirms the peer is punching right now — both sides are live, so a failure here is a real network failure")
+					}
+				case "IDLE":
+					log.Printf("reflector has NOT heard from %s recently — the peer is probably not running; this round proves nothing", peer)
+				default:
+					// An older reflector build answers every packet with the
+					// source address, so it echoes the query instead. Say so
+					// rather than letting it look like an absent peer.
+					if !staleReflector.Swap(true) {
+						log.Printf("this reflector does not understand STATUS (older build) — redeploy it on the VPS to get peer-liveness confirmation")
+					}
+				}
 			case from.IP.Equal(peer.IP):
 				log.Printf("packet from peer IP but port %d, not the expected %d — their NAT remapped the port (symmetric behavior)", from.Port, peer.Port)
 			default:
@@ -327,6 +392,8 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, duration, interval time.Duratio
 	defer ticker.Stop()
 	progress := time.NewTicker(5 * time.Second)
 	defer progress.Stop()
+	statusTick := time.NewTicker(3 * time.Second)
+	defer statusTick.Stop()
 	deadline := time.Now().Add(duration)
 	started := time.Now()
 	var sent int
@@ -334,6 +401,10 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, duration, interval time.Duratio
 loop:
 	for {
 		select {
+		case <-statusTick.C:
+			if statusVia != nil {
+				_, _ = conn.WriteToUDP([]byte(statusPrefix+peer.String()), statusVia)
+			}
 		case <-success:
 			// Keep sending for a moment rather than stopping dead: the peer may
 			// have started later and still needs packets from us to confirm its
@@ -365,16 +436,41 @@ loop:
 	got := received.Load()
 	fmt.Printf(`
 === punch result ===
-sent:     %d
-received: %d
-verdict:  %s
-`, sent, got, verdict(got))
+sent:       %d
+received:   %d
+peer live:  %s
+verdict:    %s
+`, sent, got, peerLive(got, peerSeenActive.Load(), staleReflector.Load(), statusVia), verdict(got, peerSeenActive.Load()))
 }
 
-func verdict(received int64) string {
-	if received > 0 {
-		return "SUCCESS — a direct UDP path exists between these two hosts"
+func peerLive(received int64, seenActive, staleReflector bool, statusVia *net.UDPAddr) string {
+	switch {
+	// Its packets arriving is the strongest possible proof of liveness, and
+	// beats any reflector opinion — a fast success can finish before the first
+	// status query even goes out.
+	case received > 0:
+		return "yes — its packets arrived here"
+	case statusVia == nil:
+		return "unknown (no reflector to ask)"
+	case seenActive:
+		return "yes — reflector saw the peer punching during this run"
+	case staleReflector:
+		return "unknown — the reflector is an older build with no STATUS support; redeploy it"
+	default:
+		return "NO — reflector never saw the peer; it likely was not running"
 	}
-	return "FAILED — no packet arrived. Either the peer was not punching at the same time, " +
-		"a NAT/firewall dropped it, or one side is symmetric (check the NAT type line above on BOTH sides)"
+}
+
+func verdict(received int64, peerSeenActive bool) string {
+	switch {
+	case received > 0:
+		return "SUCCESS — a direct UDP path exists between these two hosts"
+	case peerSeenActive:
+		return "FAILED — the peer was confirmed live and still nothing arrived. " +
+			"Direct UDP between these two networks is genuinely blocked (ISP/CGNAT filtering, " +
+			"or a NAT that does not behave as the type test suggests)"
+	default:
+		return "INCONCLUSIVE — no packet arrived, but the peer was never seen to be running. " +
+			"Start both sides so they overlap, then judge the result"
+	}
 }
