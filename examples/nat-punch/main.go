@@ -38,6 +38,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -101,7 +102,14 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 	if reflectors == "" {
 		log.Fatal("-reflect is required in punch mode (run -mode=reflect on a public VPS first)")
 	}
-	classifyNAT(conn, strings.Split(reflectors, ","))
+	list := strings.Split(reflectors, ",")
+	announced := classifyNAT(conn, list)
+
+	// A NAT drops an idle UDP mapping after as little as 30s. The pause while
+	// you copy the address to the other machine is easily longer than that, and
+	// if the mapping expires the address you handed the peer points at nothing:
+	// both sides then punch forever at dead ports. Keep it warm.
+	stopKeepalive := startKeepalive(conn, list)
 
 	fmt.Fprintln(os.Stderr, "\nPaste the peer's public address (ip:port) and press Enter:")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
@@ -112,7 +120,78 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 	if err != nil {
 		log.Fatalf("parse peer address: %v", err)
 	}
+	stopKeepalive()
+	verifyMappingUnchanged(conn, list, announced)
 	punch(conn, peer, duration, interval)
+}
+
+// startKeepalive re-probes a reflector every 10s so the NAT mapping announced
+// to the peer stays alive while you copy addresses between machines. Replies
+// pile up unread in the socket buffer; that is fine, the punch loop filters by
+// source address and drainSocket clears them before the mapping re-check.
+func startKeepalive(conn *net.UDPConn, reflectors []string) func() {
+	stop := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				for _, r := range reflectors {
+					addr, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(r))
+					if err != nil {
+						continue
+					}
+					_, _ = conn.WriteToUDP([]byte(whoamiMagic), addr)
+				}
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(stop) }) }
+}
+
+// verifyMappingUnchanged re-asks a reflector what it sees now, and warns if the
+// mapping drifted from what was announced — in that case the address the peer
+// is punching is stale and the exchange has to be redone.
+func verifyMappingUnchanged(conn *net.UDPConn, reflectors []string, announced string) {
+	if announced == "" || len(reflectors) == 0 {
+		return
+	}
+	addr, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(reflectors[0]))
+	if err != nil {
+		return
+	}
+	drainSocket(conn)
+	if _, err := conn.WriteToUDP([]byte(whoamiMagic), addr); err != nil {
+		return
+	}
+	now, ok := readReflectorReply(conn, addr, 3*time.Second)
+	if !ok {
+		log.Printf("could not re-check mapping (reflector did not answer); continuing anyway")
+		return
+	}
+	if now == announced {
+		log.Printf("mapping still %s — the address your peer has is current", now)
+		return
+	}
+	log.Printf("WARNING: mapping changed %s -> %s. The address your peer is punching is DEAD; "+
+		"re-exchange addresses (use the new one) or this test cannot succeed.", announced, now)
+}
+
+// drainSocket discards anything already buffered so a following read gets a
+// fresh reply rather than a stale keepalive answer.
+func drainSocket(conn *net.UDPConn) {
+	buf := make([]byte, 1024)
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+		if _, _, err := conn.ReadFromUDP(buf); err != nil {
+			_ = conn.SetReadDeadline(time.Time{})
+			return
+		}
+	}
 }
 
 // classifyNAT sends a probe to each reflector from the SAME socket. A NAT that
@@ -120,7 +199,9 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 // mapping, i.e. a "cone" NAT) is punchable; one that picks a fresh port per
 // destination (symmetric) is not, because the port the peer was told about is
 // not the port it will actually see.
-func classifyNAT(conn *net.UDPConn, reflectors []string) {
+// It returns the address announced to the peer (the first reflector's view),
+// so the caller can later check whether the mapping drifted.
+func classifyNAT(conn *net.UDPConn, reflectors []string) string {
 	var observed []string
 	for _, r := range reflectors {
 		r = strings.TrimSpace(r)
@@ -153,6 +234,7 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) {
 	switch {
 	case len(observed) == 0:
 		log.Printf("NAT type: UNKNOWN — no reflector answered")
+		return ""
 	case len(observed) == 1:
 		fmt.Printf("\nYour public address: %s\n", observed[0])
 		log.Printf("NAT type: UNKNOWN — need a second reflector on a DIFFERENT public IP to tell cone from symmetric")
@@ -171,6 +253,7 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) {
 			log.Printf("NAT type: SYMMETRIC — mapping changes per destination (%s), hole punching will not work here", strings.Join(observed, " vs "))
 		}
 	}
+	return observed[0]
 }
 
 // readReflectorReply waits for a packet from exactly this reflector, skipping
