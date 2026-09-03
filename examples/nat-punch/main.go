@@ -37,6 +37,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,11 +47,54 @@ import (
 const (
 	whoamiMagic  = "WHOAMI?"
 	statusPrefix = "STATUS "
-	// How recently the reflector must have heard from an address to call it
-	// active. Punching sends a status query every few seconds, so a peer that
-	// is really running will always fall inside this window.
+	// How recently the reflector must have received a STATUS heartbeat from an
+	// address to call it active. Punching sends one every few seconds, so a peer
+	// that is really in its punch loop will always fall inside this window.
 	peerActiveWindow = 15 * time.Second
 )
+
+type peerActivity struct {
+	seen        map[string]time.Time
+	lastCleanup time.Time
+}
+
+func newPeerActivity(now time.Time) *peerActivity {
+	return &peerActivity{seen: make(map[string]time.Time), lastCleanup: now}
+}
+
+func (a *peerActivity) mark(addr string, now time.Time) {
+	a.seen[addr] = now
+	// Bound reflector memory without scanning the map on every packet. An idle
+	// reflector needs no cleanup because the map cannot grow while it is idle.
+	if now.Sub(a.lastCleanup) >= peerActiveWindow {
+		for peer, last := range a.seen {
+			if now.Sub(last) >= peerActiveWindow {
+				delete(a.seen, peer)
+			}
+		}
+		a.lastCleanup = now
+	}
+}
+
+func (a *peerActivity) active(addr string, now time.Time) bool {
+	last, ok := a.seen[addr]
+	return ok && now.Sub(last) < peerActiveWindow
+}
+
+func reflectorResponse(activity *peerActivity, from, payload string, now time.Time) (reply string, statusQuery bool) {
+	if target, ok := strings.CutPrefix(payload, statusPrefix); ok {
+		// STATUS is emitted only after a client enters its punch loop. WHOAMI
+		// and keepalives deliberately do not count as peer activity: otherwise
+		// a client waiting at the paste prompt could make a failed test look
+		// like both peers were punching concurrently.
+		activity.mark(from, now)
+		if activity.active(strings.TrimSpace(target), now) {
+			return "ACTIVE", true
+		}
+		return "IDLE", true
+	}
+	return from, false
+}
 
 func main() {
 	mode := flag.String("mode", "punch", "punch (machine under test) or reflect (public VPS helper)")
@@ -60,6 +104,11 @@ func main() {
 	duration := flag.Duration("duration", 0, "punch mode: give up after this long (0 = keep punching until a packet arrives; recommended, since it removes the need to start both sides within seconds of each other)")
 	interval := flag.Duration("interval", 200*time.Millisecond, "punch mode: gap between outgoing punch packets")
 	flag.Parse()
+	if *mode == "punch" {
+		if err := validatePunchArgs(*local, *duration, *interval); err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	switch *mode {
 	case "reflect":
@@ -71,12 +120,24 @@ func main() {
 	}
 }
 
+func validatePunchArgs(localPort int, duration, interval time.Duration) error {
+	if localPort < 0 || localPort > 65535 {
+		return fmt.Errorf("-local must be between 0 and 65535")
+	}
+	if duration < 0 {
+		return fmt.Errorf("-duration must not be negative")
+	}
+	if interval <= 0 {
+		return fmt.Errorf("-interval must be greater than zero")
+	}
+	return nil
+}
+
 // runReflect answers "WHOAMI?" with the source address it observed, and
-// "STATUS <addr>" with whether it has heard from <addr> recently. The status
-// answer is what makes a failed punch interpretable: the reflector talks to
-// both machines, so it can say whether the peer was actually punching at the
-// same time — something wall-clock timestamps cannot settle when the two hosts'
-// clocks disagree.
+// "STATUS <addr>" with whether that address has sent a STATUS heartbeat
+// recently. The status answer makes a failed punch interpretable: WHOAMI and
+// keepalive traffic are deliberately excluded, so ACTIVE means the peer really
+// entered its punch loop during the same window.
 func runReflect(listen string) {
 	addr, err := net.ResolveUDPAddr("udp4", listen)
 	if err != nil {
@@ -89,8 +150,7 @@ func runReflect(listen string) {
 	defer conn.Close()
 	log.Printf("reflector listening on %s", conn.LocalAddr())
 
-	var mu sync.Mutex
-	seen := map[string]time.Time{}
+	activity := newPeerActivity(time.Now())
 
 	buf := make([]byte, 1024)
 	for {
@@ -100,24 +160,10 @@ func runReflect(listen string) {
 			continue
 		}
 		payload := string(buf[:n])
-		mu.Lock()
-		seen[from.String()] = time.Now()
-		mu.Unlock()
-
-		var reply string
-		if target, ok := strings.CutPrefix(payload, statusPrefix); ok {
-			target = strings.TrimSpace(target)
-			mu.Lock()
-			last, known := seen[target]
-			mu.Unlock()
-			if known && time.Since(last) < peerActiveWindow {
-				reply = "ACTIVE"
-			} else {
-				reply = "IDLE"
-			}
-			log.Printf("status query from %s about %s -> %s", from, target, reply)
+		reply, statusQuery := reflectorResponse(activity, from.String(), payload, time.Now())
+		if statusQuery {
+			log.Printf("status query from %s: %q -> %s", from, payload, reply)
 		} else {
-			reply = from.String()
 			log.Printf("saw %s (%d bytes)", from, n)
 		}
 		if _, err := conn.WriteToUDP([]byte(reply), from); err != nil {
@@ -137,8 +183,15 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 	if reflectors == "" {
 		log.Fatal("-reflect is required in punch mode (run -mode=reflect on a public VPS first)")
 	}
-	list := strings.Split(reflectors, ",")
-	announced := classifyNAT(conn, list)
+	list := nonEmpty(strings.Split(reflectors, ","))
+	if len(list) == 0 {
+		log.Fatal("-reflect must contain at least one reflector address")
+	}
+	announced, primaryReflector := classifyNAT(conn, list)
+	if announced == "" {
+		log.Printf("ABORTED — no reflector returned a usable public address; cannot exchange endpoints or run a meaningful punch test")
+		return
+	}
 
 	// A NAT drops an idle UDP mapping after as little as 30s. The pause while
 	// you copy the address to the other machine is easily longer than that, and
@@ -156,12 +209,24 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 		log.Fatalf("parse peer address: %v", err)
 	}
 	stopKeepalive()
-	verifyMappingUnchanged(conn, list, announced)
-	statusVia, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(list[0]))
-	if err != nil {
-		statusVia = nil
+	if !verifyMappingUnchanged(conn, primaryReflector, announced) {
+		fmt.Printf(`
+=== punch result ===
+verdict:    INCONCLUSIVE — the public mapping changed before punching; exchange the newly printed address and retry
+`)
+		return
 	}
-	punch(conn, peer, statusVia, duration, interval)
+	punch(conn, peer, primaryReflector, duration, interval)
+}
+
+func nonEmpty(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 // startKeepalive re-probes a reflector every 10s so the NAT mapping announced
@@ -170,8 +235,10 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 // source address and drainSocket clears them before the mapping re-check.
 func startKeepalive(conn *net.UDPConn, reflectors []string) func() {
 	stop := make(chan struct{})
+	stopped := make(chan struct{})
 	var once sync.Once
 	go func() {
+		defer close(stopped)
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -189,43 +256,51 @@ func startKeepalive(conn *net.UDPConn, reflectors []string) func() {
 			}
 		}
 	}()
-	return func() { once.Do(func() { close(stop) }) }
+	return func() {
+		once.Do(func() {
+			close(stop)
+			<-stopped
+		})
+	}
 }
 
 // verifyMappingUnchanged re-asks a reflector what it sees now, and warns if the
 // mapping drifted from what was announced — in that case the address the peer
 // is punching is stale and the exchange has to be redone.
-func verifyMappingUnchanged(conn *net.UDPConn, reflectors []string, announced string) {
-	if announced == "" || len(reflectors) == 0 {
-		return
-	}
-	addr, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(reflectors[0]))
-	if err != nil {
-		return
+func verifyMappingUnchanged(conn *net.UDPConn, reflector *net.UDPAddr, announced string) bool {
+	if announced == "" || reflector == nil {
+		return false
 	}
 	drainSocket(conn)
-	if _, err := conn.WriteToUDP([]byte(whoamiMagic), addr); err != nil {
-		return
+	if _, err := conn.WriteToUDP([]byte(whoamiMagic), reflector); err != nil {
+		log.Printf("could not re-check mapping: send to reflector: %v", err)
+		return false
 	}
-	now, ok := readReflectorReply(conn, addr, 3*time.Second)
+	now, ok := readReflectorReply(conn, reflector, 3*time.Second)
 	if !ok {
-		log.Printf("could not re-check mapping (reflector did not answer); continuing anyway")
-		return
+		log.Printf("could not re-check mapping (reflector did not answer); aborting because the address may be stale")
+		return false
 	}
 	if now == announced {
 		log.Printf("mapping still %s — the address your peer has is current", now)
-		return
+		return true
 	}
 	log.Printf("WARNING: mapping changed %s -> %s. The address your peer is punching is DEAD; "+
 		"re-exchange addresses (use the new one) or this test cannot succeed.", announced, now)
+	fmt.Printf("\nYour NEW public address: %s\n", now)
+	return false
 }
 
-// drainSocket discards anything already buffered so a following read gets a
-// fresh reply rather than a stale keepalive answer.
+// drainSocket discards packets for one short, strictly bounded window so a
+// following read does not consume a stale keepalive answer. Its deadline must
+// be absolute: the peer may already be punching every 200ms, and resetting the
+// deadline after every packet would otherwise drain forever and prevent this
+// side from ever entering its own punch loop.
 func drainSocket(conn *net.UDPConn) {
 	buf := make([]byte, 1024)
+	deadline := time.Now().Add(150 * time.Millisecond)
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+		_ = conn.SetReadDeadline(deadline)
 		if _, _, err := conn.ReadFromUDP(buf); err != nil {
 			_ = conn.SetReadDeadline(time.Time{})
 			return
@@ -240,8 +315,9 @@ func drainSocket(conn *net.UDPConn) {
 // not the port it will actually see.
 // It returns the address announced to the peer (the first reflector's view),
 // so the caller can later check whether the mapping drifted.
-func classifyNAT(conn *net.UDPConn, reflectors []string) string {
+func classifyNAT(conn *net.UDPConn, reflectors []string) (string, *net.UDPAddr) {
 	var observed []string
+	var primary *net.UDPAddr
 	for _, r := range reflectors {
 		r = strings.TrimSpace(r)
 		if r == "" {
@@ -266,6 +342,9 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) string {
 			continue
 		}
 		log.Printf("reflector %s sees me as %s", r, seen)
+		if primary == nil {
+			primary = addr
+		}
 		observed = append(observed, seen)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -273,7 +352,7 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) string {
 	switch {
 	case len(observed) == 0:
 		log.Printf("NAT type: UNKNOWN — no reflector answered")
-		return ""
+		return "", nil
 	case len(observed) == 1:
 		fmt.Printf("\nYour public address: %s\n", observed[0])
 		log.Printf("NAT type: UNKNOWN — need a second reflector on a DIFFERENT public IP to tell cone from symmetric")
@@ -292,7 +371,7 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) string {
 			log.Printf("NAT type: SYMMETRIC — mapping changes per destination (%s), hole punching will not work here", strings.Join(observed, " vs "))
 		}
 	}
-	return observed[0]
+	return observed[0], primary
 }
 
 // readReflectorReply waits for a packet from exactly this reflector, skipping
@@ -333,10 +412,15 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duratio
 	var peerSeenActive atomic.Bool
 	var staleReflector atomic.Bool
 	done := make(chan struct{})
+	readerDone := make(chan struct{})
 	success := make(chan struct{})
+	var receiveErrors int
 
 	go func() {
+		defer close(readerDone)
 		buf := make([]byte, 1024)
+		var lastReadError time.Time
+		var suppressedReadErrors int
 		for {
 			_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 			n, from, err := conn.ReadFromUDP(buf)
@@ -345,8 +429,28 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duratio
 				case <-done:
 					return
 				default:
-					continue // read deadline, keep polling
 				}
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				receiveErrors++
+				// Linux may surface an ICMP Port Unreachable here as ECONNREFUSED
+				// even though this is an unconnected UDP socket. Report it, but keep
+				// punching because the peer may not have opened its path yet.
+				now := time.Now()
+				if lastReadError.IsZero() || now.Sub(lastReadError) >= time.Second {
+					if suppressedReadErrors > 0 {
+						log.Printf("UDP receive error: %v (%d similar errors suppressed)", err, suppressedReadErrors)
+					} else {
+						log.Printf("UDP receive error: %v", err)
+					}
+					lastReadError = now
+					suppressedReadErrors = 0
+				} else {
+					suppressedReadErrors++
+					time.Sleep(10 * time.Millisecond)
+				}
+				continue
 			}
 			// Only packets from the address we are punching count. Anything
 			// else (a reflector reply still in flight, unrelated traffic)
@@ -371,7 +475,9 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duratio
 						log.Printf("reflector confirms the peer is punching right now — both sides are live, so a failure here is a real network failure")
 					}
 				case "IDLE":
-					log.Printf("reflector has NOT heard from %s recently — the peer is probably not running; this round proves nothing", peer)
+					if received.Load() == 0 {
+						log.Printf("reflector has NOT heard from %s recently — the peer is probably not running; this round proves nothing", peer)
+					}
 				default:
 					// An older reflector build answers every packet with the
 					// source address, so it echoes the query instead. Say so
@@ -394,17 +500,45 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duratio
 	defer progress.Stop()
 	statusTick := time.NewTicker(3 * time.Second)
 	defer statusTick.Stop()
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+	defer signal.Stop(interrupt)
 	deadline := time.Now().Add(duration)
 	started := time.Now()
 	var sent int
+	var sendFailed int
 	var drainDeadline time.Time
+	sendStatus := func() {
+		if statusVia == nil {
+			return
+		}
+		if _, err := conn.WriteToUDP([]byte(statusPrefix+peer.String()), statusVia); err != nil {
+			log.Printf("status heartbeat to reflector failed: %v", err)
+		}
+	}
+	sendPunch := func() {
+		msg := make([]byte, 16)
+		binary.BigEndian.PutUint64(msg, uint64(sent))
+		copy(msg[8:], "PUNCH")
+		if _, err := conn.WriteToUDP(msg, peer); err != nil {
+			sendFailed++
+			log.Printf("UDP send to %s failed: %v", peer, err)
+		}
+		sent++
+	}
+	// Do not wait for the first ticker edge. Immediate heartbeats make short
+	// tests observable by the reflector, and the first peer packet opens the
+	// NAT path without adding one full interval of avoidable delay.
+	sendStatus()
+	sendPunch()
 loop:
 	for {
 		select {
+		case <-interrupt:
+			log.Printf("interrupt received; stopping and printing the result collected so far")
+			break loop
 		case <-statusTick.C:
-			if statusVia != nil {
-				_, _ = conn.WriteToUDP([]byte(statusPrefix+peer.String()), statusVia)
-			}
+			sendStatus()
 		case <-success:
 			// Keep sending for a moment rather than stopping dead: the peer may
 			// have started later and still needs packets from us to confirm its
@@ -421,26 +555,24 @@ loop:
 			if duration > 0 && time.Now().After(deadline) {
 				break loop
 			}
-			msg := make([]byte, 16)
-			binary.BigEndian.PutUint64(msg, uint64(sent))
-			copy(msg[8:], "PUNCH")
-			if _, err := conn.WriteToUDP(msg, peer); err != nil {
-				log.Printf("send: %v", err)
-			}
-			sent++
+			sendPunch()
 		}
 	}
 	close(done)
-	time.Sleep(100 * time.Millisecond)
+	_ = conn.SetReadDeadline(time.Now())
+	<-readerDone
 
 	got := received.Load()
 	fmt.Printf(`
 === punch result ===
-sent:       %d
+attempted:  %d
+send ok:    %d
+send failed: %d
+recv errors: %d
 received:   %d
 peer live:  %s
 verdict:    %s
-`, sent, got, peerLive(got, peerSeenActive.Load(), staleReflector.Load(), statusVia), verdict(got, peerSeenActive.Load()))
+`, sent, sent-sendFailed, sendFailed, receiveErrors, got, peerLive(got, peerSeenActive.Load(), staleReflector.Load(), statusVia), verdict(got, peerSeenActive.Load()))
 }
 
 func peerLive(received int64, seenActive, staleReflector bool, statusVia *net.UDPAddr) string {
