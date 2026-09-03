@@ -280,21 +280,38 @@ func startKeepalive(conn *net.UDPConn, network string, reflectors []string) func
 	}
 }
 
+// verifyMappingUnchangedAttempts bounds the retries below. A single lost probe
+// (to, or a reply from, the reflector) must not abort an otherwise-good run —
+// that is exactly the kind of transient UDP loss this whole tool exists to
+// measure on the punch path itself, so treating it as fatal here would be an
+// own goal.
+const verifyMappingUnchangedAttempts = 3
+
 // verifyMappingUnchanged re-asks a reflector what it sees now, and warns if the
 // mapping drifted from what was announced — in that case the address the peer
-// is punching is stale and the exchange has to be redone.
+// is punching is stale and the exchange has to be redone. Retries a few times
+// before giving up, since a single dropped probe is not evidence the mapping
+// itself changed.
 func verifyMappingUnchanged(conn *net.UDPConn, reflector *net.UDPAddr, announced string) bool {
 	if announced == "" || reflector == nil {
 		return false
 	}
-	drainSocket(conn)
-	if _, err := conn.WriteToUDP([]byte(whoamiMagic), reflector); err != nil {
-		log.Printf("could not re-check mapping: send to reflector: %v", err)
-		return false
+	var now string
+	var ok bool
+	for attempt := 1; attempt <= verifyMappingUnchangedAttempts; attempt++ {
+		drainSocket(conn)
+		if _, err := conn.WriteToUDP([]byte(whoamiMagic), reflector); err != nil {
+			log.Printf("could not re-check mapping: send to reflector: %v", err)
+			continue
+		}
+		now, ok = readReflectorReply(conn, reflector, 3*time.Second)
+		if ok {
+			break
+		}
+		log.Printf("re-check attempt %d/%d: reflector did not answer, retrying", attempt, verifyMappingUnchangedAttempts)
 	}
-	now, ok := readReflectorReply(conn, reflector, 3*time.Second)
 	if !ok {
-		log.Printf("could not re-check mapping (reflector did not answer); aborting because the address may be stale")
+		log.Printf("could not re-check mapping after %d attempts (reflector never answered); aborting because the address may be stale", verifyMappingUnchangedAttempts)
 		return false
 	}
 	if now == announced {
