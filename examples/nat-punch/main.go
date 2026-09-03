@@ -16,9 +16,11 @@
 //	# On a public VPS — reflects each packet's observed source address back.
 //	# Run it on TWO different VPSes to enable cone/symmetric classification.
 //	go run . -mode=reflect -listen=:3478
+//	go run . -mode=reflect -network=udp6 -listen=:3478
 //
 //	# On each machine being tested:
 //	go run . -mode=punch -reflect=<vps1-ip>:3478,<vps2-ip>:3478
+//	go run . -mode=punch -network=udp6 -reflect=[<vps1-ipv6>]:3478
 //	# It prints your public address, then waits for you to paste the peer's.
 //	# Start it on BOTH machines, then paste each side's address into the other
 //	# within a few seconds of one another — punching only works if both sides
@@ -98,12 +100,16 @@ func reflectorResponse(activity *peerActivity, from, payload string, now time.Ti
 
 func main() {
 	mode := flag.String("mode", "punch", "punch (machine under test) or reflect (public VPS helper)")
+	network := flag.String("network", "udp4", "UDP address family: udp4 or udp6")
 	listen := flag.String("listen", ":3478", "reflect mode: UDP address to listen on")
 	reflect := flag.String("reflect", "", "punch mode: comma-separated reflector addresses; give TWO on different IPs to classify the NAT")
 	local := flag.Int("local", 0, "punch mode: local UDP port to bind (0 = let the OS pick)")
 	duration := flag.Duration("duration", 0, "punch mode: give up after this long (0 = keep punching until a packet arrives; recommended, since it removes the need to start both sides within seconds of each other)")
 	interval := flag.Duration("interval", 200*time.Millisecond, "punch mode: gap between outgoing punch packets")
 	flag.Parse()
+	if err := validateNetwork(*network); err != nil {
+		log.Fatal(err)
+	}
 	if *mode == "punch" {
 		if err := validatePunchArgs(*local, *duration, *interval); err != nil {
 			log.Fatal(err)
@@ -112,12 +118,19 @@ func main() {
 
 	switch *mode {
 	case "reflect":
-		runReflect(*listen)
+		runReflect(*network, *listen)
 	case "punch":
-		runPunch(*reflect, *local, *duration, *interval)
+		runPunch(*network, *reflect, *local, *duration, *interval)
 	default:
 		log.Fatal("-mode must be punch or reflect")
 	}
+}
+
+func validateNetwork(network string) error {
+	if network != "udp4" && network != "udp6" {
+		return fmt.Errorf("-network must be udp4 or udp6")
+	}
+	return nil
 }
 
 func validatePunchArgs(localPort int, duration, interval time.Duration) error {
@@ -138,17 +151,17 @@ func validatePunchArgs(localPort int, duration, interval time.Duration) error {
 // recently. The status answer makes a failed punch interpretable: WHOAMI and
 // keepalive traffic are deliberately excluded, so ACTIVE means the peer really
 // entered its punch loop during the same window.
-func runReflect(listen string) {
-	addr, err := net.ResolveUDPAddr("udp4", listen)
+func runReflect(network, listen string) {
+	addr, err := net.ResolveUDPAddr(network, listen)
 	if err != nil {
 		log.Fatalf("resolve %s: %v", listen, err)
 	}
-	conn, err := net.ListenUDP("udp4", addr)
+	conn, err := net.ListenUDP(network, addr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", listen, err)
 	}
 	defer conn.Close()
-	log.Printf("reflector listening on %s", conn.LocalAddr())
+	log.Printf("reflector listening on %s (%s)", conn.LocalAddr(), network)
 
 	activity := newPeerActivity(time.Now())
 
@@ -172,13 +185,13 @@ func runReflect(listen string) {
 	}
 }
 
-func runPunch(reflectors string, localPort int, duration, interval time.Duration) {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: localPort})
+func runPunch(network, reflectors string, localPort int, duration, interval time.Duration) {
+	conn, err := net.ListenUDP(network, &net.UDPAddr{Port: localPort})
 	if err != nil {
 		log.Fatalf("bind local port %d: %v", localPort, err)
 	}
 	defer conn.Close()
-	log.Printf("local socket: %s", conn.LocalAddr())
+	log.Printf("local socket: %s (%s)", conn.LocalAddr(), network)
 
 	if reflectors == "" {
 		log.Fatal("-reflect is required in punch mode (run -mode=reflect on a public VPS first)")
@@ -187,7 +200,7 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 	if len(list) == 0 {
 		log.Fatal("-reflect must contain at least one reflector address")
 	}
-	announced, primaryReflector := classifyNAT(conn, list)
+	announced, primaryReflector := classifyNAT(conn, network, list)
 	if announced == "" {
 		log.Printf("ABORTED — no reflector returned a usable public address; cannot exchange endpoints or run a meaningful punch test")
 		return
@@ -197,14 +210,14 @@ func runPunch(reflectors string, localPort int, duration, interval time.Duration
 	// you copy the address to the other machine is easily longer than that, and
 	// if the mapping expires the address you handed the peer points at nothing:
 	// both sides then punch forever at dead ports. Keep it warm.
-	stopKeepalive := startKeepalive(conn, list)
+	stopKeepalive := startKeepalive(conn, network, list)
 
 	fmt.Fprintln(os.Stderr, "\nPaste the peer's public address (ip:port) and press Enter:")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil {
 		log.Fatalf("read peer address: %v", err)
 	}
-	peer, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(line))
+	peer, err := net.ResolveUDPAddr(network, strings.TrimSpace(line))
 	if err != nil {
 		log.Fatalf("parse peer address: %v", err)
 	}
@@ -216,7 +229,7 @@ verdict:    INCONCLUSIVE — the public mapping changed before punching; exchang
 `)
 		return
 	}
-	punch(conn, peer, primaryReflector, duration, interval)
+	punch(conn, network, peer, primaryReflector, duration, interval)
 }
 
 func nonEmpty(values []string) []string {
@@ -233,7 +246,7 @@ func nonEmpty(values []string) []string {
 // to the peer stays alive while you copy addresses between machines. Replies
 // pile up unread in the socket buffer; that is fine, the punch loop filters by
 // source address and drainSocket clears them before the mapping re-check.
-func startKeepalive(conn *net.UDPConn, reflectors []string) func() {
+func startKeepalive(conn *net.UDPConn, network string, reflectors []string) func() {
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
 	var once sync.Once
@@ -247,7 +260,7 @@ func startKeepalive(conn *net.UDPConn, reflectors []string) func() {
 				return
 			case <-ticker.C:
 				for _, r := range reflectors {
-					addr, err := net.ResolveUDPAddr("udp4", strings.TrimSpace(r))
+					addr, err := net.ResolveUDPAddr(network, strings.TrimSpace(r))
 					if err != nil {
 						continue
 					}
@@ -308,14 +321,15 @@ func drainSocket(conn *net.UDPConn) {
 	}
 }
 
-// classifyNAT sends a probe to each reflector from the SAME socket. A NAT that
-// hands out one external port regardless of destination (endpoint-independent
-// mapping, i.e. a "cone" NAT) is punchable; one that picks a fresh port per
-// destination (symmetric) is not, because the port the peer was told about is
-// not the port it will actually see.
+// classifyNAT sends a probe to each reflector from the SAME socket. For IPv4,
+// a NAT that hands out one external port regardless of destination
+// (endpoint-independent mapping, i.e. a "cone" NAT) is punchable; one that
+// picks a fresh port per destination (symmetric) is not. For IPv6 the same
+// comparison detects whether the advertised public endpoint is stable across
+// paths, without assuming that NAT is involved.
 // It returns the address announced to the peer (the first reflector's view),
 // so the caller can later check whether the mapping drifted.
-func classifyNAT(conn *net.UDPConn, reflectors []string) (string, *net.UDPAddr) {
+func classifyNAT(conn *net.UDPConn, network string, reflectors []string) (string, *net.UDPAddr) {
 	var observed []string
 	var primary *net.UDPAddr
 	for _, r := range reflectors {
@@ -323,7 +337,7 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) (string, *net.UDPAddr) 
 		if r == "" {
 			continue
 		}
-		addr, err := net.ResolveUDPAddr("udp4", r)
+		addr, err := net.ResolveUDPAddr(network, r)
 		if err != nil {
 			log.Printf("reflector %s: resolve: %v", r, err)
 			continue
@@ -351,11 +365,15 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) (string, *net.UDPAddr) 
 
 	switch {
 	case len(observed) == 0:
-		log.Printf("NAT type: UNKNOWN — no reflector answered")
+		log.Printf("endpoint mapping: UNKNOWN — no reflector answered")
 		return "", nil
 	case len(observed) == 1:
 		fmt.Printf("\nYour public address: %s\n", observed[0])
-		log.Printf("NAT type: UNKNOWN — need a second reflector on a DIFFERENT public IP to tell cone from symmetric")
+		if network == "udp6" {
+			log.Printf("IPv6 endpoint stability: UNKNOWN — need a second reflector on a DIFFERENT IPv6 address to compare paths")
+		} else {
+			log.Printf("NAT type: UNKNOWN — need a second reflector on a DIFFERENT public IP to tell cone from symmetric")
+		}
 	default:
 		fmt.Printf("\nYour public address: %s\n", observed[0])
 		same := true
@@ -365,7 +383,11 @@ func classifyNAT(conn *net.UDPConn, reflectors []string) (string, *net.UDPAddr) 
 				break
 			}
 		}
-		if same {
+		if network == "udp6" && same {
+			log.Printf("IPv6 endpoint: STABLE — every reflector sees the same address and port")
+		} else if network == "udp6" {
+			log.Printf("IPv6 endpoint: CHANGED across destinations (%s) — do not use the announced endpoint for a reliable direct test", strings.Join(observed, " vs "))
+		} else if same {
 			log.Printf("NAT type: CONE (endpoint-independent mapping) — same mapping toward every reflector, punchable")
 		} else {
 			log.Printf("NAT type: SYMMETRIC — mapping changes per destination (%s), hole punching will not work here", strings.Join(observed, " vs "))
@@ -402,7 +424,7 @@ func readReflectorReply(conn *net.UDPConn, reflector *net.UDPAddr, wait time.Dur
 // statusVia, when non-nil, is a reflector asked every few seconds whether the
 // peer is punching right now, so a FAILED result can be told apart from "the
 // other side simply was not running".
-func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duration, interval time.Duration) {
+func punch(conn *net.UDPConn, network string, peer *net.UDPAddr, statusVia *net.UDPAddr, duration, interval time.Duration) {
 	if duration > 0 {
 		log.Printf("punching to %s, giving up after %s if nothing arrives", peer, duration)
 	} else {
@@ -487,7 +509,11 @@ func punch(conn *net.UDPConn, peer *net.UDPAddr, statusVia *net.UDPAddr, duratio
 					}
 				}
 			case from.IP.Equal(peer.IP):
-				log.Printf("packet from peer IP but port %d, not the expected %d — their NAT remapped the port (symmetric behavior)", from.Port, peer.Port)
+				if network == "udp6" {
+					log.Printf("packet from peer IPv6 address but port %d, not the expected %d — the advertised endpoint changed or was incorrect", from.Port, peer.Port)
+				} else {
+					log.Printf("packet from peer IP but port %d, not the expected %d — their NAT remapped the port (symmetric behavior)", from.Port, peer.Port)
+				}
 			default:
 				log.Printf("ignoring packet from unrelated source %s", from)
 			}
@@ -572,7 +598,7 @@ recv errors: %d
 received:   %d
 peer live:  %s
 verdict:    %s
-`, sent, sent-sendFailed, sendFailed, receiveErrors, got, peerLive(got, peerSeenActive.Load(), staleReflector.Load(), statusVia), verdict(got, peerSeenActive.Load()))
+`, sent, sent-sendFailed, sendFailed, receiveErrors, got, peerLive(got, peerSeenActive.Load(), staleReflector.Load(), statusVia), verdict(got, peerSeenActive.Load(), network))
 }
 
 func peerLive(received int64, seenActive, staleReflector bool, statusVia *net.UDPAddr) string {
@@ -593,11 +619,15 @@ func peerLive(received int64, seenActive, staleReflector bool, statusVia *net.UD
 	}
 }
 
-func verdict(received int64, peerSeenActive bool) string {
+func verdict(received int64, peerSeenActive bool, network string) string {
 	switch {
 	case received > 0:
 		return "SUCCESS — a direct UDP path exists between these two hosts"
 	case peerSeenActive:
+		if network == "udp6" {
+			return "FAILED — the peer was confirmed live and still nothing arrived. " +
+				"Direct IPv6 UDP is blocked (host/router/cloud firewall or path filtering)"
+		}
 		return "FAILED — the peer was confirmed live and still nothing arrived. " +
 			"Direct UDP between these two networks is genuinely blocked (ISP/CGNAT filtering, " +
 			"or a NAT that does not behave as the type test suggests)"

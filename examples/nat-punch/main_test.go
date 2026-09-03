@@ -75,6 +75,19 @@ func TestValidatePunchArgs(t *testing.T) {
 	}
 }
 
+func TestValidateNetwork(t *testing.T) {
+	for _, network := range []string{"udp4", "udp6"} {
+		if err := validateNetwork(network); err != nil {
+			t.Fatalf("validateNetwork(%q): %v", network, err)
+		}
+	}
+	for _, network := range []string{"", "udp", "tcp6", "UDP6"} {
+		if err := validateNetwork(network); err == nil {
+			t.Fatalf("validateNetwork(%q) succeeded; want error", network)
+		}
+	}
+}
+
 func TestNonEmptyTrimsAndDropsEmptyValues(t *testing.T) {
 	got := nonEmpty([]string{" one:1 ", "", "  ", "two:2"})
 	want := []string{"one:1", "two:2"}
@@ -89,13 +102,16 @@ func TestNonEmptyTrimsAndDropsEmptyValues(t *testing.T) {
 }
 
 func TestVerdictRequiresActualPunchActivityForFailure(t *testing.T) {
-	if got := verdict(0, false); !strings.HasPrefix(got, "INCONCLUSIVE") {
+	if got := verdict(0, false, "udp4"); !strings.HasPrefix(got, "INCONCLUSIVE") {
 		t.Fatalf("verdict without peer activity = %q", got)
 	}
-	if got := verdict(0, true); !strings.HasPrefix(got, "FAILED") {
+	if got := verdict(0, true, "udp4"); !strings.HasPrefix(got, "FAILED") || !strings.Contains(got, "CGNAT") {
 		t.Fatalf("verdict with peer activity = %q", got)
 	}
-	if got := verdict(1, false); !strings.HasPrefix(got, "SUCCESS") {
+	if got := verdict(0, true, "udp6"); !strings.HasPrefix(got, "FAILED") || !strings.Contains(got, "IPv6") {
+		t.Fatalf("IPv6 verdict with peer activity = %q", got)
+	}
+	if got := verdict(1, false, "udp6"); !strings.HasPrefix(got, "SUCCESS") {
 		t.Fatalf("verdict after receive = %q", got)
 	}
 }

@@ -11,12 +11,25 @@
 需要**一到两台公网 VPS** 当反射器(reflector)。两台(且是**不同的公网 IP**)才能判断 NAT 类型，一台只能拿到自己的公网地址。
 
 ```bash
-# 1. 在公网 VPS 上起反射器(有两台就都起，端口随意)
+# IPv4：在公网 VPS 上起反射器(有两台就都起，端口随意)
 go run . -mode=reflect -listen=:3478
 
-# 2. 在两台被测机器上分别运行(A 和 C 各跑一次)
+# 在两台被测机器上分别运行(A 和 C 各跑一次)
 go run . -mode=punch -reflect=<vps1-ip>:3478,<vps2-ip>:3478
 ```
+
+IPv6 使用 `-network=udp6`，反射器和 A/C 必须使用相同的网络类型。IPv6 地址与端口组合时必须带方括号：
+
+```bash
+# VPS；:3478 在 udp6 下绑定 IPv6 通配地址 [::]:3478
+go run . -mode=reflect -network=udp6 -listen=:3478
+
+# A 和 C；有两台 IPv6 VPS 时同样可以填两个反射器
+go run . -mode=punch -network=udp6 \
+  -reflect='[2001:db8::10]:3478,[2001:db8::20]:3478'
+```
+
+随后交换的对端地址格式也是 `[IPv6]:端口`，例如 `[240e:1234::10]:54321`。`udp6` 通常没有 IPv4 NAT 端口转换，主要验证公网 IPv6 地址、UDP 端口以及主机/路由器/云安全组防火墙是否允许直连；程序仍会全程复用同一个 socket、持续互发并通过 reflector 确认双方是否同时处于测试阶段。
 
 第 2 步会先打印你的公网地址和 NAT 类型判定，然后停下来等你粘贴对端地址：
 
