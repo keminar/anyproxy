@@ -99,7 +99,7 @@ func reflectorResponse(activity *peerActivity, from, payload string, now time.Ti
 }
 
 func main() {
-	mode := flag.String("mode", "punch", "punch (machine under test) or reflect (public VPS helper)")
+	mode := flag.String("mode", "punch", "punch/reflect (UDP, see -reflect/-listen) or tcp-punch/tcp-reflect (TCP, see -tcp-reflect/-tcp-listen)")
 	network := flag.String("network", "udp4", "UDP address family: udp4 or udp6")
 	listen := flag.String("listen", ":3478", "reflect mode: UDP address to listen on")
 	reflect := flag.String("reflect", "", "punch mode: comma-separated reflector addresses; give TWO on different IPs to classify the NAT")
@@ -116,13 +116,16 @@ func main() {
 		}
 	}
 
+	if dispatchTCPMode(*mode) {
+		return
+	}
 	switch *mode {
 	case "reflect":
 		runReflect(*network, *listen)
 	case "punch":
 		runPunch(*network, *reflect, *local, *duration, *interval)
 	default:
-		log.Fatal("-mode must be punch or reflect")
+		log.Fatal("-mode must be one of: punch, reflect, tcp-punch, tcp-reflect")
 	}
 }
 
