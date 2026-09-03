@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -10,6 +12,9 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/exec"
+	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,7 +40,6 @@ var (
 	gProxyServerSpec string
 	gConfigFile      string
 	gWebsocketListen string
-	gWebsocketConn   string
 	gMode            string
 	gHelp            bool
 	gDebug           int
@@ -47,6 +51,14 @@ var (
 	gGeoOut          string
 	gCheck           bool
 	gCheckFix        bool
+	gGenKey          bool
+	gGenConf         bool
+	gSend            string
+	gSendTo          string
+	gSendVia         string
+	gRecv            string
+	gParallel        int
+	gDirectPlainUDP  bool
 )
 
 func init() {
@@ -55,7 +67,6 @@ func init() {
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
-	flag.StringVar(&gWebsocketConn, "ws-connect", "", "Websocket Address and port to connect")
 	flag.StringVar(&gMode, "mode", "", "Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN) | tcpcopy (forward every connection to tcpcopy.ip:port)")
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2, 3)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
@@ -68,6 +79,19 @@ func init() {
 	flag.StringVar(&gGeoCat, "geo-cat", "", "geo-extract: comma-separated categories to keep, e.g. cn,google")
 	flag.StringVar(&gGeoOut, "geo-out", "", "geo-extract: output .dat path")
 	// 系统调优检查/应用(仅 Linux): 对照建议的 sysctl/ulimit 报告, 或一键写入并应用。
+	flag.BoolVar(&gGenKey, "genkey", false, "Generate a websocket auth key pair (private for client, public for server) and exit")
+	// 配置模板生成: 新机器上不知道配置长什么样时, 先生成一份带注释的骨架再改。
+	// 模板按 -mode 裁剪, 写到 -c 指定的路径(默认程序目录 conf/router.yaml, 写 "-" 打到标准输出)。
+	flag.BoolVar(&gGenConf, "genconf", false, "Write a commented config template (tailored to -mode) and exit; -c sets the output path (\"-\" for stdout)")
+
+	flag.StringVar(&gSend, "send", "", "Send a file or directory to another subscriber and exit (extra paths may follow as arguments)")
+	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory")
+	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path), \"relay\" (through the server B, no punching needed), or the email of a public VPS (needs directRelay enabled) to blindly relay the NAT punch through -- for when the two peers cannot punch to each other directly (e.g. both behind CGNAT) but can each reach that VPS; the QUIC/TLS session still ends end-to-end between the two peers, the VPS only forwards opaque UDP packets. All are end-to-end encrypted. See docs/direct-relay-design.md")
+
+	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
+	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
+	flag.BoolVar(&gDirectPlainUDP, "direct-plain-udp", false, "direct (NAT punch) connections: skip quic-go's batched/ECN fast path for the UDP socket, always falling back to plain per-packet I/O. Try this if a direct transfer shows high loss and a congestion window stuck near its floor even on an otherwise healthy link -- on some machines (seen on Windows, likely a NIC driver/virtual adapter quirk) that fast path itself corrupts or delays packets, which quic-go then mistakes for congestion. Unlike -debug, this does not log every packet, so it's fine to leave on")
+
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
 	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
 }
@@ -89,12 +113,32 @@ func main() {
 	// geo 数据集离线提取: 生成精简 .dat 后退出, 不启动代理。
 	if gGeoExtract {
 		if gGeoIn == "" || gGeoCat == "" || gGeoOut == "" {
-			log.Fatalln("geo-extract 需要 -geo-in -geo-cat -geo-out")
+			log.Fatalln("geo-extract requires -geo-in -geo-cat -geo-out")
 		}
 		if err := geo.Extract(gGeoIn, strings.Split(gGeoCat, ","), gGeoOut); err != nil {
 			log.Fatalln("geo-extract:", err)
 		}
-		fmt.Printf("geo-extract: 已从 %s 提取类别 [%s] 写入 %s\n", gGeoIn, gGeoCat, gGeoOut)
+		fmt.Printf("geo-extract: extracted categories [%s] from %s into %s\n", gGeoCat, gGeoIn, gGeoOut)
+		return
+	}
+	// 生成 websocket 鉴权密钥对: 私钥配订阅方 websocket.client.key, 公钥配服务端
+	// websocket.server.users[].key。与 user/pass 二选一, 好处是鉴权走挑战-应答,
+	// 不依赖两端时钟同步, 且服务端只存公钥。
+	if gGenKey {
+		priv, pub, err := nat.GenerateKeyPair()
+		if err != nil {
+			log.Fatalln("genkey:", err)
+		}
+		fmt.Printf("Private key (client, websocket.client.key): %s\n", priv)
+		fmt.Printf("Public key  (server, websocket.server.users[].key): %s\n", pub)
+		return
+	}
+	// 生成配置模板后退出。放在 LoadAllConfig 之前 —— 这条命令存在的前提就是本机
+	// 还没有配置文件, 不能反过来要求先能加载配置。
+	if gGenConf {
+		if err := genConfig(); err != nil {
+			log.Fatalln("genconf:", err)
+		}
 		return
 	}
 	// 系统调优检查/一键应用(仅 Linux), 完成即退出。
@@ -108,17 +152,50 @@ func main() {
 	}
 
 	config.SetDebugLevel(gDebug)
+	config.DirectPlainUDP = gDirectPlainUDP
 	conf.LoadAllConfig(gConfigFile)
 
 	// 检查配置是否存在
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		time.Sleep(60 * time.Second)
 		os.Exit(2)
 	}
 
+	// 直连传文件: 一次性动作, 传完就退出, 不启动代理。
+	//
+	// 放在配置加载之后(要用 websocket.client 的连接与凭证), 但在日志目录初始化之前 ——
+	// 这是个前台命令, 输出该直接打在终端上, 而不是写进日志文件。
+	if (gSend != "" || gRecv != "") && gParallel < 1 {
+		log.Fatalln("-parallel must be at least 1")
+	}
+	if gSend != "" {
+		paths := append([]string{gSend}, flag.Args()...)
+		cfg, err := pickClientConfig("send")
+		if err != nil {
+			log.Fatalln("send:", err)
+		}
+		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel); err != nil {
+			// 打洞失败也走这里: 按约定不做中继回落, 一个字节都不传, 退出码非零。
+			log.Fatalln("send:", err)
+		}
+		return
+	}
+
+	// 一次性取文件: 跟 -send 反向, 取完就退, 不启动代理。
+	if gRecv != "" {
+		cfg, err := pickClientConfig("recv")
+		if err != nil {
+			log.Fatalln("recv:", err)
+		}
+		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel); err != nil {
+			log.Fatalln("recv:", err)
+		}
+		return
+	}
+
 	cmdName := "anyproxy"
 	defLogDir := fmt.Sprintf("%s%s%s%s", conf.AppPath, string(os.PathSeparator), "logs", string(os.PathSeparator))
-	logDir := config.IfEmptyThen(conf.RouterConfig.Log.Dir, defLogDir, "")
+	logDir := config.IfEmptyThen(conf.RouterConfig().Log.Dir, defLogDir, "")
 	if _, err := os.Stat(logDir); err != nil {
 		log.Println(err)
 		time.Sleep(60 * time.Second)
@@ -130,9 +207,16 @@ func main() {
 	// 是否后台运行
 	daemon.Daemonize(envRunMode, fd)
 
-	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig.Listen, ":3000")
-	gListenAddrPort = tools.FillPort(gListenAddrPort)
-	config.SetListenPort(gListenAddrPort)
+	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig().Listen, ":3000")
+	// listen 显式设为 off/none/- 时不起代理监听, 仅跑 websocket/tun 等后台服务
+	// (典型: 纯 websocket 裸TCP穿透, 不需要本机代理端口)。
+	listenOff := isListenOff(gListenAddrPort)
+	if listenOff {
+		gListenAddrPort = ""
+	} else {
+		gListenAddrPort = tools.FillPort(gListenAddrPort)
+		config.SetListenPort(gListenAddrPort)
+	}
 
 	var writer io.Writer
 	// 前台执行，daemon运行根据环境变量识别
@@ -146,7 +230,7 @@ func main() {
 	// 未指定 -p 时请求侧实时读取 default.proxy, 使其支持热加载。
 	config.ProxyCmdline = gProxyServerSpec
 	// 启动时按「-p > default.proxy」解析首个代理, 供 tun_windows 排除捕获与日志用
-	config.SetProxyServer(config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig.Default.Proxy, ""))
+	config.SetProxyServer(config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig().Default.Proxy, ""))
 
 	// 加载 geoip/geosite 数据集(配了才加载, 供 hosts 的 geoip:/geosite: 匹配)
 	loadGeo()
@@ -167,16 +251,20 @@ func main() {
 	}
 
 	// websocket 服务端
-	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig.Websocket.Listen, "")
+	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig().Websocket.Server.Listen, "")
 	if gWebsocketListen != "" {
 		gWebsocketListen = tools.FillPort(gWebsocketListen)
 		go nat.NewServer(&gWebsocketListen)
+		// 服务端裸TCP端口转发入口(内网穿透)
+		go nat.StartForward(conf.RouterConfig().Websocket.Server.Forward)
+		// UDP 中继入口: 与上面的 TCP 入口同端口、各走各的, 只对 protocol: udp/both 生效。
+		go nat.StartRelayUDP(conf.RouterConfig().Websocket.Server.Forward)
 	}
-	// websocket 客户端
-	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Connect, "")
-	if gWebsocketConn != "" {
-		gWebsocketConn = tools.FillPort(gWebsocketConn)
-		go nat.ConnectServer(&gWebsocketConn)
+	// websocket 客户端: 可同时订阅多台 server(见 conf.Websocket.ClientList)
+	clientList := conf.RouterConfig().Websocket.ClientList()
+	for i, cfg := range clientList {
+		cfg.Connect = tools.FillPort(cfg.Connect)
+		go nat.ConnectServer(cfg, i)
 	}
 
 	// TUN 虚拟网卡全局代理
@@ -185,25 +273,28 @@ func main() {
 	tunCtx, tunCancel := context.WithCancel(context.Background())
 	var tunWG sync.WaitGroup
 	// 解析运行模式: 命令行 -mode > 配置 mode > proxy
-	mode := config.IfEmptyThen(gMode, conf.RouterConfig.Mode, "proxy")
+	mode := config.IfEmptyThen(gMode, conf.RouterConfig().Mode, "proxy")
 	switch mode {
 	case "tun":
 		// autoRoute 不配置时默认 true(自动加路由); 显式设 false 才关闭
 		autoRoute := true
-		if conf.RouterConfig.Tun.AutoRoute != nil {
-			autoRoute = *conf.RouterConfig.Tun.AutoRoute
+		if conf.RouterConfig().Tun.AutoRoute != nil {
+			autoRoute = *conf.RouterConfig().Tun.AutoRoute
 		}
 		tunCfg := tun.Config{
-			Name:         conf.RouterConfig.Tun.Name,
-			Addr:         conf.RouterConfig.Tun.Addr,
-			MTU:          conf.RouterConfig.Tun.MTU,
+			Name:         conf.RouterConfig().Tun.Name,
+			Addr:         conf.RouterConfig().Tun.Addr,
+			MTU:          conf.RouterConfig().Tun.MTU,
 			AutoRoute:    autoRoute,
-			ExcludeProcs: conf.RouterConfig.Tun.ExcludeProcs,
-			InboundPorts: conf.RouterConfig.Tun.InboundPorts,
-			WindivertDir: conf.RouterConfig.Tun.WindivertDir,
+			ExcludeProcs: conf.RouterConfig().Tun.ExcludeProcs,
+			InboundPorts: conf.RouterConfig().Tun.InboundPorts,
+			WindivertDir: conf.RouterConfig().Tun.WindivertDir,
 			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
 			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
-			BypassIPs: withProxyBypassIPs(conf.RouterConfig.Tun.BypassIPs),
+			BypassIPs: withProxyBypassIPs(conf.RouterConfig().Tun.BypassIPs),
+			// 仅 Windows(WinDivert): 私网/LAN/链路本地一律直连。不配默认 true(与
+			// linux/darwin 直连子网不进 TUN 的行为一致); 显式 false 才让私网 80/443 进引擎
+			BypassPrivate: conf.RouterConfig().Tun.BypassPrivate == nil || *conf.RouterConfig().Tun.BypassPrivate,
 		}
 		tunWG.Add(1)
 		go func() {
@@ -213,13 +304,17 @@ func main() {
 			}
 		}()
 	case "bypass":
-		// 仅初始化物理网卡绕行参数，不建TUN网卡；Windows 下会启用 /32 例外路由(逃他机TUN)
-		tun.InitBypassOnly(tun.BypassConfig{
-			ExcludeNics:  conf.RouterConfig.Bypass.ExcludeNics,
-			Device:       conf.RouterConfig.Bypass.Device,
-			ExcludeProcs: conf.RouterConfig.Bypass.ExcludeProcs,
-			BypassIPs:    withProxyBypassIPs(conf.RouterConfig.Bypass.BypassIPs),
-		})
+		// 仅 Linux 支持: 绑定物理网卡绕行, 逃出同机另一个 TUN 进程的 0/1 路由。
+		// macOS/Windows 已移除该模式(见 tun/bypass_other.go)。
+		// bypass 复用 tun.linux 块的 excludeNics/device(applyOS 已把 tun.linux 压平进 Tun)
+		if err := tun.InitBypassOnly(tun.BypassConfig{
+			ExcludeNics: conf.RouterConfig().Tun.ExcludeNics,
+			Device:      conf.RouterConfig().Tun.Device,
+		}); err != nil {
+			log.Printf("mode=bypass unsupported: %v; fallback proxy", err)
+			mode = "proxy"
+			break
+		}
 		// 退出/平滑重启前清理 bypass 加的 /32 例外路由(复用 tunCtx 取消信号 + tunWG 等待)
 		tunWG.Add(1)
 		go func() {
@@ -233,7 +328,7 @@ func main() {
 		// 端口转发: 不接管全局流量, 每个连接改投到 tcpcopy.ip:port(见 proto/request.go)。
 		// 命令行 -mode tcpcopy 时配置里可能没有 mode 字段, 这里补上归一(配置文件写 mode:
 		// tcpcopy 时已在 LoadRouterConfig 归一)。
-		conf.RouterConfig.TcpCopy.Enable = true
+		conf.RouterConfig().TcpCopy.Enable = true
 	default:
 		log.Printf("unknown mode %q, expect proxy|tunnel|tun|bypass|tcpcopy, fallback proxy\n", mode)
 		mode = "proxy"
@@ -243,17 +338,110 @@ func main() {
 	// tcp4  仅监听使用IPv4
 	// tcp6  仅监听使用IPv6
 	network := "tcp"
-	if conf.RouterConfig.Network != "" {
-		network = conf.RouterConfig.Network
+	if conf.RouterConfig().Network != "" {
+		network = conf.RouterConfig().Network
 	}
 	// tunnel 为服务端(tunneld); proxy/tun/bypass 均为客户端
 	handler := proto.ClientHandler
 	if mode == "tunnel" {
 		handler = proto.ServerHandler
 	}
+	if listenOff {
+		// 关闭了代理监听: 没有 grace server 阻塞主流程, 改为等退出信号,
+		// 收到后取消 TUN context 并等设备清理。websocket 后台 goroutine 随进程退出。
+		if gWebsocketListen == "" && len(clientList) == 0 && mode != "tun" && mode != "bypass" {
+			log.Println("warning: proxy listen is off, but no websocket/tun configured; process will idle")
+		}
+		log.Println("proxy listen is off; running background services only (websocket/tun etc.)")
+		if grace.IsChild() {
+			// listen 由端口改成了 off 后 SIGHUP 重启到这里: 旧进程还在
+			// grace.Server 里等子进程 bind 成功后发来的 SIGTERM 才退出, 但这里走不到
+			// ListenAndServe() 里那段握手, 需要自己补上, 否则旧进程会一直占着端口不退出。
+			notifyOldProcessExit()
+		}
+		waitForShutdown(tunCancel, &tunWG)
+		return
+	}
 	server := grace.NewServer(gListenAddrPort, handler, network)
 	registerTUNCleanup(server, tunCancel, &tunWG)
 	server.ListenAndServe()
+}
+
+// isListenOff 判断监听地址是否被显式关闭(off/none/no/disable/-, 大小写不敏感)。
+// 关闭后不起本机代理监听, 仅跑 websocket/tun 等后台服务。
+func isListenOff(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "off", "none", "no", "disable", "disabled", "-":
+		return true
+	}
+	return false
+}
+
+// waitForShutdown 在关闭代理监听时替代 grace server 的阻塞并处理信号:
+//   - SIGINT/SIGTERM: 取消 TUN context、等设备清理后退出;
+//   - SIGHUP: 平滑重启。listen off 时没有主监听 fd 可继承交接, 故以「先起新进程、
+//     再退旧进程」实现——websocket 服务自带绑定重试(见 nat.NewServer), 旧进程退出
+//     释放端口后新进程即接管, 订阅端会自动重连。
+func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		switch <-sig {
+		case syscall.SIGHUP:
+			log.Println(os.Getpid(), "Received SIGHUP (listen off): starting new process to take over, exiting current process")
+			if err := restartSelf(); err != nil {
+				log.Println("restart err:", err, "(keeping current process running)")
+				continue // 起新进程失败就不退旧进程, 避免服务中断
+			}
+			cancel()
+			wg.Wait()
+			return
+		default: // SIGINT / SIGTERM
+			cancel()
+			wg.Wait()
+			return
+		}
+	}
+}
+
+// restartSelf 用相同参数启动一个新进程(去掉 grace 内部的 -graceful 标志)。
+// 与 grace.fork 不同, 这里不继承任何监听 fd(listen off 无主监听); 依赖 websocket
+// 服务的绑定重试来接管旧进程释放的端口。
+func restartSelf() error {
+	var args []string
+	for _, a := range os.Args[1:] {
+		if a == "-graceful" {
+			continue
+		}
+		args = append(args, a)
+	}
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	return cmd.Start()
+}
+
+// notifyOldProcessExit 在「端口 -> listen off」的 SIGHUP 重启里补上 grace.Server
+// 原本在 ListenAndServe() 里做的握手: 关掉从旧进程继承来但用不上的监听 fd(固定为
+// fd 3, 本项目只有一个 grace 监听, 单监听场景 grace 也是这样假设 offset=0 的),
+// 再给旧进程发 SIGTERM 让它退出、释放端口。不这样做旧进程会一直占着端口不退出。
+func notifyOldProcessExit() {
+	if f := os.NewFile(3, ""); f != nil {
+		f.Close()
+	}
+	ppid := os.Getppid()
+	if ppid <= 1 { // 安全检查, 避免误杀 init/被收养的孤儿进程
+		return
+	}
+	process, err := os.FindProcess(ppid)
+	if err != nil {
+		log.Println(os.Getpid(), "find old process err:", err)
+		return
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		log.Println(os.Getpid(), "notify old process err:", err)
+	}
 }
 
 // registerTUNCleanup 注册 SIGHUP/SIGINT/SIGTERM 的 PreSignal 钩子，
@@ -289,15 +477,19 @@ func withProxyBypassIPs(base []string) []string {
 	}
 	add := func(host string) {
 		host = strings.TrimSpace(host)
-		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil && !seen[host] {
-			seen[host] = true
-			out = append(out, host)
+		ip := net.ParseIP(host)
+		// 回环上级代理无需并入: WinDivert 对 loopback 一律直连, linux/darwin 的
+		// /32 直连路由对 127.x 也无意义, 加进去只是冗余噪音。
+		if ip == nil || ip.To4() == nil || ip.IsLoopback() || seen[host] {
+			return
 		}
+		seen[host] = true
+		out = append(out, host)
 	}
 	// 全局代理(命令行 -p / default.proxy 解析后的服务器地址)
 	add(config.ProxyServer)
 	// 各 host 的自定义代理
-	for _, h := range conf.RouterConfig.Hosts {
+	for _, h := range conf.RouterConfig().Hosts {
 		p := strings.TrimSpace(h.Proxy)
 		if p == "" {
 			continue
@@ -329,32 +521,106 @@ func withProxyBypassIPs(base []string) []string {
 // loadGeo 按配置加载 geoip/geosite 数据集(配了才加载)。加载失败只记日志、不中断启动;
 // 若 hosts 用了 geoip:/geosite: 但对应数据没配/没加载, 该规则永不命中, 给出提示。
 func loadGeo() {
-	for cat, path := range conf.RouterConfig.Geo.IP {
-		if path = strings.TrimSpace(path); path == "" {
+	// 顶层 geoip / geosite: 一个文件可多类别(cats 空=.dat 全部类别), 同文件只解析一次
+	for _, gf := range conf.RouterConfig().GeoIP {
+		path := strings.TrimSpace(gf.File)
+		if path == "" {
 			continue
 		}
-		if err := geo.LoadIP(cat, path); err != nil {
-			log.Printf("geo: 加载 geoip:%s <- %s 失败: %v", cat, path, err)
+		if err := geo.LoadIPFile(path, gf.Cats); err != nil {
+			log.Printf("geo: failed to load geoip <- %s: %v", path, err)
 		}
 	}
-	for cat, path := range conf.RouterConfig.Geo.Site {
-		if path = strings.TrimSpace(path); path == "" {
+	for _, gf := range conf.RouterConfig().GeoSite {
+		path := strings.TrimSpace(gf.File)
+		if path == "" {
 			continue
 		}
-		if err := geo.LoadSite(cat, path); err != nil {
-			log.Printf("geo: 加载 geosite:%s <- %s 失败: %v", cat, path, err)
+		if err := geo.LoadSiteFile(path, gf.Cats); err != nil {
+			log.Printf("geo: failed to load geosite <- %s: %v", path, err)
 		}
 	}
 	if ic, sc := geo.Stat(); ic > 0 || sc > 0 {
-		log.Printf("geo: 已加载 geoip 类别数=%d, geosite 类别数=%d", ic, sc)
+		log.Printf("geo: loaded geoip categories=%d, geosite categories=%d", ic, sc)
 	}
 	// 用了 geoip:/geosite: 规则但数据未就绪时提示
-	for _, h := range conf.RouterConfig.Hosts {
+	for _, h := range conf.RouterConfig().Hosts {
 		if strings.HasPrefix(h.Name, "geoip:") && !geo.HasIP() {
-			log.Printf("geo: 规则 %q 需要 geo.ip 加载 geoip.dat, 当前未加载, 该规则不会命中", h.Name)
+			log.Printf("geo: rule %q requires geo.ip to load geoip.dat, but it is not loaded; this rule will never match", h.Name)
 		}
 		if strings.HasPrefix(h.Name, "geosite:") && !geo.HasSite() {
-			log.Printf("geo: 规则 %q 需要 geo.site 加载 geosite.dat, 当前未加载, 该规则不会命中", h.Name)
+			log.Printf("geo: rule %q requires geo.site to load geosite.dat, but it is not loaded; this rule will never match", h.Name)
 		}
 	}
+}
+
+// genConfig 处理 -genconf: 生成一份按 -mode 裁剪的带注释配置模板。
+//
+// 输出位置取 -c(与启动时读配置用的是同一个参数, 生成完原样启动即可); 不带 -c 就写到
+// 程序目录下的 conf/router.yaml —— 那正是 GetPath 的第一优先级, 生成后不带参数直接
+// 启动就能被找到。-c - 打到标准输出, 方便先看一眼或自己重定向。
+func genConfig() error {
+	mode := gMode
+	if mode == "" {
+		mode = "proxy"
+	}
+	if !conf.ValidGenMode(mode) {
+		return fmt.Errorf("unknown -mode %q, expect %s", mode, strings.Join(conf.GenModes, "|"))
+	}
+	if gConfigFile == "-" {
+		body, err := conf.GenerateConfig(mode)
+		if err != nil {
+			return err
+		}
+		fmt.Print(body)
+		return nil
+	}
+	path, err := conf.WriteConfigTemplate(mode, gConfigFile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("genconf: generated a %s-mode config template -> %s\n", mode, path)
+	// 日志目录不存在时程序启动即退出, 顺手建出来, 免得留个必踩的坑。
+	if dir, created, lerr := conf.EnsureLogDir(); lerr != nil {
+		fmt.Printf("genconf: failed to create log directory %s: %v (create it yourself before starting, or change log.dir in the config)\n", dir, lerr)
+	} else if created {
+		fmt.Printf("genconf: created log directory %s\n", dir)
+	}
+	fmt.Println("Next steps:")
+	for i, s := range conf.GenNextSteps(mode, path) {
+		fmt.Printf("  %d. %s\n", i+1, s)
+	}
+	return nil
+}
+
+// pickClientConfig 挑一条 websocket.client 配置给 -send/-recv 用。verb 只影响提示
+// 文案("send"/"recv")。
+//
+// 多台 server 时不再默默取第一条: 目标订阅方连在哪台 server 上, 程序猜不出来
+// (对端在哪要连上去问了才知道), 默默选错的话要么白跑一趟才报错、要么(更糟)真连
+// 上了却把文件传去了错的地址段。改成把配置列出来, 交互式问一遍要用哪个——选错
+// 的成本是重跑一次命令, 比默默用错一台强。
+func pickClientConfig(verb string) (conf.WsClient, error) {
+	list := conf.RouterConfig().Websocket.ClientList()
+	if len(list) == 0 {
+		return conf.WsClient{}, errors.New("no websocket.client configured (need connect/user/email to reach the server)")
+	}
+	if len(list) == 1 {
+		return list[0], nil
+	}
+	fmt.Fprintf(os.Stderr, "%s: %d client blocks configured, choose which one to use:\n", verb, len(list))
+	for i, c := range list {
+		fmt.Fprintf(os.Stderr, "  [%d] %s  (user=%s email=%s)\n", i+1, c.Connect, c.User, c.Email)
+	}
+	fmt.Fprint(os.Stderr, "> ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return conf.WsClient{}, fmt.Errorf("read selection: %w", err)
+	}
+	line = strings.TrimSpace(line)
+	idx, err := strconv.Atoi(line)
+	if err != nil || idx < 1 || idx > len(list) {
+		return conf.WsClient{}, fmt.Errorf("invalid selection %q, expected a number from 1 to %d", line, len(list))
+	}
+	return list[idx-1], nil
 }

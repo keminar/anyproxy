@@ -88,6 +88,13 @@ func init() {
 	}
 }
 
+// IsChild 返回当前进程是否由 SIGHUP 平滑重启派生(即带 -graceful 参数启动)。
+// 用于 listen off 场景: 此时没有 grace.Server 阻塞主流程走 ListenAndServe 那套
+// "新进程 bind 成功后通知旧进程退出" 的握手, 调用方需要自己补上这一步。
+func IsChild() bool {
+	return isChild
+}
+
 // NewServer returns a new graceServer.
 func NewServer(addr string, handler ConnHandler, network string) (srv *Server) {
 	regLock.Lock()
