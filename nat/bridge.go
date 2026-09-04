@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -25,6 +26,10 @@ type Bridge struct {
 	copyBytes int64
 	pumpBytes int64
 
+	// lastActive 最近一次两个方向任一发生真实收发的时间(unix nano, 原子), 供空闲
+	// 超时判断使用: 双向都无新流量超过阈值即视为僵尸连接(见 forward.go forwardIdleTimeout)。
+	lastActive int64
+
 	// Buffered channel of outbound messages.
 	send chan []byte
 }
@@ -33,6 +38,16 @@ type Bridge struct {
 // 服务端入口连接视角: copyBytes 为上行(请求端->内网), pumpBytes 为下行(内网->请求端)。
 func (b *Bridge) Stats() (copyBytes, pumpBytes int64) {
 	return atomic.LoadInt64(&b.copyBytes), atomic.LoadInt64(&b.pumpBytes)
+}
+
+// touch 记录一次真实收发, 刷新 lastActive。
+func (b *Bridge) touch() {
+	atomic.StoreInt64(&b.lastActive, time.Now().UnixNano())
+}
+
+// IdleFor 返回距离上次任一方向有真实收发数据过去的时长。
+func (b *Bridge) IdleFor() time.Duration {
+	return time.Since(time.Unix(0, atomic.LoadInt64(&b.lastActive)))
 }
 
 // Unregister 包外面调用取消注册
@@ -101,6 +116,7 @@ func (b *Bridge) WritePump() (written int64, err error) {
 			}
 			written += int64(nw)
 			atomic.AddInt64(&b.pumpBytes, int64(nw))
+			b.touch()
 		}
 	}
 }
@@ -126,6 +142,7 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 			if nw > 0 {
 				written += int64(nw)
 				atomic.AddInt64(&b.copyBytes, int64(nw))
+				b.touch()
 			}
 			if ew != nil {
 				err = ew

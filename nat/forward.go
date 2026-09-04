@@ -20,6 +20,11 @@ var forwardInc = autoinc.New(1, 1)
 // 累计流量+时长, 便于发现长期挂着的会话(如RDP)。可按需调整。
 const forwardAliveInterval = 60 * time.Second
 
+// forwardIdleTimeout 裸TCP转发连接的空闲超时: 双向都超过该时长无真实收发数据(仅靠
+// TCP不主动断开、也不发RST/FIN的僵尸连接, 常见于对端网络中断但连接未被系统层探测到),
+// 判定为僵尸连接并主动关闭入口连接触发正常关闭流程。可按需调整。
+const forwardIdleTimeout = 30 * time.Minute
+
 // buildForward 订阅方按自己这条连接的配置构建 端口->target 映射(见 conf.ClientForward)。
 // 每条 server 连接各自持有一份(见 nat/handler.go 的 wsClientConn.forward), 互不干扰。
 func buildForward(rules []conf.ClientForward) map[uint16]string {
@@ -162,7 +167,13 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 				return
 			case <-t.C:
 				up, down := b.Stats()
-				log.Println(trace.ID(id), fmt.Sprintf("nat forward alive %s up=%d down=%d dur=%s", src, up, down, time.Since(start).Round(time.Second)))
+				idle := b.IdleFor()
+				log.Println(trace.ID(id), fmt.Sprintf("nat forward alive %s up=%d down=%d dur=%s idle=%s", src, up, down, time.Since(start).Round(time.Second), idle.Round(time.Second)))
+				if idle >= forwardIdleTimeout {
+					log.Println(trace.ID(id), fmt.Sprintf("nat forward zombie %s up=%d down=%d dur=%s idle=%s, closing", src, up, down, time.Since(start).Round(time.Second), idle.Round(time.Second)))
+					conn.Close()
+					return
+				}
 			}
 		}
 	}()
