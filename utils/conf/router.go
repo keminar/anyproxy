@@ -116,6 +116,18 @@ type ClientForward struct {
 	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
 }
 
+// ClientDirect 订阅方(A侧)的直连入口规则: 在本机 Listen 起裸TCP监听, 进来的连接不再经
+// 服务端中转, 而是用 IPv6 QUIC 直接连到 Email 对应的另一个订阅方(C), 由对方按 Port 查它
+// 自己的 client.forward[port] 决定 dial 哪个内网目标。
+//
+// 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
+// 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
+type ClientDirect struct {
+	Listen string `yaml:"listen"` //本机裸TCP入口监听地址, 如 ":13389"
+	Email  string `yaml:"email"`  //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
+	Port   uint16 `yaml:"port"`   //告诉对方要用哪条 client.forward[port] 规则, 对方未映射该端口即拒绝
+}
+
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
 type ServerUser struct {
 	User    string `yaml:"user"`    //认证用户
@@ -154,6 +166,11 @@ type WsClient struct {
 	Email     string          `yaml:"email"`     //Email用于定位用户, 不鉴权
 	Subscribe []Subscribe     `yaml:"subscribe"` //订阅头部信息
 	Forward   []ClientForward `yaml:"forward"`   //裸TCP端口转发目标(见 ClientForward)
+
+	// 以下两项为 IPv6 QUIC 直连(A<->C 不经服务端转发数据), 见 ClientDirect。
+	// 两者互相独立: 只想被别人直连就单开 directAccept, 只想主动直连别人就单配 direct。
+	DirectAccept bool           `yaml:"directAccept"` //true 时起 IPv6 QUIC 监听并把端点通告给服务端, 允许其它订阅方直连自己
+	Direct       []ClientDirect `yaml:"direct"`       //本机直连入口规则(见 ClientDirect)
 }
 
 // Websocket 会话订阅通信, 按角色分 server(服务端)/ client(客户端)两块配置。

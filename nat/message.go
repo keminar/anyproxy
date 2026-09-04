@@ -39,7 +39,7 @@ type SubscribeMessage struct {
 // Message 普通消息体
 type Message struct {
 	ID     uint
-	Type   uint8  //连接类型(ConnHTTP/ConnTCP), 与 ID 组成复合键
+	Type   uint8 //连接类型(ConnHTTP/ConnTCP), 与 ID 组成复合键
 	Method string
 	Body   []byte
 	Port   uint16 //仅 METHOD_CREATE 用: 服务端裸TCP入口端口, 订阅方据此查固定 target

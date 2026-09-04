@@ -50,6 +50,58 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
 - 订阅端：`websocket.client.forward[].port → target` 建映射（`nat/forward.go` 的 `buildForward`，每台 server 连接各自一份）。收到服务端「入口端口 Port」来的连接时，dial 对应 `target`；**Port 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。
 - 适合：暴露内网 Web/DB 等任意 TCP 服务（如远程 SSH、内网 Web）。
 
+### 路径 C：IPv6 QUIC 直连（`direct`，数据不经服务端）
+
+前两条路径的数据都经服务端转发，服务端要吃掉全部流量。这条路径把**入口挪到订阅端自己机器上**，两个订阅端之间用 IPv6 QUIC 直连，服务端只交换地址、不碰任何数据字节。
+
+```
+任意 client ──TCP──▶ A(订阅端) :13389 (本机入口监听)
+                        │ ①经 ws 问服务端要 C 的端点, 并让 C 朝我打洞
+                     服务端 B (只转信令)
+                        │ ②
+                        ▼
+     A ══QUIC over IPv6 直连══▶ C(订阅端) ──dial client.forward[port]──▶ 内网 RDP
+```
+
+代码在 [nat/direct.go](../nat/direct.go)、[direct_entry.go](../nat/direct_entry.go)（A 侧）、[direct_accept.go](../nat/direct_accept.go)（C 侧）、[direct_broker.go](../nat/direct_broker.go)（服务端信令）、[direct_reflect.go](../nat/direct_reflect.go)（UDP 反射器）。
+
+**为什么必须有 UDP 反射器**：websocket 是 TCP，服务端从这条连接上看到的是订阅端 **TCP socket** 的地址；而 QUIC 走另一个 UDP socket。IPv6 虽然通常没有 NAT，但一台机器常同时持有多个全局地址（稳定地址 + 会轮换的隐私临时地址 RFC 4941），内核按 RFC 6724 **按目的地分别选源**，两者不保证相同。所以端点必须由订阅端**用 QUIC 那个 socket 本身**去问反射器要。反射器自动绑在与 `websocket.server.listen` 相同的端口号上（TCP/UDP 互不冲突），订阅端从 `connect` 地址推导，无需额外配置。
+
+**为什么还要打洞**：IPv6 没有 NAT，但家用路由器默认对 IPv6 开有状态防火墙、拦截主动入站。所以 A 发起前，服务端先让 C 朝 A 的端点连发几个 UDP 包，在 C 这侧开出允许 A 回包的状态，A 的 QUIC Initial 才进得来。
+
+配置：
+
+```yaml
+# C（被连的一方，内网目标所在机器）
+websocket:
+  client:
+    connect: "[2001:db8::1]:3002"   # 服务端必须有 IPv6, 反射器在同端口的 UDP 上
+    user: someuser
+    pass: somepass
+    email: home
+    directAccept: true               # 起 QUIC 监听并通告端点, 允许别人直连自己
+    forward:                         # 复用同一张白名单: 未映射的 port 一律拒绝
+      - port: 3389
+        target: 192.168.1.10:3389
+
+# A（发起的一方，入口在自己机器上）
+websocket:
+  client:
+    connect: "[2001:db8::1]:3002"
+    user: anotheruser
+    pass: anotherpass
+    email: office
+    direct:
+      - listen: ":13389"             # 本机入口, mstsc 连这里
+        email: home                  # 直连到这个 email 的订阅端
+        port: 3389                   # 用对方 forward 里的哪条规则
+```
+
+- `directAccept` 与 `direct` 互相独立：只想被连就单开 `directAccept`，只想连别人就单配 `direct`，都配就两个方向都能用。
+- **安全**：QUIC 用自签证书 + 指纹固定（指纹经已鉴权的 websocket 下发），另加一次性凭证——凭证必须由服务端提前经打洞消息交给过 C，且用后即废。所以 QUIC 端口被扫到也无法利用。落地目标仍受 `client.forward` 白名单约束。
+- **不做回落**：直连建不起来就关掉这条入口连接并记日志，不会静默转成经服务端中继。需要中继就另配一条路径 B 规则。
+- **前提是两端都有可用的 IPv6**。对端若是 IPv4 接入，服务端会在交换阶段就拒绝并说明原因（`checkDirectEndpoint`），而不是拖到拨号才失败。
+
 ## 配置字段
 
 `websocket` 段（[router.go](../utils/conf/router.go) 的 `Websocket`）按角色分 `server` / `client` 两块：

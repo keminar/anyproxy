@@ -30,7 +30,8 @@ type wsClientConn struct {
 	bridge    *BridgeHub
 	forward   map[uint16]string
 	tempDelay time.Duration
-	tag       string // 日志前缀, 用 cfg.Connect 区分是哪条连接
+	tag       string      // 日志前缀, 用 cfg.Connect 区分是哪条连接
+	direct    *directPeer // IPv6 QUIC 直连运行时, 未启用时为 nil
 }
 
 // liveAuthCfg 每次重连前重新取一遍 user/pass/host/email/subscribe, 保留热加载语义
@@ -76,6 +77,18 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	}
 	go w.hub.run()
 	go w.bridge.run()
+
+	// IPv6 QUIC 直连。监听(QUIC 与 TCP 入口)只在这里起一次: 下面的 for 循环每次重连
+	// 都会新建 Client, 若把监听放进 connect() 里会重复绑定同一端口。
+	if cfg.DirectAccept || len(cfg.Direct) > 0 {
+		w.direct = newDirectPeer(w.tag, cfg, w.forward)
+		if cfg.DirectAccept {
+			if err := w.direct.startAccept(); err != nil {
+				w.logf("direct accept disabled: %v", err)
+			}
+		}
+		w.direct.startEntries(cfg.Direct)
+	}
 
 	interruptClose = false
 	interrupt := make(chan os.Signal, 1)
@@ -152,6 +165,12 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 	w.logf("websocket auth and subscribe ok")
 
 	client := &Client{hub: w.hub, conn: c, send: make(chan *Message, SEND_CHAN_LEN), bridge: w.bridge, forward: w.forward, tag: w.tag}
+	if w.direct != nil {
+		// 直连信令要经这条新连接收发, 每次重连都要重新挂上并重报端点(服务端是按
+		// websocket 连接记录端点的, 旧连接一断记录就随之失效)。
+		client.setDirectPeer(w.direct)
+		w.direct.setClient(client)
+	}
 	client.hub.register <- client
 	defer func() {
 		client.hub.unregister <- client
@@ -163,6 +182,9 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 		defer close(done)
 		client.localReadPump()
 	}()
+	if w.direct != nil {
+		w.direct.announce()
+	}
 
 	for {
 		select {

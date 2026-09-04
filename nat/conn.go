@@ -66,6 +66,11 @@ func NewServer(addr *string) {
 		serveWs(ServerHub, w, r)
 	})
 
+	// 直连用的 UDP 反射器, 绑同一个端口号(TCP/UDP 互不冲突), 订阅方可直接从 websocket
+	// 的连接地址推出它, 不用额外配置。订阅方必须用 QUIC 那个 socket 去问它要端点 ——
+	// websocket 是 TCP、是另一个 socket, 观测到的地址不能代表 UDP 会用哪个源地址。
+	StartDirectReflector(*addr)
+
 	log.Printf("Listening for websocket connections on %s\n", *addr)
 
 	// 延迟启动

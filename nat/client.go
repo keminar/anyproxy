@@ -3,6 +3,7 @@ package nat
 import (
 	"io"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,6 +36,48 @@ type Client struct {
 	bridge  *BridgeHub        // 替代原全局 LocalBridge, 每条 server 连接一份, 避免多连接间请求ID撞车
 	forward map[uint16]string // 替代原全局 localForward, 每条 server 连接一份, 避免入口端口撞车
 	tag     string            // 日志前缀, 区分多条并发的 server 连接
+
+	// IPv6 QUIC 直连状态。服务端侧: 记录该订阅方通告的端点(见 nat/direct_broker.go);
+	// 订阅方侧: 记录本地直连运行时(见 nat/direct_accept.go / direct_entry.go)。
+	// 独立加锁: 写在各自的 readPump goroutine, 读可能来自其它订阅方的请求处理。
+	directMu    sync.Mutex
+	directAddr_ string      // 服务端侧: 该订阅方的 QUIC 端点(B 观测到的地址 + 对方通告的端口)
+	directFP    string      // 服务端侧: 对方自签证书指纹
+	direct      *directPeer // 订阅方侧: 本地直连运行时, 未启用时为 nil
+}
+
+// setDirectEndpoint 服务端侧记录订阅方通告的 QUIC 端点。
+func (c *Client) setDirectEndpoint(addr, fingerprint string) {
+	c.directMu.Lock()
+	c.directAddr_, c.directFP = addr, fingerprint
+	c.directMu.Unlock()
+}
+
+// directEndpoint 返回该订阅方通告的 QUIC 端点与证书指纹; 未通告时 addr 为空。
+func (c *Client) directEndpoint() (addr, fingerprint string) {
+	c.directMu.Lock()
+	defer c.directMu.Unlock()
+	return c.directAddr_, c.directFP
+}
+
+// directAddr 仅供日志使用。
+func (c *Client) directAddr() string {
+	addr, _ := c.directEndpoint()
+	return addr
+}
+
+// setDirectPeer 订阅方侧挂上本地直连运行时。
+func (c *Client) setDirectPeer(p *directPeer) {
+	c.directMu.Lock()
+	c.direct = p
+	c.directMu.Unlock()
+}
+
+// directPeerOf 取订阅方侧的直连运行时。
+func (c *Client) directPeerOf() *directPeer {
+	c.directMu.Lock()
+	defer c.directMu.Unlock()
+	return c.direct
 }
 
 // 写数据到websocket的对端
@@ -103,6 +146,10 @@ func (c *Client) serverReadPump() {
 			md5Val, _ := md5Byte(msg.Body)
 			log.Println("nat_debug_read_from_websocket", msg.ID, msg.Method, md5Val)
 		}
+		// 直连信令不进数据面: 服务端只转交地址, 不参与 A<->C 的字节转发。
+		if handleDirectServer(c, msg) {
+			continue
+		}
 		ServerBridge.broadcast <- msg
 	}
 }
@@ -124,6 +171,11 @@ func (c *Client) localReadPump() {
 		if config.DebugLevel >= config.LevelDebugBody {
 			md5Val, _ := md5Byte(msg.Body)
 			log.Println(trace.ID(msg.ID), c.tag, "nat_local_read_from_websocket_message", msg.Method, md5Val)
+		}
+
+		// 直连信令(d_punch / d_offer)由直连运行时消费, 不走 bridge。
+		if handleDirectClient(c, msg) {
+			continue
 		}
 
 		if msg.Method == METHOD_CREATE {
