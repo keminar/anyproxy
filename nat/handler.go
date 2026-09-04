@@ -83,11 +83,12 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	if cfg.DirectAccept || len(cfg.Direct) > 0 {
 		w.direct = newDirectPeer(w.tag, cfg, w.forward)
 		if cfg.DirectAccept {
+			// 起不来不代表以后也起不来: 开机时 IPv6 常常还没就绪, 交给 superviseAccept
+			// 持续重试, 别一次失败就把功能永久关掉。
 			if err := w.direct.startAccept(); err != nil {
-				w.logf("direct accept disabled: %v", err)
-			} else {
-				go w.direct.keepAnnounced()
+				w.logf("direct accept not ready yet, will keep retrying: %v", err)
 			}
+			go w.direct.superviseAccept()
 		}
 		w.direct.startEntries(cfg.Direct)
 		go w.direct.reapSessions()

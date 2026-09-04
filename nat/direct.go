@@ -77,8 +77,9 @@ type directPeer struct {
 	probeFrom string
 	observed  string
 
-	// C 侧(directAccept)
-	listener    *quic.Listener
+	// C 侧(directAccept)。listener 用原子存取: 起监听的重试在守护 goroutine 里做,
+	// 而 announce 在 websocket 那条 goroutine 里读它。
+	listener    atomic.Pointer[quic.Listener]
 	fingerprint string
 	tokens      *directTokenStore
 
@@ -183,6 +184,11 @@ func (s *directSession) idleFor() time.Duration {
 		return 0
 	}
 	return time.Since(time.Unix(0, s.lastUse.Load()))
+}
+
+// acceptListener 取当前的 QUIC 监听; 尚未起来时返回 nil。
+func (d *directPeer) acceptListener() *quic.Listener {
+	return d.listener.Load()
 }
 
 // bindUDPEntry 登记某个入口, 使其能收到该连接上对应端口的回程 datagram。

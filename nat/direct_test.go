@@ -49,8 +49,8 @@ func newAcceptPeer(t *testing.T, forward map[uint16]string) *directPeer {
 		t.Skipf("cannot start ipv6 quic listener (no usable IPv6 here?): %v", err)
 	}
 	t.Cleanup(func() {
-		if d.listener != nil {
-			d.listener.Close()
+		if ln := d.acceptListener(); ln != nil {
+			ln.Close()
 		}
 	})
 	return d

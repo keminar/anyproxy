@@ -23,8 +23,8 @@ import (
 // C 侧: 起 IPv6 QUIC 监听、把端点通告给服务端、按服务端转来的请求朝对端打洞,
 // 并把每条进来的 stream 接到 client.forward 指定的内网目标上。
 
-// startAccept 起 QUIC 监听。端口随机(每次启动重新分配), 具体端口经 websocket 通告,
-// 所以不需要配置写死。监听绑在 udp6 通配地址上。
+// startAccept 起 QUIC 监听。本地端口由系统随机分配、不需要配置写死: 对端要用的是
+// 反射器观测到的**外网**端点, 跟本地端口不一定相同(见 direct_reflect.go)。
 func (d *directPeer) startAccept() error {
 	tr, err := d.ensureTransport()
 	if err != nil {
@@ -38,18 +38,22 @@ func (d *directPeer) startAccept() error {
 	if err != nil {
 		return fmt.Errorf("quic listen: %w", err)
 	}
-	d.listener = ln
+	d.listener.Store(ln)
 	d.fingerprint = fingerprint
 	d.logf("quic listening on port %d (fingerprint %s)", d.localUDPPort(), shortFP(fingerprint))
 	go d.acceptLoop()
 	return nil
 }
 
-// announce 把 QUIC 端口与证书指纹报给服务端。只报端口: 地址由服务端按 websocket 连接的
-// 真实来源填(本机自报不可靠, 见 DirectAnnounce 注释)。每次 websocket 重连后都要重报,
-// 因为服务端是按连接记录的。
+// announce 把探测到的 QUIC 端点与证书指纹报给服务端。
+//
+// 报的是**反射器观测到的完整 addr:port**, 不是本机自报: 本机既判断不了哪个全局 IPv6
+// 地址会被用作出向源地址(RFC 6724 按目的地选源, 隐私临时地址还会轮换), 也无法得知
+// 沿途 NAT/端口映射把本地端口翻成了哪个外网端口。
+//
+// 每次 websocket 重连后都要重报, 因为服务端是按连接记录的, 旧连接一断记录即失效。
 func (d *directPeer) announce() {
-	if d.listener == nil {
+	if d.acceptListener() == nil {
 		return
 	}
 	// 每次重连都重新探测: 服务端是按 websocket 连接记端点的, 旧连接一断记录即失效;
@@ -67,20 +71,31 @@ func (d *directPeer) announce() {
 	d.logf("announced quic endpoint %s", endpoint)
 }
 
-// keepAnnounced 周期性重探端点, 变了就重新通告。只在开了 directAccept 时跑。
+// superviseAccept 守护 C 侧的 QUIC 监听: 起不来就一直重试, 起来之后周期性重探端点、
+// 变了就重新通告。
 //
-// 两个作用, 缺一不可:
+// 为什么要重试而不是启动失败就算了: 最常见的失败原因是**开机时 IPv6 还没就绪**
+// (SLAAC/RA 要几秒、链路晚起、前缀尚未下发)。anyproxy 作为开机服务启动时撞上这个,
+// 若只试一次就永久禁用, 现象是直连一直不工作而日志里只有开机那一行, 极难排查。
+//
+// 周期重探则有两个作用, 缺一不可:
 //  1. **保活映射**: 探测包本身让沿途 NAT / 有状态防火墙的映射不过期。长时间没流量时
 //     映射会老化, 重建后**外网端口可能就变了** —— 外网端口由路径上的设备决定, 本机
 //     控制不了, 所以只能靠探测得知, 跟地址是一样的道理。
 //  2. **纠正陈旧通告**: 服务端手里记的是上次通告的端点。地址(隐私临时地址轮换)或端口
 //     (映射重建)一旦变化而没重报, 对端就会拨到一个死端点。
-func (d *directPeer) keepAnnounced() {
+func (d *directPeer) superviseAccept() {
 	t := time.NewTicker(directAnnounceEvery)
 	defer t.Stop()
 	for range t.C {
-		if d.listener == nil {
-			return
+		if d.acceptListener() == nil {
+			// 还没起来(或起过但失败了): 再试一次。成功后立刻通告, 不必再等一个周期。
+			if err := d.startAccept(); err != nil {
+				d.logf("direct accept still unavailable, will retry: %v", err)
+				continue
+			}
+			d.announce()
+			continue
 		}
 		endpoint, err := d.probeEndpoint()
 		if err != nil {
@@ -140,7 +155,11 @@ func (d *directPeer) onPunch(msg *Message) {
 
 func (d *directPeer) acceptLoop() {
 	for {
-		conn, err := d.listener.Accept(context.Background())
+		ln := d.acceptListener()
+		if ln == nil {
+			return
+		}
+		conn, err := ln.Accept(context.Background())
 		if err != nil {
 			d.logf("quic accept stopped: %v", err)
 			return
