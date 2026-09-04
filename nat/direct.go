@@ -34,6 +34,19 @@ const (
 	// directMaxStreams 同一对端的并发会话数上限(每条入口连接占一条 stream)。
 	// 256 对 SSH/RDP 这类用法足够, 又不会让单条连接的流控缓冲占太多内存。
 	directMaxStreams = 256
+	// directSessionIdle 一条 QUIC 连接上所有会话都结束后, 空闲多久就主动关掉。
+	//
+	// 不留着长期复用: 留着省下的只是下次那一两秒建连, 代价却是每 20 秒一个保活包
+	// 无限期发下去, 而且多台 A 连过同一个 C 时 C 会永久累积连接。跨过地址轮换的
+	// 连接本来也已经是死的, "复用"在最需要它的时候恰恰不可靠。
+	directSessionIdle = 90 * time.Second
+	// directReapEvery 空闲回收的检查间隔。
+	directReapEvery = 30 * time.Second
+	// directAnnounceEvery C 侧重探端点并按需重报的间隔。
+	//
+	// 取值要小于常见的 NAT/防火墙 UDP 映射老化时间(常见 30s~2min 起步): 探测包本身
+	// 就是保活, 间隔一旦超过老化时间, 映射会先失效再重建, 外网端口可能随之改变。
+	directAnnounceEvery = 25 * time.Second
 )
 
 // directPeer 一条 websocket 连接对应的直连运行时。挂在 wsClientConn 上(不是 Client),
@@ -114,8 +127,10 @@ func (d *directPeer) observedEndpoint() string {
 	return d.observed
 }
 
-// localUDPPort 返回本地 QUIC socket 的端口。仅用于日志: 对端要用的地址必须来自反射器
-// 观测(见 direct_reflect.go), 本机自报的地址不可靠。
+// localUDPPort 返回本地 QUIC socket 绑定的端口。**仅用于日志**。
+//
+// 不能拿它当对端可用的端点: 外网端口由路径上的 NAT / 端口映射决定, 与本地端口不一定
+// 相同, 而且映射老化重建后还会变 —— 跟地址一样, 只能靠反射器探测(见 direct_reflect.go)。
 func (d *directPeer) localUDPPort() uint16 {
 	d.transportMu.Lock()
 	defer d.transportMu.Unlock()
@@ -132,8 +147,42 @@ type directSession struct {
 	conn *quic.Conn
 	addr string
 
+	// 空闲回收用: refs 为进行中的会话数(每条入口连接 +1), lastUse 为最近一次使用时间。
+	// 两者都为"闲"时由 reapSessions 关掉这条 QUIC 连接。
+	//
+	// 为什么不能光靠 QUIC 自己的空闲超时: 我们开着 keep-alive(活跃会话期间要靠它焐住
+	// IPv6 有状态防火墙的洞, RDP 有大段没数据的时候), 而 keep-alive 会一直把空闲超时
+	// 顶回去, 连接于是永远不死。多台 A 连过同一个 C 时, C 这边会永久累积连接。
+	refs    atomic.Int64
+	lastUse atomic.Int64 // unix nano
+
 	udpMu      sync.Mutex
 	udpEntries map[uint16]*directUDPEntry // 本地入口端口 -> 入口, 用于把回程 datagram 投递回去
+}
+
+// acquire 标记一条会话开始使用。
+func (s *directSession) acquire() {
+	s.refs.Add(1)
+	s.touch()
+}
+
+// release 标记一条会话结束。
+func (s *directSession) release() {
+	s.refs.Add(-1)
+	s.touch()
+}
+
+// touch 刷新最近使用时间。UDP 没有"连接"概念, 靠每个包来刷。
+func (s *directSession) touch() {
+	s.lastUse.Store(time.Now().UnixNano())
+}
+
+// idleFor 返回空闲时长; 仍有进行中的会话时返回 0。
+func (s *directSession) idleFor() time.Duration {
+	if s.refs.Load() > 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, s.lastUse.Load()))
 }
 
 // bindUDPEntry 登记某个入口, 使其能收到该连接上对应端口的回程 datagram。

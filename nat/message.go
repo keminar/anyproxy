@@ -28,6 +28,14 @@ type AuthMessage struct {
 	Email string
 	Token string
 	Xtime int64
+
+	// Direct 表示本订阅方参与 IPv6 QUIC 直连(配了 directAccept 或 direct[])。
+	//
+	// 服务端据此放行空订阅: 直连拓扑下入口在订阅方自己机器上, 服务端不需要配
+	// server.forward, 订阅方也不需要 subscribe 头部规则, 两边都为空时若不放行,
+	// 直连的双方都会在握手阶段被 "subscribe empty err" 拒掉。
+	// 不参与 token 计算; 旧版客户端不发这个字段, 反序列化为 false, 行为不变。
+	Direct bool
 }
 
 // SubscribeMessage 订阅

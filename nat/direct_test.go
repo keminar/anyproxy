@@ -381,9 +381,13 @@ func TestDirectProbeEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probed endpoint %q is not host:port: %v", endpoint, err)
 	}
-	// 关键断言: 观测到的端口必须就是 QUIC socket 自己的端口, 否则对端打洞会打错地方。
+	// 关键断言: 探测结果必须反映 QUIC socket 自己的端口, 而不是别的 socket 的。
+	//
+	// 只有在回环上"观测端口 == 本地端口"才成立(没有 NAT / 端口映射)。真实路径上两者
+	// 可能不同, 而且映射老化重建后还会变 —— 所以协议里传的一律是探测结果, 从不传
+	// 本地端口。这条断言验的是"探测确实问的是这个 socket", 不是"两者恒等"。
 	if portStr != fmt.Sprint(d.localUDPPort()) {
-		t.Fatalf("probed port %s does not match the quic socket port %d", portStr, d.localUDPPort())
+		t.Fatalf("probed port %s does not match the quic socket port %d (loopback has no NAT, so they must match here)", portStr, d.localUDPPort())
 	}
 }
 

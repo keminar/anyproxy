@@ -85,9 +85,12 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 		if cfg.DirectAccept {
 			if err := w.direct.startAccept(); err != nil {
 				w.logf("direct accept disabled: %v", err)
+			} else {
+				go w.direct.keepAnnounced()
 			}
 		}
 		w.direct.startEntries(cfg.Direct)
+		go w.direct.reapSessions()
 	}
 
 	interruptClose = false
@@ -140,7 +143,7 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 	defer c.Close()
 
 	ch := newClientHandler(c)
-	err = ch.auth(live.User, live.Pass, live.Email)
+	err = ch.auth(live.User, live.Pass, live.Email, w.direct != nil)
 	if err != nil {
 		w.logf("auth: %v", err)
 
@@ -219,14 +222,14 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 	return &ClientHandler{c: c}
 }
 
-// auth 认证
-func (h *ClientHandler) auth(user string, pass string, email string) error {
+// auth 认证。direct 表示本端参与 IPv6 QUIC 直连, 供服务端放行空订阅(见 AuthMessage.Direct)。
+func (h *ClientHandler) auth(user string, pass string, email string, direct bool) error {
 	xtime := time.Now().Unix()
 	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user, pass, xtime))
 	if err != nil {
 		return err
 	}
-	msg := AuthMessage{User: user, Token: token, Xtime: xtime, Email: email}
+	msg := AuthMessage{User: user, Token: token, Xtime: xtime, Email: email, Direct: direct}
 	return h.ask(&msg)
 }
 

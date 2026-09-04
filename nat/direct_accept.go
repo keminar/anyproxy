@@ -67,6 +67,37 @@ func (d *directPeer) announce() {
 	d.logf("announced quic endpoint %s", endpoint)
 }
 
+// keepAnnounced 周期性重探端点, 变了就重新通告。只在开了 directAccept 时跑。
+//
+// 两个作用, 缺一不可:
+//  1. **保活映射**: 探测包本身让沿途 NAT / 有状态防火墙的映射不过期。长时间没流量时
+//     映射会老化, 重建后**外网端口可能就变了** —— 外网端口由路径上的设备决定, 本机
+//     控制不了, 所以只能靠探测得知, 跟地址是一样的道理。
+//  2. **纠正陈旧通告**: 服务端手里记的是上次通告的端点。地址(隐私临时地址轮换)或端口
+//     (映射重建)一旦变化而没重报, 对端就会拨到一个死端点。
+func (d *directPeer) keepAnnounced() {
+	t := time.NewTicker(directAnnounceEvery)
+	defer t.Stop()
+	for range t.C {
+		if d.listener == nil {
+			return
+		}
+		endpoint, err := d.probeEndpoint()
+		if err != nil {
+			d.logf("periodic endpoint probe failed: %v", err)
+			continue
+		}
+		if endpoint == d.observedEndpoint() {
+			continue // 没变就不必再占用信令通道, 探测本身已经把映射焐住了
+		}
+		d.logf("quic endpoint changed %s -> %s, re-announcing", d.observedEndpoint(), endpoint)
+		d.setObservedEndpoint(endpoint)
+		if err := d.send(METHOD_DIRECT_ANNOUNCE, 0, DirectAnnounce{Endpoint: endpoint, Fingerprint: d.fingerprint}); err != nil {
+			d.logf("re-announce failed: %v", err)
+		}
+	}
+}
+
 // onPunch 服务端转来的连接请求: 记下期望的凭证, 并朝对端连发几个 UDP 包。
 //
 // 这几个包是整套流程里最关键的一步: IPv6 没有 NAT, 但家用路由器默认对 IPv6 开有状态

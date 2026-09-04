@@ -232,6 +232,8 @@ func (e *directUDPEntry) pump(getSession func() (*directSession, error)) {
 			e.peer.logf("direct udp entry %s: %v", e.rule.Listen, err)
 			continue
 		}
+		// UDP 没有"连接"可计数, 靠每个包刷新使用时间, 否则正在跑 UDP 的连接会被空闲回收误杀。
+		sess.touch()
 		if err := sendDatagram(sess.conn, sessionID, e.rule.Port, buf[:n]); err != nil {
 			e.peer.logf("direct udp entry %s: send failed: %v", e.rule.Listen, err)
 		}

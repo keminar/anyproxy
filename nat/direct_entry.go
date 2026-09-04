@@ -70,38 +70,46 @@ func (d *directPeer) handleEntry(conn net.Conn, r conf.ClientDirect) {
 	start := time.Now()
 	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry accept %s -> email %s (port %d)", src, r.Email, r.Port))
 
-	stream, err := d.openStream(r)
+	sess, stream, err := d.openStream(r)
 	if err != nil {
 		log.Println(trace.ID(id), fmt.Sprintf("nat direct entry %s failed: %v", src, err))
 		return
 	}
 	defer stream.Close()
+	// 计入引用: 连接空闲回收要靠它区分"没人用"和"用着但暂时没数据"(RDP 常有长时间静默)。
+	sess.acquire()
+	defer sess.release()
 
 	up, down := directCopy(conn, stream)
 	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry closed %s up=%d down=%d dur=%s",
 		src, up, down, time.Since(start).Round(time.Second)))
 }
 
-// openStream 拿到一条承载数据的 QUIC stream。
-func (d *directPeer) openStream(r conf.ClientDirect) (*quic.Stream, error) {
+// openStream 拿到一条承载数据的 QUIC stream, 并一并返回它所属的连接(调用方要
+// acquire/release 以参与空闲回收的判断)。
+func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stream, error) {
 	sess, err := d.ensureSession(r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// 连接已在 ensureSession 里认证过, 数据流不必再带凭证。QUIC 的 stream 相互独立,
 	// 一条连接上并发多个会话不会像单条 TCP 复用那样互相队头阻塞。
 	stream, err := d.openHeadedStream(sess, directStreamData, "", r.Port)
 	if err == nil {
-		return stream, nil
+		return sess, stream, nil
 	}
-	// 连接可能已被对端关掉或超时老化, 丢弃后完整重建一次。
+	// 连接可能已被对端关掉、空闲回收掉或超时老化, 丢弃后完整重建一次。
 	d.dropSession(r.Email, sess)
 	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Email, err)
 	sess, err = d.ensureSession(r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return d.openHeadedStream(sess, directStreamData, "", r.Port)
+	stream, err = d.openHeadedStream(sess, directStreamData, "", r.Port)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sess, stream, nil
 }
 
 // ensureSession 取一条**已认证**的 QUIC 连接: 有就复用, 没有就走一遍信令 + 拨号 + 鉴权。
@@ -292,6 +300,35 @@ func (d *directPeer) putSession(email string, s *directSession) {
 	d.mu.Lock()
 	d.sessions[email] = s
 	d.mu.Unlock()
+}
+
+// reapSessions 周期性关掉不再使用的 QUIC 连接。
+//
+// 必须自己收: 活跃期间要开 keep-alive 焐住 IPv6 防火墙的洞, 而 keep-alive 会一直把
+// QUIC 自己的空闲超时顶回去, 连接不会自然死亡。不收的话, 每台连过本机的对端都会留下
+// 一条永久连接和永不停歇的保活包。
+func (d *directPeer) reapSessions() {
+	t := time.NewTicker(directReapEvery)
+	defer t.Stop()
+	for range t.C {
+		var stale []string
+		d.mu.Lock()
+		for email, s := range d.sessions {
+			if s.idleFor() > directSessionIdle {
+				stale = append(stale, email)
+			}
+		}
+		for _, email := range stale {
+			s := d.sessions[email]
+			delete(d.sessions, email)
+			// 在锁内取出、锁外关闭, 避免关连接的耗时挡住其它请求。
+			go func(email string, s *directSession) {
+				d.logf("closing idle quic session to %s (idle %s)", email, s.idleFor().Round(time.Second))
+				_ = s.conn.CloseWithError(0, "idle")
+			}(email, s)
+		}
+		d.mu.Unlock()
+	}
 }
 
 // dropSession 仅在当前记录仍是这条失效连接时删除, 避免把别的 goroutine 刚建好的新连接误删。

@@ -154,13 +154,21 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(subscribe) == 0 {
-		// 若该email是某条forward规则的目标, 允许空订阅(仅走裸TCP转发)
-		if !isForwardEmail(user.Email) {
+		// 空订阅只在两种情况下放行:
+		//   1. 该 email 是某条 server.forward 规则的目标(仅走裸TCP转发);
+		//   2. 该订阅方参与 IPv6 QUIC 直连 —— 直连的入口在订阅方自己机器上, 服务端
+		//      不需要配 server.forward, 订阅方也不需要头部订阅规则, 不放行的话直连
+		//      双方都会卡在这一步连不上。
+		switch {
+		case isForwardEmail(user.Email):
+			log.Printf("serveWs client email %s empty subscribe, allowed for forward\n", user.Email)
+		case user.Direct:
+			log.Printf("serveWs client email %s empty subscribe, allowed for direct\n", user.Email)
+		default:
 			log.Printf("serveWs client email %s ignore, subscribe is empty\n", user.Email)
 			conn.WriteMessage(websocket.TextMessage, []byte("subscribe empty err"))
 			return
 		}
-		log.Printf("serveWs client email %s empty subscribe, allowed for forward\n", user.Email)
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
 
