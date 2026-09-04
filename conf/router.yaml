@@ -240,11 +240,22 @@ websocket:
       - key:
         val:
     # 裸TCP端口转发目标: 收到服务端 port 入口来的连接时, dial 写死的 target
+    # 直连(direct)落地也复用这张表: 未在此映射的 port 一律拒绝
     forward:
       # - port: 2222
       #   target: 127.0.0.1:22
+    # ===== IPv6 QUIC 直连(数据不经服务端, 详见 docs/websocket.md 路径 C) =====
+    # 允许别的订阅方直连本机(监听按需起, 平时不占端口); 落地目标仍受上面 forward 白名单约束
+    directAccept: false
+    # 本机直连入口: 在 listen 起监听, 连接直接送给 email 对应的订阅方, 由对方按 port 查它的 forward
+    # protocol: tcp(默认) / udp / both; both 适合 RDP(主通道 TCP 3389 + Enhanced RDP 的 UDP 3389)
+    direct:
+      # - listen: ":13389"
+      #   email: someone@example.com
+      #   port: 3389
+      #   protocol: both
   # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
-  # 字段同上面 client 块(connect/host/user/pass/email/subscribe/forward)
+  # 字段同上面 client 块(connect/host/user/pass/email/subscribe/forward/directAccept/direct)
   # clients:
   #   - connect:
   #     user:

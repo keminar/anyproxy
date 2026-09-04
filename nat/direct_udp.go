@@ -26,8 +26,16 @@ import (
 const (
 	// directDatagramHead datagram 首部长度: sessionID(4) + port(2)。
 	directDatagramHead = 6
-	// directUDPIdle UDP 会话空闲多久回收。UDP 无连接, 只能靠空闲判定。
-	directUDPIdle = 2 * time.Minute
+	// directUDPIdle UDP 会话空闲多久回收。UDP 无连接可依据, 只能靠空闲判定。
+	//
+	// 取 30 分钟, 与 websocket 转发路径的 forwardIdleTimeout 一致: 交互式会话安静很久
+	// 是常态 —— mstsc 走 UDP 图形通道时, 用户离开一会儿就完全没有包, 但会话并没有结束。
+	// 窗口太短会把它判成结束, 用户一动鼠标就得重新走信令、打洞、建连。
+	//
+	// 代价是每个会话在最后一个包之后还会多占一个 UDP socket 与一个 goroutine(C 侧),
+	// 以及一条 QUIC 连接。对 RDP/SSH 这类会话数不多的用法可以忽略; 若用来转发大量
+	// 短生命周期的 UDP 流(如 DNS), 这个值应当调小。
+	directUDPIdle = 30 * time.Minute
 	// directUDPBuf 单个 UDP 包读缓冲。QUIC datagram 受 MTU 约束(约 1200 字节),
 	// 超过的包送不出去, 这里留够读、由发送端判断并丢弃。
 	directUDPBuf = 64 * 1024
