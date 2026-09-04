@@ -182,7 +182,7 @@ socket 也支持失效重建：网卡下线、IPv6 地址被撤等情况下会�
 |------|------|
 | `listen` | websocket 监听地址，如 `:3002`（订阅端连它的 `/ws`）。等价 `-ws-listen` |
 | `users` | 鉴权账号数组，每条 `{user, pass, disable}`；不同订阅端各用各的账号，可单独停用某个，见下文「多用户鉴权」 |
-| `allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP），为空不限制。按**真实 TCP 来源**（`r.RemoteAddr`）判定，不信任 `X-Real-IP` 等可伪造头部；loopback 始终放行。命中即拒绝、连 upgrade 都不做 |
+| `allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP，**IPv4 与 IPv6 都支持**），为空不限制。按**真实 TCP 来源**（`r.RemoteAddr`）判定，不信任 `X-Real-IP` 等可伪造头部；loopback 始终放行。命中即拒绝、连 upgrade 都不做。约束范围：websocket 接入、裸 TCP 转发入口（`forward.listen`）、以及直连用的 UDP 反射器 |
 | `forward` | 裸 TCP 转发入口规则数组（路径 B），每条 `{listen, email}`，见下 |
 
 ### 多用户鉴权

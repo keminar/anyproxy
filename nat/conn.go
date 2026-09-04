@@ -208,13 +208,20 @@ func serverIPAllowed(ip string) bool {
 	return false
 }
 
-// ipInCIDR 判断 IP 是否在 cidr 内(支持 ipv4/ipv6); cidr 非法时按单 IP 精确比较。
+// ipInCIDR 判断 IP 是否在 cidr 内(支持 ipv4/ipv6); 不是 CIDR 时按单 IP 比较。
+//
+// 单 IP 分支必须解析后用 IP.Equal 比, 不能比字符串: 同一个 IPv6 地址有多种写法
+// (大小写、是否压缩零段), 而 IP.String() 只产出规范形式 —— 配置里写
+// 2001:0DB8::1 或 2001:db8:0:0:0:0:0:1 都会匹配不上同一个地址。IPv4 因为写法
+// 唯一所以看不出问题。
 func ipInCIDR(ip net.IP, cidr string) bool {
-	_, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return ip.String() == cidr
+	if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+		return ipNet.Contains(ip)
 	}
-	return ipNet.Contains(ip)
+	if single := net.ParseIP(strings.TrimSpace(cidr)); single != nil {
+		return single.Equal(ip)
+	}
+	return false
 }
 
 func getIPAdress(req *http.Request, head []string) string {

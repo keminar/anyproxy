@@ -91,6 +91,11 @@ func StartDirectReflector(wsListen string) {
 			if !ok || payload != directWhoami {
 				continue
 			}
+			// 与 websocket 接入、裸TCP转发入口同一套来源白名单。不做限制的话, 这里
+			// 就成了一个人人可用的地址反射服务(响应比请求略大, 可被拿来做反射放大)。
+			if !serverIPAllowed(from.IP.String()) {
+				continue
+			}
 			// 回包也要带 magic: 对端是用 QUIC 的那个 socket 收的, 不带前缀会被
 			// quic-go 当成 QUIC 报文丢掉。
 			if _, err := conn.WriteToUDP(directPacket(from.String()), from); err != nil {
