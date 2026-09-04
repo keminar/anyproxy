@@ -42,11 +42,6 @@ const (
 	directSessionIdle = 90 * time.Second
 	// directReapEvery 空闲回收的检查间隔。
 	directReapEvery = 30 * time.Second
-	// directAnnounceEvery C 侧重探端点并按需重报的间隔。
-	//
-	// 取值要小于常见的 NAT/防火墙 UDP 映射老化时间(常见 30s~2min 起步): 探测包本身
-	// 就是保活, 间隔一旦超过老化时间, 映射会先失效再重建, 外网端口可能随之改变。
-	directAnnounceEvery = 25 * time.Second
 )
 
 // directPeer 一条 websocket 连接对应的直连运行时。挂在 wsClientConn 上(不是 Client),
@@ -77,9 +72,12 @@ type directPeer struct {
 	probeFrom string
 	observed  string
 
-	// C 侧(directAccept)。listener 用原子存取: 起监听的重试在守护 goroutine 里做,
-	// 而 announce 在 websocket 那条 goroutine 里读它。
+	// C 侧(directAccept)。监听是按需起的: 收到服务端转来的 punch 才起, 没有活跃连接
+	// 且空闲一段后由 reapAccept 关掉并释放 socket, 所以这些字段会反复置起/置空。
+	acceptMu    sync.Mutex // 串行化 ensureAccept / stopAccept
 	listener    atomic.Pointer[quic.Listener]
+	acceptConns atomic.Int64 // 当前活跃的入向 QUIC 连接数
+	acceptUse   atomic.Int64 // 最近一次使用时间(unix nano)
 	fingerprint string
 	tokens      *directTokenStore
 
@@ -186,9 +184,36 @@ func (s *directSession) idleFor() time.Duration {
 	return time.Since(time.Unix(0, s.lastUse.Load()))
 }
 
-// acceptListener 取当前的 QUIC 监听; 尚未起来时返回 nil。
+// acceptListener 取当前的 QUIC 监听; 未起或已释放时返回 nil。
 func (d *directPeer) acceptListener() *quic.Listener {
 	return d.listener.Load()
+}
+
+// touchAccept / lastAcceptUse 记录 C 侧监听最近一次被用到的时间, 供空闲释放判断。
+func (d *directPeer) touchAccept() {
+	d.acceptUse.Store(time.Now().UnixNano())
+}
+
+func (d *directPeer) lastAcceptUse() time.Time {
+	return time.Unix(0, d.acceptUse.Load())
+}
+
+// closeTransport 关掉并丢弃当前的 socket/Transport, 下次 ensureTransport 会重建一个。
+//
+// 必须能重建: socket 可能因为网卡下线、IPv6 地址被撤等原因失效, 一直抱着一个坏的
+// transport 会让直连永久不可用。端口因此改变也没关系 —— 对端用的端点每次都是当场
+// 探测后经服务端转交的, 没有谁攥着旧端口。
+func (d *directPeer) closeTransport() {
+	d.transportMu.Lock()
+	tr, conn := d.transport, d.udpConn
+	d.transport, d.udpConn = nil, nil
+	d.transportMu.Unlock()
+	if tr != nil {
+		_ = tr.Close()
+	}
+	if conn != nil {
+		_ = conn.Close()
+	}
 }
 
 // bindUDPEntry 登记某个入口, 使其能收到该连接上对应端口的回程 datagram。

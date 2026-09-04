@@ -44,7 +44,7 @@ func echoTarget(t *testing.T) (addr string, stop func()) {
 func newAcceptPeer(t *testing.T, forward map[uint16]string) *directPeer {
 	t.Helper()
 	d := newDirectPeer("test-c", conf.WsClient{}, forward)
-	if err := d.startAccept(); err != nil {
+	if err := d.ensureAccept(); err != nil {
 		// 环境没有可用 IPv6 时直接跳过, 而不是判失败: 这套机制本来就以 IPv6 为前提。
 		t.Skipf("cannot start ipv6 quic listener (no usable IPv6 here?): %v", err)
 	}
@@ -413,6 +413,81 @@ func TestCheckDirectEndpoint(t *testing.T) {
 		if !c.ok && err == nil {
 			t.Errorf("%s should be rejected", c.endpoint)
 		}
+	}
+}
+
+// TestDirectAcceptLifecycle C 侧监听是按需起、空闲放的: 放掉之后再起一个新的照样能用,
+// 而且端口通常会变 —— 这正是"端点必须每次当场探测、不能缓存"的原因。
+func TestDirectAcceptLifecycle(t *testing.T) {
+	target, stopTarget := echoTarget(t)
+	defer stopTarget()
+
+	const port = uint16(2222)
+	c := newDirectPeer("test-c", conf.WsClient{DirectAccept: true}, map[uint16]string{port: target})
+
+	// 一开始不该占任何端口。
+	if c.acceptListener() != nil {
+		t.Fatal("listener should not be running before anything asks for it")
+	}
+
+	if err := c.ensureAccept(); err != nil {
+		t.Skipf("cannot start ipv6 quic listener: %v", err)
+	}
+	first := c.localUDPPort()
+	if first == 0 {
+		t.Fatal("expected a bound port after ensureAccept")
+	}
+	// 重复调用必须复用同一个监听, 不能重复绑定。
+	if err := c.ensureAccept(); err != nil {
+		t.Fatalf("second ensureAccept: %v", err)
+	}
+	if got := c.localUDPPort(); got != first {
+		t.Fatalf("ensureAccept should reuse the listener, port changed %d -> %d", first, got)
+	}
+
+	// 释放: 监听与 socket 都该放掉。
+	c.stopAccept()
+	if c.acceptListener() != nil {
+		t.Fatal("listener should be nil after stopAccept")
+	}
+	if c.localUDPPort() != 0 {
+		t.Fatal("socket should be released after stopAccept")
+	}
+
+	// 再起一个: 必须能正常工作(端口大概率不同, 但这不影响, 因为端点是当场探的)。
+	if err := c.ensureAccept(); err != nil {
+		t.Fatalf("restart after release: %v", err)
+	}
+	defer c.stopAccept()
+
+	a := newDialPeer(t)
+	const token = "test-token-lifecycle"
+	c.tokens.put(token, port)
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("ensure transport: %v", err)
+	}
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect to the restarted listener: %v", err)
+	}
+	stream, err := a.openHeadedStream(sess, directStreamData, token, port)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	defer stream.Close()
+
+	want := "works after a restart"
+	if _, err := stream.Write([]byte(want)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(want))
+	stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(stream, got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("echo mismatch after restart: got %q want %q", got, want)
 	}
 }
 

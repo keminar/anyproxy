@@ -78,20 +78,21 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	go w.hub.run()
 	go w.bridge.run()
 
-	// IPv6 QUIC 直连。监听(QUIC 与 TCP 入口)只在这里起一次: 下面的 for 循环每次重连
-	// 都会新建 Client, 若把监听放进 connect() 里会重复绑定同一端口。
+	// IPv6 QUIC 直连。
+	//
+	// 入口 TCP/UDP 监听在这里起一次: 下面的 for 循环每次重连都会新建 Client, 放进
+	// connect() 里会重复绑定同一端口。
+	//
+	// 但 C 侧的 QUIC 监听**不在这里起** —— 它是请求驱动的: 收到服务端转来的 punch 才
+	// 起监听并当场探测端点, 没有活跃连接且空闲一段后自动释放。这样 C 平时不占端口、
+	// 空闲时零后台流量, 也不存在"开机时 IPv6 还没就绪导致永久禁用"的问题。
 	if cfg.DirectAccept || len(cfg.Direct) > 0 {
 		w.direct = newDirectPeer(w.tag, cfg, w.forward)
-		if cfg.DirectAccept {
-			// 起不来不代表以后也起不来: 开机时 IPv6 常常还没就绪, 交给 superviseAccept
-			// 持续重试, 别一次失败就把功能永久关掉。
-			if err := w.direct.startAccept(); err != nil {
-				w.logf("direct accept not ready yet, will keep retrying: %v", err)
-			}
-			go w.direct.superviseAccept()
-		}
 		w.direct.startEntries(cfg.Direct)
 		go w.direct.reapSessions()
+		if cfg.DirectAccept {
+			go w.direct.reapAccept()
+		}
 	}
 
 	interruptClose = false
@@ -170,8 +171,8 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 
 	client := &Client{hub: w.hub, conn: c, send: make(chan *Message, SEND_CHAN_LEN), bridge: w.bridge, forward: w.forward, tag: w.tag}
 	if w.direct != nil {
-		// 直连信令要经这条新连接收发, 每次重连都要重新挂上并重报端点(服务端是按
-		// websocket 连接记录端点的, 旧连接一断记录就随之失效)。
+		// 直连信令要经这条新连接收发, 每次重连都要重新挂上。
+		// 不需要在这里通告端点: 端点是收到请求时当场探测的, 不预先上报。
 		client.setDirectPeer(w.direct)
 		w.direct.setClient(client)
 	}
@@ -186,10 +187,6 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 		defer close(done)
 		client.localReadPump()
 	}()
-	if w.direct != nil {
-		w.direct.announce()
-	}
-
 	for {
 		select {
 		case <-done:

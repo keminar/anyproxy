@@ -23,9 +23,17 @@ import (
 // C 侧: 起 IPv6 QUIC 监听、把端点通告给服务端、按服务端转来的请求朝对端打洞,
 // 并把每条进来的 stream 接到 client.forward 指定的内网目标上。
 
-// startAccept 起 QUIC 监听。本地端口由系统随机分配、不需要配置写死: 对端要用的是
-// 反射器观测到的**外网**端点, 跟本地端口不一定相同(见 direct_reflect.go)。
-func (d *directPeer) startAccept() error {
+// ensureAccept 按需起 QUIC 监听, 已经起着就直接复用。
+//
+// 按需而非开机就起: C 平时不必占着 UDP 端口和监听, 空闲时零后台流量; 端口空出来
+// 之后再有人要连, 重新起一个新的即可 —— 对端拿到的端点是当场探测的, 换端口毫无影响。
+// 本地端口也因此不需要配置写死。
+func (d *directPeer) ensureAccept() error {
+	d.acceptMu.Lock()
+	defer d.acceptMu.Unlock()
+	if d.acceptListener() != nil {
+		return nil
+	}
 	tr, err := d.ensureTransport()
 	if err != nil {
 		return err
@@ -41,103 +49,94 @@ func (d *directPeer) startAccept() error {
 	d.listener.Store(ln)
 	d.fingerprint = fingerprint
 	d.logf("quic listening on port %d (fingerprint %s)", d.localUDPPort(), shortFP(fingerprint))
-	go d.acceptLoop()
+	go d.acceptLoop(ln)
 	return nil
 }
 
-// announce 把探测到的 QUIC 端点与证书指纹报给服务端。
-//
-// 报的是**反射器观测到的完整 addr:port**, 不是本机自报: 本机既判断不了哪个全局 IPv6
-// 地址会被用作出向源地址(RFC 6724 按目的地选源, 隐私临时地址还会轮换), 也无法得知
-// 沿途 NAT/端口映射把本地端口翻成了哪个外网端口。
-//
-// 每次 websocket 重连后都要重报, 因为服务端是按连接记录的, 旧连接一断记录即失效。
-func (d *directPeer) announce() {
-	if d.acceptListener() == nil {
+// stopAccept 关掉监听并释放 socket。只在没有活跃连接时调用(见 reapAccept)。
+func (d *directPeer) stopAccept() {
+	d.acceptMu.Lock()
+	defer d.acceptMu.Unlock()
+	ln := d.acceptListener()
+	if ln == nil {
 		return
 	}
-	// 每次重连都重新探测: 服务端是按 websocket 连接记端点的, 旧连接一断记录即失效;
-	// 而且本机的全局 IPv6 地址可能在这期间轮换过(隐私临时地址), 不能沿用上次的结果。
-	endpoint, err := d.probeEndpoint()
-	if err != nil {
-		d.logf("cannot determine my quic endpoint, direct accept unavailable: %v", err)
-		return
-	}
-	d.setObservedEndpoint(endpoint)
-	if err := d.send(METHOD_DIRECT_ANNOUNCE, 0, DirectAnnounce{Endpoint: endpoint, Fingerprint: d.fingerprint}); err != nil {
-		d.logf("announce failed: %v", err)
-		return
-	}
-	d.logf("announced quic endpoint %s", endpoint)
+	d.listener.Store(nil)
+	_ = ln.Close()
+	// 连 socket 一起释放: 下次要用时重新建一个, 端口变了也无所谓 —— 端点每次都是
+	// 当场探测后经服务端转交的, 不存在别人手里攥着旧端口的问题。
+	d.closeTransport()
+	d.logf("quic listener idle, released the socket")
 }
 
-// superviseAccept 守护 C 侧的 QUIC 监听: 起不来就一直重试, 起来之后周期性重探端点、
-// 变了就重新通告。
-//
-// 为什么要重试而不是启动失败就算了: 最常见的失败原因是**开机时 IPv6 还没就绪**
-// (SLAAC/RA 要几秒、链路晚起、前缀尚未下发)。anyproxy 作为开机服务启动时撞上这个,
-// 若只试一次就永久禁用, 现象是直连一直不工作而日志里只有开机那一行, 极难排查。
-//
-// 周期重探则有两个作用, 缺一不可:
-//  1. **保活映射**: 探测包本身让沿途 NAT / 有状态防火墙的映射不过期。长时间没流量时
-//     映射会老化, 重建后**外网端口可能就变了** —— 外网端口由路径上的设备决定, 本机
-//     控制不了, 所以只能靠探测得知, 跟地址是一样的道理。
-//  2. **纠正陈旧通告**: 服务端手里记的是上次通告的端点。地址(隐私临时地址轮换)或端口
-//     (映射重建)一旦变化而没重报, 对端就会拨到一个死端点。
-func (d *directPeer) superviseAccept() {
-	t := time.NewTicker(directAnnounceEvery)
+// reapAccept 没有活跃连接后, 空闲一段就把监听和 socket 放掉。
+func (d *directPeer) reapAccept() {
+	t := time.NewTicker(directReapEvery)
 	defer t.Stop()
 	for range t.C {
 		if d.acceptListener() == nil {
-			// 还没起来(或起过但失败了): 再试一次。成功后立刻通告, 不必再等一个周期。
-			if err := d.startAccept(); err != nil {
-				d.logf("direct accept still unavailable, will retry: %v", err)
-				continue
-			}
-			d.announce()
 			continue
 		}
-		endpoint, err := d.probeEndpoint()
-		if err != nil {
-			d.logf("periodic endpoint probe failed: %v", err)
+		if d.acceptConns.Load() > 0 {
+			d.touchAccept()
 			continue
 		}
-		if endpoint == d.observedEndpoint() {
-			continue // 没变就不必再占用信令通道, 探测本身已经把映射焐住了
-		}
-		d.logf("quic endpoint changed %s -> %s, re-announcing", d.observedEndpoint(), endpoint)
-		d.setObservedEndpoint(endpoint)
-		if err := d.send(METHOD_DIRECT_ANNOUNCE, 0, DirectAnnounce{Endpoint: endpoint, Fingerprint: d.fingerprint}); err != nil {
-			d.logf("re-announce failed: %v", err)
+		if time.Since(d.lastAcceptUse()) > directSessionIdle {
+			d.stopAccept()
 		}
 	}
 }
 
-// onPunch 服务端转来的连接请求: 记下期望的凭证, 并朝对端连发几个 UDP 包。
+// onPunch 服务端转来的连接请求。这是 C 侧整条流程的入口: 起监听 -> 探测自己的端点
+// -> 朝对端打洞 -> 把端点报回服务端。全程在这一条消息里完成, 所以 C 平时不必占端口。
 //
-// 这几个包是整套流程里最关键的一步: IPv6 没有 NAT, 但家用路由器默认对 IPv6 开有状态
-// 防火墙、丢弃主动入站。本机先朝对端发包, 才会在自己这侧留下允许对端回包的状态,
-// 对方的 QUIC Initial 才进得来。包体内容无意义, 对端会当作无法解析的报文丢弃。
+// 打洞那几个包是最关键的一步: IPv6 没有 NAT, 但家用路由器默认对 IPv6 开有状态防火墙、
+// 丢弃主动入站。本机先朝对端发包, 才会在自己这侧留下允许对端回包的状态, 对方的
+// QUIC Initial 才进得来。包体内容无意义, 对端会当作无法解析的报文丢弃。
 func (d *directPeer) onPunch(msg *Message) {
+	reply := func(r DirectReady) {
+		if err := d.send(METHOD_DIRECT_READY, msg.ID, r); err != nil {
+			d.logf("reply ready failed: %v", err)
+		}
+	}
 	var p DirectPunch
 	if err := decodeDirect(msg.Body, &p); err != nil {
 		d.logf("bad punch: %v", err)
+		reply(DirectReady{Err: "bad punch payload"})
 		return
 	}
 	if p.Token == "" || p.PeerAddr == "" {
-		d.logf("incomplete punch")
+		reply(DirectReady{Err: "incomplete punch"})
 		return
 	}
-	tr, err := d.ensureTransport()
-	if err != nil {
-		d.logf("cannot punch: %v", err)
+	if !d.cfg.DirectAccept {
+		reply(DirectReady{Err: "directAccept is not enabled on this peer"})
 		return
 	}
 	addr, err := net.ResolveUDPAddr("udp6", p.PeerAddr)
 	if err != nil {
-		d.logf("punch target %s unresolvable as udp6: %v", p.PeerAddr, err)
+		reply(DirectReady{Err: fmt.Sprintf("peer endpoint %s is not usable as udp6: %v", p.PeerAddr, err)})
 		return
 	}
+	// 按需起监听: 没起过就现起, 起着就复用。
+	if err := d.ensureAccept(); err != nil {
+		reply(DirectReady{Err: fmt.Sprintf("cannot start quic listener: %v", err)})
+		return
+	}
+	tr, err := d.ensureTransport()
+	if err != nil {
+		reply(DirectReady{Err: fmt.Sprintf("cannot get local socket: %v", err)})
+		return
+	}
+	// 当场探测自己的端点: 外网地址与端口都可能已经变了, 不能用缓存。
+	endpoint, err := d.probeEndpoint()
+	if err != nil {
+		reply(DirectReady{Err: fmt.Sprintf("cannot determine my own endpoint: %v", err)})
+		return
+	}
+	d.setObservedEndpoint(endpoint)
+	d.touchAccept()
+
 	d.tokens.put(p.Token, p.Port)
 	go func() {
 		for i := 0; i < directPunchCount; i++ {
@@ -150,15 +149,13 @@ func (d *directPeer) onPunch(msg *Message) {
 			time.Sleep(directPunchGap)
 		}
 	}()
-	d.logf("punching toward %s for port %d", p.PeerAddr, p.Port)
+	d.logf("listening at %s, punching toward %s for port %d", endpoint, p.PeerAddr, p.Port)
+	reply(DirectReady{Endpoint: endpoint, Fingerprint: d.fingerprint})
 }
 
-func (d *directPeer) acceptLoop() {
+// acceptLoop 监听参数取自起监听时那一个: stopAccept 会把字段置空, 用字段会误退出。
+func (d *directPeer) acceptLoop(ln *quic.Listener) {
 	for {
-		ln := d.acceptListener()
-		if ln == nil {
-			return
-		}
 		conn, err := ln.Accept(context.Background())
 		if err != nil {
 			d.logf("quic accept stopped: %v", err)
@@ -169,6 +166,13 @@ func (d *directPeer) acceptLoop() {
 }
 
 func (d *directPeer) serveConn(conn *quic.Conn) {
+	// 计入活跃连接数: 空闲回收要靠它区分"没人连"和"连着但暂时没数据"。
+	d.acceptConns.Add(1)
+	d.touchAccept()
+	defer func() {
+		d.acceptConns.Add(-1)
+		d.touchAccept()
+	}()
 	remote := conn.RemoteAddr()
 	d.logf("quic connection from %s", remote)
 	// 鉴权按**连接**做一次, 不是每条 stream 一次: 连接本身已由 TLS + 指纹固定绑定,
