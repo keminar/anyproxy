@@ -30,6 +30,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -128,8 +129,9 @@ func runTCPPunch(reflector string, localPort int, duration time.Duration) {
 	stop := make(chan struct{})
 	closeOnce := sync.OnceFunc(func() { close(stop) })
 
-	go acceptLoop(localPort, peerAddr, result, stop)
-	go dialLoop(localPort, peerAddr, result, stop)
+	stats := &tcpPunchStats{}
+	go acceptLoop(localPort, peerAddr, result, stop, stats)
+	go dialLoop(localPort, peerAddr, result, stop, stats)
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
@@ -147,18 +149,107 @@ func runTCPPunch(reflector string, localPort int, duration time.Duration) {
 	if conn == nil {
 		fmt.Printf(`
 === tcp punch result ===
-verdict: FAILED — no TCP connection formed within %s. Either the peer was not
-         attempting this at the same time, or the path blocks unsolicited
-         inbound TCP the same way it blocks UDP.
-`, duration)
+dial attempts:  %d
+  bind failed:  %d
+  timed out:    %d
+  refused:      %d
+  other errors: %d
+listener:       %s
+verdict:        FAILED — no TCP connection formed within %s
+%s
+`, stats.dialAttempts.Load(), stats.bindErrors.Load(), stats.timeoutErrors.Load(),
+			stats.refusedErrors.Load(), stats.otherErrors.Load(),
+			stats.listenerState(), duration, tcpFailureHint(stats))
 		return
 	}
 	defer conn.Close()
 	log.Printf("CONNECTED via %s <-> %s", conn.LocalAddr(), conn.RemoteAddr())
 	fmt.Printf(`
 === tcp punch result ===
-verdict: SUCCESS — a direct TCP path exists between these two hosts (%s <-> %s)
-`, conn.LocalAddr(), conn.RemoteAddr())
+dial attempts:  %d
+listener:       %s
+verdict:        SUCCESS — a direct TCP path exists between these two hosts (%s <-> %s)
+%s
+`, stats.dialAttempts.Load(), stats.listenerState(), conn.LocalAddr(), conn.RemoteAddr(),
+		tcpSuccessNote(conn, peerAddr, stats))
+}
+
+// tcpPunchStats separates "this side never managed to send anything" from
+// "packets went out and got no answer". Without it a systematic local failure
+// (a bind that never succeeds, say) looks identical to the network dropping
+// the traffic, and the whole run silently tests only one direction.
+type tcpPunchStats struct {
+	dialAttempts  atomic.Int64
+	bindErrors    atomic.Int64
+	timeoutErrors atomic.Int64
+	refusedErrors atomic.Int64
+	otherErrors   atomic.Int64
+	listenerUp    atomic.Bool
+	listenerErr   atomic.Value // string
+	wonByAccept   atomic.Bool
+}
+
+func (s *tcpPunchStats) listenerState() string {
+	if s.listenerUp.Load() {
+		return "up (inbound punch possible)"
+	}
+	if err, ok := s.listenerErr.Load().(string); ok && err != "" {
+		return "DOWN: " + err + " (inbound punch impossible, only outbound was tested)"
+	}
+	return "unknown"
+}
+
+func (s *tcpPunchStats) recordDialError(err error) {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "address already in use"):
+		s.bindErrors.Add(1)
+	case strings.Contains(msg, "i/o timeout"), strings.Contains(msg, "timeout"):
+		s.timeoutErrors.Add(1)
+	case strings.Contains(msg, "refused"):
+		s.refusedErrors.Add(1)
+	default:
+		s.otherErrors.Add(1)
+	}
+}
+
+func tcpFailureHint(s *tcpPunchStats) string {
+	switch {
+	case s.bindErrors.Load() > 0 && s.bindErrors.Load() == s.dialAttempts.Load():
+		return "hint:           EVERY dial failed to bind the local port, so this side never sent a\n" +
+			"                single SYN — the result says nothing about the network. The listener\n" +
+			"                and the dialer could not share the port (SO_REUSEPORT rejected?)."
+	case !s.listenerUp.Load():
+		return "hint:           the listener never came up, so only the outbound direction was\n" +
+			"                tested; a punch usually needs both."
+	case s.timeoutErrors.Load() > 0 && s.refusedErrors.Load() == 0:
+		return "hint:           SYNs went out and nothing came back at all (no RST either), which is\n" +
+			"                what a silently dropping path looks like — same signature as the UDP result."
+	case s.refusedErrors.Load() > 0:
+		return "hint:           connections were actively refused (RST), so packets DO reach the peer's\n" +
+			"                network — the peer side just was not listening on that port."
+	default:
+		return "hint:           check whether the peer was running at the same time."
+	}
+}
+
+func tcpSuccessNote(conn net.Conn, peerAddr string, s *tcpPunchStats) string {
+	note := "note:           won by outbound dial"
+	if s.wonByAccept.Load() {
+		note = "note:           won by inbound accept"
+	}
+	// A remote port other than the one that was pasted means the peer's NAT gave
+	// this connection a different mapping than the one its reflector reported —
+	// worth surfacing, since it is the reason TCP punching is less reliable than
+	// UDP, and it also means the "success" may just be an ordinary connection to
+	// a reachable listener rather than a punched-through path.
+	if _, wantPort, err := net.SplitHostPort(peerAddr); err == nil {
+		if _, gotPort, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil && gotPort != wantPort {
+			note += fmt.Sprintf("\n                peer port is %s, not the announced %s — its NAT remapped this\n"+
+				"                connection, so the announced address was not what actually connected", gotPort, wantPort)
+		}
+	}
+	return note
 }
 
 func pickLocalTCPPort() int {
@@ -196,13 +287,15 @@ func probeTCPReflector(reflector string, localPort int) (string, error) {
 // acceptLoop listens on localPort — sharing it with dialLoop's repeated
 // outbound attempts via SO_REUSEADDR — and reports a connection if it arrives
 // from the peer's address.
-func acceptLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-chan struct{}) {
+func acceptLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-chan struct{}, stats *tcpPunchStats) {
 	lc := net.ListenConfig{Control: reuseAddrControl}
 	ln, err := lc.Listen(context.Background(), "tcp4", fmt.Sprintf(":%d", localPort))
 	if err != nil {
+		stats.listenerErr.Store(err.Error())
 		log.Printf("listen on %d for inbound punch: %v (accept side disabled, relying on outbound connect only)", localPort, err)
 		return
 	}
+	stats.listenerUp.Store(true)
 	go func() {
 		<-stop
 		ln.Close()
@@ -219,6 +312,7 @@ func acceptLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-c
 			conn.Close()
 			continue
 		}
+		stats.wonByAccept.Store(true)
 		select {
 		case result <- conn:
 		default:
@@ -231,7 +325,7 @@ func acceptLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-c
 // dialLoop repeatedly attempts an outbound connect from localPort to the
 // peer, retrying on failure since the peer's NAT path is not open until it
 // has sent its own outbound SYN.
-func dialLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-chan struct{}) {
+func dialLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-chan struct{}, stats *tcpPunchStats) {
 	attempt := 0
 	for {
 		select {
@@ -240,6 +334,7 @@ func dialLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-cha
 		default:
 		}
 		attempt++
+		stats.dialAttempts.Add(1)
 		dialer := &net.Dialer{
 			Timeout:   700 * time.Millisecond,
 			LocalAddr: &net.TCPAddr{Port: localPort},
@@ -254,6 +349,7 @@ func dialLoop(localPort int, peerAddr string, result chan<- net.Conn, stop <-cha
 			}
 			return
 		}
+		stats.recordDialError(err)
 		if attempt%5 == 0 {
 			log.Printf("still trying to connect to %s (%d attempts, last error: %v)", peerAddr, attempt, err)
 		}
