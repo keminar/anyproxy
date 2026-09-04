@@ -491,6 +491,42 @@ func TestDirectAcceptLifecycle(t *testing.T) {
 	}
 }
 
+// TestDirectIdleKeepsQuietUDPAlive 长时间没数据的 UDP 会话不能被当成空闲回收。
+//
+// 现实场景: mstsc 走 UDP 图形通道时, 用户不操作就可能很久没有包。UDP 没有"连接"
+// 可计数, 若只看"最近一次收发", 会话还活着却会被判定空闲、把 QUIC 连接关掉,
+// 用户一动鼠标就得重新打洞建连。
+func TestDirectIdleKeepsQuietUDPAlive(t *testing.T) {
+	sess := &directSession{}
+	// 模拟"很久没有数据流过": 最近一次使用时间推到远早于空闲阈值。
+	sess.lastUse.Store(time.Now().Add(-10 * directSessionIdle).UnixNano())
+
+	// 没有任何在用的东西时, 应当判定为空闲。
+	if got := sess.idleFor(); got <= directSessionIdle {
+		t.Fatalf("a session with nothing in use should look idle, got %s", got)
+	}
+
+	// 绑一个 UDP 入口, 且它有一个仍在空闲窗口内的用户会话。
+	entry := &directUDPEntry{
+		byAddr:   make(map[string]uint32),
+		byID:     make(map[uint32]*net.UDPAddr),
+		lastSeen: map[uint32]time.Time{1: time.Now().Add(-directUDPIdle / 2)},
+	}
+	sess.bindUDPEntry(3389, entry)
+
+	if got := sess.idleFor(); got != 0 {
+		t.Fatalf("a session with a live UDP session must not look idle, got %s", got)
+	}
+
+	// 该 UDP 会话也过了自己的空闲窗口后, 才允许回收。
+	entry.mu.Lock()
+	entry.lastSeen[1] = time.Now().Add(-2 * directUDPIdle)
+	entry.mu.Unlock()
+	if got := sess.idleFor(); got <= directSessionIdle {
+		t.Fatalf("once every UDP session expired the connection should look idle, got %s", got)
+	}
+}
+
 // TestDirectTokenIsOneShot 凭证取走即失效, 重放无效。
 func TestDirectTokenIsOneShot(t *testing.T) {
 	s := newDirectTokenStore()

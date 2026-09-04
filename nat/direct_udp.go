@@ -268,6 +268,20 @@ func (e *directUDPEntry) sessionFor(from *net.UDPAddr) uint32 {
 	return id
 }
 
+// hasActiveSessions 是否还有活着的用户会话(任一源地址在空闲窗口内有过流量)。
+// 供 QUIC 连接的空闲回收判断用: UDP 没有连接可数, 这是唯一能说明"还在用"的依据。
+func (e *directUDPEntry) hasActiveSessions() bool {
+	now := time.Now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, seen := range e.lastSeen {
+		if now.Sub(seen) <= directUDPIdle {
+			return true
+		}
+	}
+	return false
+}
+
 // deliver 把对端回来的 datagram 写回对应的用户源地址。
 func (e *directUDPEntry) deliver(sessionID uint32, payload []byte) {
 	e.mu.Lock()

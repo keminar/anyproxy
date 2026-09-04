@@ -177,11 +177,38 @@ func (s *directSession) touch() {
 }
 
 // idleFor 返回空闲时长; 仍有进行中的会话时返回 0。
+//
+// 两类"在用"要分别判断, 缺一不可:
+//   - TCP: 每条入口连接 acquire/release, refs>0 即在用 —— 连接开着但长时间没数据
+//     (RDP 静默、SSH 挂着不动)也算在用。
+//   - UDP: 没有"连接"可计数, 只能看它自己的会话表里还有没有活着的会话。光看
+//     lastUse 会误杀: UDP 图形通道(如 RDP 8+ 的 Enhanced RDP)在用户不操作时可能
+//     很久没包, 但会话并没有结束, 把 QUIC 连接关掉会让画面恢复时直接断开。
 func (s *directSession) idleFor() time.Duration {
 	if s.refs.Load() > 0 {
 		return 0
 	}
+	if s.hasActiveUDP() {
+		return 0
+	}
 	return time.Since(time.Unix(0, s.lastUse.Load()))
+}
+
+// hasActiveUDP 该连接上是否还有活着的 UDP 会话(任一入口的任一用户源地址在自己的
+// 空闲窗口内有过流量)。
+func (s *directSession) hasActiveUDP() bool {
+	s.udpMu.Lock()
+	entries := make([]*directUDPEntry, 0, len(s.udpEntries))
+	for _, e := range s.udpEntries {
+		entries = append(entries, e)
+	}
+	s.udpMu.Unlock()
+	for _, e := range entries {
+		if e.hasActiveSessions() {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptListener 取当前的 QUIC 监听; 未起或已释放时返回 nil。
