@@ -95,7 +95,31 @@ websocket:
       - listen: ":13389"             # 本机入口, mstsc 连这里
         email: home                  # 直连到这个 email 的订阅端
         port: 3389                   # 用对方 forward 里的哪条规则
+        protocol: both               # tcp(默认) / udp / both
 ```
+
+### TCP 与 UDP：两种协议在 QUIC 上的承载不同
+
+`protocol` 决定入口与落地要还原哪种协议，两者在 QUIC 上走不同机制，语义才对得上：
+
+| 内层协议 | QUIC 承载 | 说明 |
+|---|---|---|
+| TCP | **stream**（可靠有序） | 每条入口 TCP 连接一条 stream |
+| UDP | **datagram**（不可靠无序，RFC 9221） | 每个用户源地址一个会话 ID |
+
+**不能拿 stream 扛 UDP**——那会给 UDP 强加重传与保序，把我们特意要避开的队头阻塞又请回来。
+
+`protocol: both` 对 RDP 特别有用：mstsc 主通道走 TCP 3389，而 RDP 8+ 的 Enhanced RDP 会用 **UDP 3389** 走图形通道专门对抗卡顿——只转发 TCP 等于把它堵死。
+
+UDP 的两个限制：QUIC datagram 必须装进单个 QUIC 包（受 MTU 约束，约 1200 字节），超长的 UDP 包会被丢弃并记日志；UDP 无连接，会话靠空闲超时（2 分钟）回收。
+
+### 连接复用：一条 QUIC 连接，多条 stream
+
+**A 到同一个 email 只维持一条 QUIC 连接**，每条入口 TCP 连接在上面开一条独立 stream（SSH/RDP 同时开多个会话是常态）。这正是相对「单条 TCP 隧道复用」的核心优势：**stream 之间互不队头阻塞**，一条丢包不会让其他会话跟着卡。
+
+并发上限 256（`directMaxStreams`）。超过后 `OpenStreamSync` 会**阻塞等待**而不是报错，现象是新会话卡住不动——撞上限时光看日志很难想到，所以这个值显式写在代码里而不是用 quic-go 的默认 100。
+
+**端口与地址的寿命**：QUIC socket 在进程启动时建一次，进程不重启端口就不变；但 IPv6 地址可能变（隐私临时地址通常几小时到一天轮换一次），所以每次请求都会重新探测端点、不缓存。QUIC 连接设了 20 秒 keep-alive，会话断开后连接不会自动关闭，下次直接复用（顺带把防火墙的洞焐着，省掉重新打洞）；若期间地址变了导致连接实际已死，会在下次使用时丢弃重建。
 
 - `directAccept` 与 `direct` 互相独立：只想被连就单开 `directAccept`，只想连别人就单配 `direct`，都配就两个方向都能用。
 - **安全**：QUIC 用自签证书 + 指纹固定（指纹经已鉴权的 websocket 下发），另加一次性凭证——凭证必须由服务端提前经打洞消息交给过 C，且用后即废。所以 QUIC 端口被扫到也无法利用。落地目标仍受 `client.forward` 白名单约束。

@@ -121,20 +121,28 @@ func (d *directPeer) acceptLoop() {
 func (d *directPeer) serveConn(conn *quic.Conn) {
 	remote := conn.RemoteAddr()
 	d.logf("quic connection from %s", remote)
+	// 鉴权按**连接**做一次, 不是每条 stream 一次: 连接本身已由 TLS + 指纹固定绑定,
+	// 首条 stream 出示有效凭证后, 这条连接上的后续 stream 与 datagram 都放行。
+	// datagram 没法逐包做握手, 逐 stream 鉴权也会给每条入口连接多加一趟信令往返。
+	// 凭证只回答"这个对端准不准进来", 具体能到达哪个目标仍由 forward 白名单逐条把关。
+	dc := &directConn{peer: d, conn: conn}
+	defer dc.closeUDPSessions()
+	go dc.receiveDatagrams()
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
 			d.logf("quic connection %s closed: %v", remote, err)
 			return
 		}
-		go d.serveStream(conn, stream)
+		go dc.serveStream(stream)
 	}
 }
 
 // serveStream 一条 stream 对应对端的一条入口 TCP 连接。
-func (d *directPeer) serveStream(conn *quic.Conn, stream *quic.Stream) {
+func (dc *directConn) serveStream(stream *quic.Stream) {
+	d := dc.peer
 	defer stream.Close()
-	remote := conn.RemoteAddr()
+	remote := dc.conn.RemoteAddr()
 
 	// 首部要有超时: 连上来却不发首部的对端会一直占着一条 stream。
 	_ = stream.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -145,14 +153,16 @@ func (d *directPeer) serveStream(conn *quic.Conn, stream *quic.Stream) {
 	}
 	_ = stream.SetReadDeadline(time.Time{})
 
-	// 凭证必须是服务端提前经 punch 交给过我们的, 且一次性。QUIC 端口被扫到也没用。
-	wantPort, ok := d.tokens.take(head.Token)
-	if !ok {
-		d.logf("stream from %s: unknown or expired token, rejected", remote)
+	if !dc.authorize(head.Token, head.Port) {
+		d.logf("stream from %s: rejected (token invalid/expired, or connection not authenticated)", remote)
 		return
 	}
-	if wantPort != head.Port {
-		d.logf("stream from %s: port %d does not match the requested %d, rejected", remote, head.Port, wantPort)
+	if head.Kind == directStreamAuth {
+		// 纯鉴权流: 只认证连接, 不落地。回一个字节让对端确认认证已完成 —— 对端要等到
+		// 这个确认才敢发 datagram, 否则会被当作未认证丢掉。
+		if _, err := stream.Write([]byte{1}); err != nil {
+			d.logf("auth ack to %s failed: %v", remote, err)
+		}
 		return
 	}
 	// 复用 websocket 转发那套白名单: 未在 client.forward 里映射的端口一律拒绝,
@@ -185,6 +195,13 @@ func directQUICConfig() *quic.Config {
 		// 同时开 keep-alive, 让中途的有状态防火墙不会把这条流的状态老化掉。
 		MaxIdleTimeout:  5 * time.Minute,
 		KeepAlivePeriod: 20 * time.Second,
+		// UDP 通路要用 datagram(RFC 9221)承载, 两侧都必须开, 否则 SendDatagram 报错。
+		EnableDatagrams: true,
+		// 到同一个对端只维持一条 QUIC 连接, 每条入口连接占一条 stream(像 SSH 那样同时
+		// 开很多会话是正常用法), 所以这个上限就是"同一对端的并发会话数上限"。
+		// 显式写出来: quic-go 不设时默认 100, 超过后 OpenStreamSync 会阻塞等待而不是
+		// 报错, 现象是新会话卡住不动, 光看日志很难想到是撞了上限。
+		MaxIncomingStreams: directMaxStreams,
 	}
 }
 

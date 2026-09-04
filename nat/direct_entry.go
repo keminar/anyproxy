@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"time"
@@ -27,7 +28,18 @@ func (d *directPeer) startEntries(rules []conf.ClientDirect) {
 			d.logf("skip direct rule with empty listen/email: %+v", r)
 			continue
 		}
-		go d.listenEntry(r)
+		if !r.ValidProtocol() {
+			// 写错协议名不能静默按 tcp 处理: 配了 udp 却只起 TCP, 现象是"RDP 能连但
+			// 依旧卡", 极难往配置上想。
+			d.logf("skip direct rule %s: unknown protocol %q (want tcp/udp/both)", r.Listen, r.Protocol)
+			continue
+		}
+		if r.WantTCP() {
+			go d.listenEntry(r)
+		}
+		if r.WantUDP() {
+			go d.listenUDPEntry(r)
+		}
 	}
 }
 
@@ -70,29 +82,34 @@ func (d *directPeer) handleEntry(conn net.Conn, r conf.ClientDirect) {
 		src, up, down, time.Since(start).Round(time.Second)))
 }
 
-// openStream 拿到一条可用的 QUIC stream: 复用到该 email 的连接, 没有或已失效则重新建立。
+// openStream 拿到一条承载数据的 QUIC stream。
 func (d *directPeer) openStream(r conf.ClientDirect) (*quic.Stream, error) {
-	// 已有连接: 直接开一条新 stream。QUIC 的 stream 相互独立, 一条连接上并发多个会话
-	// 不会像单条 TCP 复用那样互相队头阻塞。
-	if sess := d.session(r.Email); sess != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), directDialWait)
-		defer cancel()
-		stream, err := sess.conn.OpenStreamSync(ctx)
-		if err == nil {
-			if err = d.handshakeStream(stream, r, ""); err == nil {
-				return stream, nil
-			}
-			stream.Close()
-		}
-		// 连接可能已经被对端关掉或超时老化, 丢弃后重建一次。
-		d.dropSession(r.Email, sess)
-		d.logf("reusing quic session to %s failed (%v), rebuilding", r.Email, err)
+	sess, err := d.ensureSession(r)
+	if err != nil {
+		return nil, err
 	}
-	return d.dialNew(r)
+	// 连接已在 ensureSession 里认证过, 数据流不必再带凭证。QUIC 的 stream 相互独立,
+	// 一条连接上并发多个会话不会像单条 TCP 复用那样互相队头阻塞。
+	stream, err := d.openHeadedStream(sess, directStreamData, "", r.Port)
+	if err == nil {
+		return stream, nil
+	}
+	// 连接可能已被对端关掉或超时老化, 丢弃后完整重建一次。
+	d.dropSession(r.Email, sess)
+	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Email, err)
+	sess, err = d.ensureSession(r)
+	if err != nil {
+		return nil, err
+	}
+	return d.openHeadedStream(sess, directStreamData, "", r.Port)
 }
 
-// dialNew 完整走一遍信令 + 拨号。
-func (d *directPeer) dialNew(r conf.ClientDirect) (*quic.Stream, error) {
+// ensureSession 取一条**已认证**的 QUIC 连接: 有就复用, 没有就走一遍信令 + 拨号 + 鉴权。
+// TCP 与 UDP 两条通路共用它。
+func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) {
+	if sess := d.session(r.Email); sess != nil {
+		return sess, nil
+	}
 	// A 侧也需要自己的 socket: QUIC 从它拨出去, 它的端点还要报给服务端, 好让 C 朝它
 	// 打洞。没开 directAccept 的机器在这里按需建一个; 开了的复用监听那一个。
 	tr, err := d.ensureTransport()
@@ -107,7 +124,60 @@ func (d *directPeer) dialNew(r conf.ClientDirect) (*quic.Stream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return d.openHeadedStream(sess, token, r.Port)
+	if err := d.authenticateSession(sess, token, r.Port); err != nil {
+		d.dropSession(r.Email, sess)
+		return nil, err
+	}
+	// 回程 datagram 的分发依赖这条 goroutine, TCP-only 的连接上它只是空转等关闭。
+	go d.receiveDatagrams(sess)
+	return sess, nil
+}
+
+// authenticateSession 开一条纯鉴权流出示凭证, 并等对端确认。
+//
+// 必须等确认: 认证完成前对端会丢弃 datagram, 不等就发 UDP 会静默掉包。
+func (d *directPeer) authenticateSession(sess *directSession, token string, port uint16) error {
+	stream, err := d.openHeadedStream(sess, directStreamAuth, token, port)
+	if err != nil {
+		return fmt.Errorf("open auth stream: %w", err)
+	}
+	defer stream.Close()
+	_ = stream.SetReadDeadline(time.Now().Add(directDialWait))
+	var ack [1]byte
+	if _, err := io.ReadFull(stream, ack[:]); err != nil {
+		return fmt.Errorf("peer did not accept our token: %w", err)
+	}
+	return nil
+}
+
+// receiveDatagrams A 侧收回程 UDP 数据, 按端口找到对应入口投递回用户。
+func (d *directPeer) receiveDatagrams(sess *directSession) {
+	for {
+		msg, err := sess.conn.ReceiveDatagram(context.Background())
+		if err != nil {
+			return
+		}
+		sessionID, port, payload, err := parseDatagram(msg)
+		if err != nil {
+			d.logf("bad datagram from %s: %v", sess.addr, err)
+			continue
+		}
+		entry := sess.udpEntry(port)
+		if entry == nil {
+			continue // 没有对应入口(规则已撤或端口对不上), 丢弃
+		}
+		entry.deliver(sessionID, payload)
+	}
+}
+
+// udpSession 给 UDP 入口取一条已认证的连接, 并登记好回程分发。
+func (d *directPeer) udpSession(r conf.ClientDirect, e *directUDPEntry) (*directSession, error) {
+	sess, err := d.ensureSession(r)
+	if err != nil {
+		return nil, err
+	}
+	sess.bindUDPEntry(r.Port, e)
+	return sess, nil
 }
 
 // requestPeer 走一趟信令: 生成一次性凭证、把本机端点报给服务端(服务端据此让对端朝我们
@@ -178,38 +248,18 @@ func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprin
 }
 
 // openHeadedStream 在已建立的连接上开一条流并写好首部。
-func (d *directPeer) openHeadedStream(sess *directSession, token string, port uint16) (*quic.Stream, error) {
+func (d *directPeer) openHeadedStream(sess *directSession, kind, token string, port uint16) (*quic.Stream, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), directDialWait)
 	defer cancel()
 	stream, err := sess.conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("open quic stream: %w", err)
 	}
-	if err := writeStreamHead(stream, directStreamHead{Token: token, Port: port}); err != nil {
+	if err := writeStreamHead(stream, directStreamHead{Kind: kind, Token: token, Port: port}); err != nil {
 		stream.Close()
 		return nil, fmt.Errorf("write stream head: %w", err)
 	}
 	return stream, nil
-}
-
-// handshakeStream 写流首部。复用已有连接时没有现成的凭证, 需要重新走一次信令拿到 ——
-// 凭证是一次性的, 不能跨 stream 复用。
-func (d *directPeer) handshakeStream(stream *quic.Stream, r conf.ClientDirect, token string) error {
-	if token == "" {
-		var err error
-		token, err = d.refreshToken(r)
-		if err != nil {
-			return err
-		}
-	}
-	return writeStreamHead(stream, directStreamHead{Token: token, Port: r.Port})
-}
-
-// refreshToken 为复用连接上的新 stream 走一次信令, 拿一个新的一次性凭证 —— 凭证是
-// 一次性的, 不能跨 stream 复用。这一趟同样会让对端再打一轮洞, 顺带刷新沿途防火墙状态。
-func (d *directPeer) refreshToken(r conf.ClientDirect) (string, error) {
-	token, _, err := d.requestPeer(r)
-	return token, err
 }
 
 // onOffer 把服务端回的 offer 交给等待中的请求。

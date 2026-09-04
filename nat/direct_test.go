@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,7 +92,7 @@ func TestDirectEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
 	}
-	stream, err := a.openHeadedStream(sess, token, port)
+	stream, err := a.openHeadedStream(sess, directStreamData, token, port)
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestDirectRejectsUnknownToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
 	}
-	stream, err := a.openHeadedStream(sess, "never-issued", port)
+	stream, err := a.openHeadedStream(sess, directStreamData, "never-issued", port)
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
@@ -161,7 +162,7 @@ func TestDirectRejectsUnmappedPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
 	}
-	stream, err := a.openHeadedStream(sess, token, unmapped)
+	stream, err := a.openHeadedStream(sess, directStreamData, token, unmapped)
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
@@ -191,6 +192,153 @@ func TestDirectRejectsWrongFingerprint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "fingerprint") {
 		t.Fatalf("expected a fingerprint mismatch error, got: %v", err)
+	}
+}
+
+// TestDirectParallelStreams 同一对端只用一条 QUIC 连接, 多个并发会话各占一条 stream
+// (SSH/RDP 同时开多个是常态)。同时验证 stream 之间是独立的: 一条上的数据不会串到另一条。
+func TestDirectParallelStreams(t *testing.T) {
+	target, stopTarget := echoTarget(t)
+	defer stopTarget()
+
+	const port = uint16(2222)
+	c := newAcceptPeer(t, map[uint16]string{port: target})
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("ensure transport: %v", err)
+	}
+	// 一条连接, 认证一次。
+	const token = "test-token-parallel"
+	c.tokens.put(token, port)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect peer: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, port); err != nil {
+		t.Fatalf("authenticate session: %v", err)
+	}
+
+	// 之后的会话都不带凭证, 复用这条已认证的连接。
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			stream, err := a.openHeadedStream(sess, directStreamData, "", port)
+			if err != nil {
+				errs <- fmt.Errorf("stream %d: open: %w", i, err)
+				return
+			}
+			defer stream.Close()
+			// 每条流写不同内容, 回声必须原样对上, 串流就能发现。
+			want := fmt.Sprintf("session-%d-payload", i)
+			if _, err := stream.Write([]byte(want)); err != nil {
+				errs <- fmt.Errorf("stream %d: write: %w", i, err)
+				return
+			}
+			got := make([]byte, len(want))
+			stream.SetReadDeadline(time.Now().Add(10 * time.Second))
+			if _, err := io.ReadFull(stream, got); err != nil {
+				errs <- fmt.Errorf("stream %d: read: %w", i, err)
+				return
+			}
+			if string(got) != want {
+				errs <- fmt.Errorf("stream %d: got %q want %q", i, got, want)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// 全程只应有一条 QUIC 连接。
+	if got := a.session("c@example.com"); got != sess {
+		t.Fatalf("expected all sessions to reuse one quic connection")
+	}
+}
+
+// TestDirectUDPRoundTrip UDP 通路: 用户 UDP -> A 入口 -> QUIC datagram -> C -> 内网目标,
+// 回程原路返回。RDP 8+ 的图形通道走 UDP, 这条路通不通直接决定能不能用上它。
+func TestDirectUDPRoundTrip(t *testing.T) {
+	// 内网 UDP 目标: 原样回显。
+	tconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp target: %v", err)
+	}
+	defer tconn.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := tconn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			tconn.WriteToUDP(buf[:n], from)
+		}
+	}()
+
+	const port = uint16(3389)
+	c := newAcceptPeer(t, map[uint16]string{port: tconn.LocalAddr().String()})
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("ensure transport: %v", err)
+	}
+	const token = "test-token-udp"
+	c.tokens.put(token, port)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect peer: %v", err)
+	}
+	// datagram 在连接认证之前会被丢弃, 所以必须先认证。
+	if err := a.authenticateSession(sess, token, port); err != nil {
+		t.Fatalf("authenticate session: %v", err)
+	}
+	go a.receiveDatagrams(sess)
+
+	// 起 A 侧 UDP 入口, 并把回程分发绑上去。
+	entry := &directUDPEntry{
+		peer:     a,
+		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", Port: port},
+		byAddr:   make(map[string]uint32),
+		byID:     make(map[uint32]*net.UDPAddr),
+		lastSeen: make(map[uint32]time.Time),
+	}
+	econn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp entry: %v", err)
+	}
+	defer econn.Close()
+	entry.conn = econn
+	sess.bindUDPEntry(port, entry)
+	go entry.pump(func() (*directSession, error) { return sess, nil })
+
+	// 扮演用户: 往入口发 UDP, 应收到内网目标的回声。
+	user, err := net.DialUDP("udp", nil, econn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial entry: %v", err)
+	}
+	defer user.Close()
+
+	want := "udp payload over quic datagram"
+	if _, err := user.Write([]byte(want)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	user.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 2048)
+	n, err := user.Read(buf)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(buf[:n]) != want {
+		t.Fatalf("udp echo mismatch: got %q want %q", buf[:n], want)
 	}
 }
 

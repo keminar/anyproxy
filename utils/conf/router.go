@@ -123,9 +123,45 @@ type ClientForward struct {
 // 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
 // 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
 type ClientDirect struct {
-	Listen string `yaml:"listen"` //本机裸TCP入口监听地址, 如 ":13389"
+	Listen string `yaml:"listen"` //本机入口监听地址, 如 ":13389"
 	Email  string `yaml:"email"`  //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
 	Port   uint16 `yaml:"port"`   //告诉对方要用哪条 client.forward[port] 规则, 对方未映射该端口即拒绝
+
+	// Protocol 入口与落地要还原的协议: tcp(默认) / udp / both。
+	//
+	// 两种协议在 QUIC 上的承载不同, 语义才对得上: TCP 走 stream(可靠有序), UDP 走
+	// datagram(不可靠无序, RFC 9221)。不能拿 stream 扛 UDP —— 那会给 UDP 强加重传与
+	// 保序, 把队头阻塞又请回来。
+	//
+	// both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
+	// UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
+	Protocol string `yaml:"protocol"`
+}
+
+// 直连入口支持的协议取值。
+const (
+	DirectProtoTCP  = "tcp"
+	DirectProtoUDP  = "udp"
+	DirectProtoBoth = "both"
+)
+
+// WantTCP 是否要起 TCP 入口。留空按 tcp 处理, 保持与旧配置一致。
+func (d ClientDirect) WantTCP() bool {
+	return d.Protocol == "" || d.Protocol == DirectProtoTCP || d.Protocol == DirectProtoBoth
+}
+
+// WantUDP 是否要起 UDP 入口。
+func (d ClientDirect) WantUDP() bool {
+	return d.Protocol == DirectProtoUDP || d.Protocol == DirectProtoBoth
+}
+
+// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
+func (d ClientDirect) ValidProtocol() bool {
+	switch d.Protocol {
+	case "", DirectProtoTCP, DirectProtoUDP, DirectProtoBoth:
+		return true
+	}
+	return false
 }
 
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。

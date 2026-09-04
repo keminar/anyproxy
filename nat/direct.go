@@ -31,6 +31,9 @@ const (
 	directStreamHeadMax = 4 * 1024
 	// directALPN QUIC 的应用层协议标识, 两侧必须一致。
 	directALPN = "anyproxy-direct"
+	// directMaxStreams 同一对端的并发会话数上限(每条入口连接占一条 stream)。
+	// 256 对 SSH/RDP 这类用法足够, 又不会让单条连接的流控缓冲占太多内存。
+	directMaxStreams = 256
 )
 
 // directPeer 一条 websocket 连接对应的直连运行时。挂在 wsClientConn 上(不是 Client),
@@ -124,9 +127,29 @@ func (d *directPeer) localUDPPort() uint16 {
 
 // directSession A 侧到某个 email 的 QUIC 连接。多条入口 TCP 连接复用同一条 QUIC 连接,
 // 各自开独立的 stream —— QUIC 的 stream 之间互不阻塞, 不会像单条 TCP 复用那样队头阻塞。
+// UDP 入口则共用这条连接的 datagram 通道, 按端口分发回包。
 type directSession struct {
 	conn *quic.Conn
 	addr string
+
+	udpMu      sync.Mutex
+	udpEntries map[uint16]*directUDPEntry // 本地入口端口 -> 入口, 用于把回程 datagram 投递回去
+}
+
+// bindUDPEntry 登记某个入口, 使其能收到该连接上对应端口的回程 datagram。
+func (s *directSession) bindUDPEntry(port uint16, e *directUDPEntry) {
+	s.udpMu.Lock()
+	if s.udpEntries == nil {
+		s.udpEntries = make(map[uint16]*directUDPEntry)
+	}
+	s.udpEntries[port] = e
+	s.udpMu.Unlock()
+}
+
+func (s *directSession) udpEntry(port uint16) *directUDPEntry {
+	s.udpMu.Lock()
+	defer s.udpMu.Unlock()
+	return s.udpEntries[port]
 }
 
 func newDirectPeer(tag string, cfg conf.WsClient, forward map[uint16]string) *directPeer {
@@ -236,8 +259,19 @@ func (s *directTokenStore) take(token string) (uint16, bool) {
 	return e.port, true
 }
 
-// directStreamHead A 打开 QUIC stream 后写的首部: 出示凭证并说明要用对方哪条转发规则。
+// 流首部的 Kind: 纯鉴权流只认证连接、不落地; 数据流承载一条入口 TCP 连接。
+const (
+	directStreamAuth = "auth"
+	directStreamData = "data"
+)
+
+// directStreamHead A 打开 QUIC stream 后写的首部。
+//
+// Kind=auth 用于只走 UDP 的场景: datagram 没法逐包握手, 而凭证又必须有地方出示, 所以
+// 先开一条纯鉴权流认证整条连接(C 校验后回一个字节确认), 之后 datagram 才被接受。
+// Kind=data 是承载数据的流; 连接已认证时 Token 可为空。
 type directStreamHead struct {
+	Kind  string `json:"kind"`
 	Token string `json:"token"`
 	Port  uint16 `json:"port"`
 }
