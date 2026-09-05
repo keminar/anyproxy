@@ -414,6 +414,13 @@ func TestDirectUDPStats(t *testing.T) {
 		t.Fatalf("read back: %v", err)
 	}
 
+	// 计数是在 socket 写完之后加的, 所以 user.Read 返回时回程那两笔可能还没记上 ——
+	// 等一下而不是立刻断言, 否则这是个偶发失败。
+	waitFor(t, 3*time.Second, func() bool {
+		_, _, down, downPkts := entry.stats()
+		return down == int64(len(payload)) && downPkts == 1
+	}, "downstream bytes were never counted")
+
 	up, upPkts, down, downPkts := entry.stats()
 	if up != int64(len(payload)) || upPkts != 1 {
 		t.Errorf("up stats = %dB/%dpkt, want %dB/1pkt", up, upPkts, len(payload))
@@ -430,7 +437,8 @@ func TestDirectUDPStats(t *testing.T) {
 // 这是整套地址交换的地基: websocket 是 TCP、是另一个 socket, 它的地址不能拿来当 QUIC 的
 // 端点用(内核按 RFC 6724 按目的地分别选源, 隐私临时地址还会轮换)。
 func TestDirectProbeEndpoint(t *testing.T) {
-	// 起一个只回显来源地址的反射器, 等价于服务端上的那个。
+	// 起一个只回显来源地址的反射器, 等价于服务端上的那个。nonce 要原样带回 —— 现在
+	// 多条探测并行在飞, 回包靠 nonce 关联。
 	rconn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
 	if err != nil {
 		t.Skipf("cannot listen udp6 on loopback: %v", err)
@@ -444,20 +452,24 @@ func TestDirectProbeEndpoint(t *testing.T) {
 				return
 			}
 			payload, ok := directPayload(buf[:n])
-			if !ok || payload != directWhoami {
+			if !ok {
 				continue
 			}
-			rconn.WriteToUDP(directPacket(from.String()), from)
+			verb, nonce, _ := splitPacket(payload)
+			if verb != verbWhoami {
+				continue
+			}
+			rconn.WriteToUDP(directPacket(fmt.Sprintf("%s %s %s", verbSeen, nonce, from)), from)
 		}
 	}()
 
 	// cfg.Connect 指向反射器: 订阅方就是按 websocket 的连接地址推出反射器地址的。
 	d := newDirectPeer("test-probe", conf.WsClient{Connect: rconn.LocalAddr().String()}, nil)
 	if _, err := d.ensureTransport(); err != nil {
-		t.Skipf("cannot create ipv6 udp socket: %v", err)
+		t.Skipf("cannot create udp socket: %v", err)
 	}
 
-	endpoint, err := d.probeEndpoint()
+	endpoint, err := d.probeReflector(rconn.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatalf("probe endpoint: %v", err)
 	}
@@ -475,19 +487,25 @@ func TestDirectProbeEndpoint(t *testing.T) {
 	}
 }
 
-// TestCheckDirectEndpoint IPv4 端点必须在服务端就被拒掉并说明原因, 而不是等对端拨号
-// 时才失败得不明不白。
+// TestCheckDirectEndpoint 端点格式校验。注意这里**不再**排斥 IPv4 / 私有 / 回环 ——
+// 多候选之后它们都是合法候选(同机同网段时反而是最优的那条), 通不通交给打洞去回答。
+// 这里只挡格式上就没有意义的。
 func TestCheckDirectEndpoint(t *testing.T) {
 	cases := []struct {
 		endpoint string
 		ok       bool
 	}{
 		{"[2001:db8::1]:4242", true},
-		{"1.2.3.4:4242", false},    // IPv4 不能用于直连
-		{"[fe80::1]:4242", false},  // 链路本地不是全局地址
-		{"[::1]:4242", false},      // 回环
-		{"not-an-endpoint", false}, // 格式不对
-		{"[2001:db8::1]", false},   // 缺端口
+		{"1.2.3.4:4242", true},   // IPv4 现在与 IPv6 平等竞争
+		{"[fe80::1]:4242", true}, // 链路本地: 同二层时是最优路径之一
+		{"[::1]:4242", true},     // 回环: 同机
+		{"192.168.1.5:4242", true},
+		{"not-an-endpoint", false},  // 格式不对
+		{"[2001:db8::1]", false},    // 缺端口
+		{"example.com:4242", false}, // 只收 IP 字面量, 不让对端顺带做 DNS 去够任意主机
+		{"[2001:db8::1]:0", false},  // 端口 0
+		{"[::]:4242", false},        // 未指定地址
+		{"224.0.0.1:4242", false},   // 多播不是端点
 	}
 	for _, c := range cases {
 		err := checkDirectEndpoint(c.endpoint)
@@ -496,6 +514,46 @@ func TestCheckDirectEndpoint(t *testing.T) {
 		}
 		if !c.ok && err == nil {
 			t.Errorf("%s should be rejected", c.endpoint)
+		}
+	}
+}
+
+// 候选列表必须有上限。服务端会把这份列表转给对端, 对端朝**每一条**发打洞包 —— 不封顶
+// 的话, 一个恶意订阅方报几百个地址就能借另一台机器朝任意目标扫射。
+func TestCheckDirectCandidatesCaps(t *testing.T) {
+	var many []directCandidate
+	for i := 0; i < 50; i++ {
+		many = append(many, directCandidate{Addr: fmt.Sprintf("10.0.0.%d:4242", i+1), Source: candSrcLocal})
+	}
+	got, err := checkDirectCandidates(many)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if len(got) != directMaxCandidates {
+		t.Fatalf("want the list capped at %d, got %d", directMaxCandidates, len(got))
+	}
+}
+
+// 单条格式不对不该拖垮整次直连 —— 多候选的意义就是"有一条能用就行"。
+func TestCheckDirectCandidatesKeepsGoodOnes(t *testing.T) {
+	got, err := checkDirectCandidates([]directCandidate{
+		{Addr: "garbage", Source: candSrcLocal},
+		{Addr: "[2001:db8::1]:4242", Source: candSrcReflectV6},
+	})
+	if err != nil {
+		t.Fatalf("one bad candidate should not fail the whole list: %v", err)
+	}
+	if len(got) != 1 || got[0].Addr != "[2001:db8::1]:4242" {
+		t.Fatalf("unexpected result %v", got)
+	}
+	// 全部不可用时才报错, 且要带上每条的原因。
+	_, err = checkDirectCandidates([]directCandidate{{Addr: "garbage"}, {Addr: "also-garbage"}})
+	if err == nil {
+		t.Fatal("want an error when every candidate is unusable")
+	}
+	for _, want := range []string{"garbage", "also-garbage"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
 		}
 	}
 }
@@ -637,5 +695,71 @@ func TestDirectStreamHeadRoundTrip(t *testing.T) {
 	}
 	if out != in {
 		t.Fatalf("round trip mismatch: got %+v want %+v", out, in)
+	}
+}
+
+// 多条路并行打洞: 通的那条要被观测到, 不通的那条不能拖垮整次直连。
+//
+// 这条用例走的是真实的 UDP 收发(回环), 覆盖 punch -> 对端 drainNonQUIC 自动回 pong ->
+// 本端按 nonce 关联并计 RTT 这一整条链路。
+func TestDirectPunchAllPicksTheReachableOne(t *testing.T) {
+	c := newAcceptPeer(t, nil)
+	a := newDialPeer(t)
+
+	live := directCandidate{Addr: peerEndpoint(c), Source: candSrcReflectV6}
+	// 一个没人监听的端口。UDP 打过去要么静默丢弃、要么回 ICMP 不可达, 两种都该算失败。
+	dead := directCandidate{Addr: "[::1]:1", Source: candSrcReflectV6}
+	// 一个格式就不对的, 不该让整批探测崩掉。
+	junk := directCandidate{Addr: "garbage", Source: candSrcLocal}
+
+	results := a.punchAll([]directCandidate{dead, junk, live})
+	if len(results) != 3 {
+		t.Fatalf("want a result per candidate, got %d", len(results))
+	}
+	byAddr := map[string]candidateResult{}
+	for _, r := range results {
+		byAddr[r.Cand.Addr] = r
+	}
+	if r := byAddr[live.Addr]; r.Err != nil {
+		t.Fatalf("the reachable candidate should have answered: %v", r.Err)
+	}
+	if r := byAddr[dead.Addr]; r.Err == nil {
+		t.Errorf("a port with nothing listening should not report success")
+	}
+	if r := byAddr[junk.Addr]; r.Err == nil {
+		t.Errorf("a malformed candidate should not report success")
+	}
+
+	// 择优只在通了的里面挑, 所以必须选中活着的那条。
+	winner, err := selectCandidate(results)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if winner.Addr != live.Addr {
+		t.Fatalf("selected %s, want the reachable %s", winner.Addr, live.Addr)
+	}
+}
+
+// 打洞包必须换来一个 pong: 这是"这条路通了"的唯一凭据, 也是 RTT 的来源。
+func TestDirectPunchGetsPong(t *testing.T) {
+	c := newAcceptPeer(t, nil)
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	addr, err := net.ResolveUDPAddr("udp", peerEndpoint(c))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rtt, err := a.punchOne(tr, addr)
+	if err != nil {
+		t.Fatalf("punch got no pong: %v", err)
+	}
+	// 只断言 RTT 在合理范围内, 不钉具体数值。回环上一个来回可能短到时钟粒度以下
+	// (Windows 上就会量出 0), 所以下界是 0 而不是"必须大于 0"。
+	if rtt < 0 || rtt > directPunchGap*directPunchCount {
+		t.Fatalf("implausible rtt %s", rtt)
 	}
 }

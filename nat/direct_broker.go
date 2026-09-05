@@ -1,9 +1,11 @@
 package nat
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -64,8 +66,9 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 		replyOffer(c, msg.ID, DirectOffer{Err: "incomplete direct request"})
 		return
 	}
-	if err := checkDirectEndpoint(req.Endpoint); err != nil {
-		replyOffer(c, msg.ID, DirectOffer{Err: fmt.Sprintf("requester endpoint %s unusable: %v", req.Endpoint, err)})
+	reqCands, err := checkDirectCandidates(mergeCandidates(req.Candidates, req.Endpoint))
+	if err != nil {
+		replyOffer(c, msg.ID, DirectOffer{Err: fmt.Sprintf("requester announced no usable endpoint: %v", err)})
 		return
 	}
 	// 不允许连自己, 否则 A 会给自己发 punch 再拨自己, 徒增困惑的失败。
@@ -81,7 +84,7 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 
 	// 用 B 自己的 ID 与 C 通信: A 那侧的 ID 是各 A 自行采番的, 不同 A 会撞号。
 	id := b.track(c, msg.ID, req.Email)
-	punch := DirectPunch{PeerAddr: req.Endpoint, Token: req.Token, Port: req.Port}
+	punch := DirectPunch{PeerAddrs: reqCands, PeerAddr: firstAddr(reqCands), Token: req.Token, Port: req.Port}
 	body, err := encodeDirect(punch)
 	if err != nil {
 		b.take(id)
@@ -89,7 +92,7 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 		return
 	}
 	peer.hub.broadcast <- &CMessage{client: peer, message: &Message{ID: id, Type: ConnTCP, Method: METHOD_DIRECT_PUNCH, Body: body}}
-	log.Printf("nat direct: email %s -> %s, asked peer to listen and punch toward %s", c.Email, req.Email, req.Endpoint)
+	log.Printf("nat direct: email %s -> %s, asked peer to listen and punch toward %v", c.Email, req.Email, reqCands)
 }
 
 // onReady C 报回自己的端点: 找到当初的请求方, 把端点转给它。
@@ -108,16 +111,18 @@ func (b *directBroker) onReady(c *Client, msg *Message) {
 		replyOffer(p.asker, p.askerID, DirectOffer{Err: fmt.Sprintf("peer %s cannot accept a direct connection: %s", p.email, ready.Err)})
 		return
 	}
-	if err := checkDirectEndpoint(ready.Endpoint); err != nil {
-		replyOffer(p.asker, p.askerID, DirectOffer{Err: fmt.Sprintf("peer %s reported an unusable endpoint %s: %v", p.email, ready.Endpoint, err)})
+	readyCands, err := checkDirectCandidates(mergeCandidates(ready.Candidates, ready.Endpoint))
+	if err != nil {
+		replyOffer(p.asker, p.askerID, DirectOffer{Err: fmt.Sprintf("peer %s reported no usable endpoint: %v", p.email, err)})
 		return
 	}
 	if ready.Fingerprint == "" {
 		replyOffer(p.asker, p.askerID, DirectOffer{Err: fmt.Sprintf("peer %s reported no certificate fingerprint", p.email)})
 		return
 	}
-	log.Printf("nat direct: email %s is ready at %s", c.Email, ready.Endpoint)
-	replyOffer(p.asker, p.askerID, DirectOffer{PeerAddr: ready.Endpoint, Fingerprint: ready.Fingerprint})
+	log.Printf("nat direct: email %s is ready with candidates %v", c.Email, readyCands)
+	replyOffer(p.asker, p.askerID, DirectOffer{
+		PeerAddrs: readyCands, PeerAddr: firstAddr(readyCands), Fingerprint: ready.Fingerprint})
 }
 
 func (b *directBroker) track(asker *Client, askerID uint, email string) uint {
@@ -163,10 +168,47 @@ func replyOffer(c *Client, id uint, o DirectOffer) {
 	c.hub.broadcast <- &CMessage{client: c, message: &Message{ID: id, Type: ConnTCP, Method: METHOD_DIRECT_OFFER, Body: body}}
 }
 
-// checkDirectEndpoint 校验端点可用于 IPv6 直连。IPv4 端点在这里就拒掉并说明原因,
-// 而不是等对端拨号时才失败得不明不白。
+// directMaxCandidates 一方最多允许通告几个候选。
+//
+// 必须有上限: 服务端把这份列表转给对端后, 对端会朝**每一条**发打洞包。不限制的话,
+// 一个恶意订阅方报上几百个地址, 就能让另一台机器替它朝任意目标扫射 —— 服务端在这里
+// 成了放大器。四类来源(v4/v6/端口映射/本机接口)正常也就几条, 8 条很宽裕。
+const directMaxCandidates = 8
+
+// checkDirectCandidates 过滤并校验一方通告的候选。
+//
+// 逐条筛而不是一票否决: 多候选的意义就是"有一条能用就行", 某条格式不对不该拖垮整次
+// 直连。全部不可用才报错, 并带上每条的原因。
+//
+// 这里**不再**要求 IPv6 或全局地址 —— IPv4、私有地址、CGNAT 现在都是合法候选, 通不通
+// 交给打洞去回答。只挡住明显没有意义的: 解析不出的、非 IP 字面量的、端口为 0 的。
+// 要求 IP 字面量而不接受域名, 是因为这份地址会让对端去发包, 不能让它顺带做 DNS 解析
+// 去够任意主机。
+func checkDirectCandidates(cands []directCandidate) ([]directCandidate, error) {
+	var ok []directCandidate
+	var bad []string
+	for _, c := range cands {
+		if err := checkDirectEndpoint(c.Addr); err != nil {
+			bad = append(bad, fmt.Sprintf("%s: %v", c.Addr, err))
+			continue
+		}
+		ok = append(ok, c)
+		if len(ok) >= directMaxCandidates {
+			break
+		}
+	}
+	if len(ok) == 0 {
+		if len(bad) == 0 {
+			return nil, errors.New("no candidate endpoint was announced")
+		}
+		return nil, errors.New(strings.Join(bad, "; "))
+	}
+	return ok, nil
+}
+
+// checkDirectEndpoint 校验单个候选端点的格式。
 func checkDirectEndpoint(endpoint string) error {
-	host, _, err := net.SplitHostPort(endpoint)
+	host, port, err := net.SplitHostPort(endpoint)
 	if err != nil {
 		return err
 	}
@@ -174,11 +216,11 @@ func checkDirectEndpoint(endpoint string) error {
 	if ip == nil {
 		return fmt.Errorf("%s is not an IP literal", host)
 	}
-	if ip.To4() != nil {
-		return fmt.Errorf("%s is IPv4; direct connect needs IPv6 on both sides", host)
+	if ip.IsUnspecified() || ip.IsMulticast() {
+		return fmt.Errorf("%s is not a unicast address", host)
 	}
-	if !ip.IsGlobalUnicast() {
-		return fmt.Errorf("%s is not a global unicast address", host)
+	if port == "" || port == "0" {
+		return errors.New("port is zero")
 	}
 	return nil
 }

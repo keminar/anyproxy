@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log"
 	"math/big"
-	"net"
 	"time"
 
 	"github.com/keminar/anyproxy/utils/trace"
@@ -105,7 +104,8 @@ func (d *directPeer) onPunch(msg *Message) {
 		reply(DirectReady{Err: "bad punch payload"})
 		return
 	}
-	if p.Token == "" || p.PeerAddr == "" {
+	peerCands := mergeCandidates(p.PeerAddrs, p.PeerAddr)
+	if p.Token == "" || len(peerCands) == 0 {
 		reply(DirectReady{Err: "incomplete punch"})
 		return
 	}
@@ -113,44 +113,26 @@ func (d *directPeer) onPunch(msg *Message) {
 		reply(DirectReady{Err: "directAccept is not enabled on this peer"})
 		return
 	}
-	addr, err := net.ResolveUDPAddr("udp6", p.PeerAddr)
-	if err != nil {
-		reply(DirectReady{Err: fmt.Sprintf("peer endpoint %s is not usable as udp6: %v", p.PeerAddr, err)})
-		return
-	}
 	// 按需起监听: 没起过就现起, 起着就复用。
 	if err := d.ensureAccept(); err != nil {
 		reply(DirectReady{Err: fmt.Sprintf("cannot start quic listener: %v", err)})
 		return
 	}
-	tr, err := d.ensureTransport()
+	// 当场收集自己的候选: 外网地址与端口都可能已经变了, 不能用缓存。
+	myCands, err := d.gatherCandidates()
 	if err != nil {
-		reply(DirectReady{Err: fmt.Sprintf("cannot get local socket: %v", err)})
+		reply(DirectReady{Err: fmt.Sprintf("cannot determine my own endpoints: %v", err)})
 		return
 	}
-	// 当场探测自己的端点: 外网地址与端口都可能已经变了, 不能用缓存。
-	endpoint, err := d.probeEndpoint()
-	if err != nil {
-		reply(DirectReady{Err: fmt.Sprintf("cannot determine my own endpoint: %v", err)})
-		return
-	}
-	d.setObservedEndpoint(endpoint)
+	d.setMyCandidates(myCands)
 	d.touchAccept()
 
 	d.tokens.put(p.Token, p.Port)
-	go func() {
-		for i := 0; i < directPunchCount; i++ {
-			// 经 Transport 发: 这个 socket 已经交给 quic-go 了, 直接 WriteToUDP 是它
-			// 明确禁止的用法。带 magic 前缀, 对端才能从 ReadNonQUICPacket 收到。
-			if _, err := tr.WriteTo(directPacket(directPunchPayload), addr); err != nil {
-				d.logf("punch to %s failed: %v", p.PeerAddr, err)
-				return
-			}
-			time.Sleep(directPunchGap)
-		}
-	}()
-	d.logf("listening at %s, punching toward %s for port %d", endpoint, p.PeerAddr, p.Port)
-	reply(DirectReady{Endpoint: endpoint, Fingerprint: d.fingerprint})
+	// 朝对端的**所有**候选一起打, 不等回执: C 这侧不需要知道哪条更快(择优是 A 做的),
+	// 只需要把每条路上的返回通道都开出来。等回执会白白拖住 ready, 让 A 多等近一秒。
+	d.punchOnly(peerCands)
+	d.logf("my candidates %v, punching toward %v for port %d", myCands, peerCands, p.Port)
+	reply(DirectReady{Candidates: myCands, Endpoint: firstAddr(myCands), Fingerprint: d.fingerprint})
 }
 
 // acceptLoop 监听参数取自起监听时那一个: stopAccept 会把字段置空, 用字段会误退出。

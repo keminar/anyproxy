@@ -65,12 +65,12 @@ type directPeer struct {
 	udpConn     *net.UDPConn
 	transport   *quic.Transport
 
-	// 反射器探测状态: drainNonQUIC 收到反射器回包时投递给等待中的 probeEndpoint。
-	// observed 为最近一次探测到的本机端点(反射器视角), 通告与请求都用它。
-	probeMu   sync.Mutex
-	probeWait chan string
-	probeFrom string
-	observed  string
+	// 在飞的探测。按 nonce 关联而不是按来源地址: 现在是多条路并行探测(v4 反射器、
+	// v6 反射器、对端的若干候选), 同一时刻好几个包在飞, 来源地址区分不开, 回包也
+	// 未必按发出顺序回来。drainNonQUIC 收到回包后按 nonce 投递。
+	probeMu sync.Mutex
+	waiters map[string]*probeWaiter
+	myCands []directCandidate // 最近一次收集到的本机候选, 仅用于日志
 
 	// C 侧(directAccept)。监听是按需起的: 收到服务端转来的 punch 才起, 没有活跃连接
 	// 且空闲一段后由 reapAccept 关掉并释放 socket, 所以这些字段会反复置起/置空。
@@ -96,11 +96,14 @@ func (d *directPeer) ensureTransport() (*quic.Transport, error) {
 	if d.transport != nil {
 		return d.transport, nil
 	}
-	// 显式 udp6: 直连的前提就是双方都有可用 IPv6, 绑双栈只会把"其实没有 IPv6"这件事
-	// 推迟到拨号阶段才暴露。
-	conn, err := net.ListenUDP("udp6", &net.UDPAddr{})
+	// 双栈: IPv4 与 IPv6 候选要在**同一个 socket、同一个源端口**上并行竞争。分两个
+	// socket 的话两族各有各的端口, 打洞在对端防火墙上开出来的状态也就对不上。
+	//
+	// 早先这里写死 udp6, 是因为当时只有 IPv6 那条路通; 现在多条路并行, 没有理由再把
+	// IPv4 排除在外 —— 它通不通交给探测去回答, 而不是提前替它决定。
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{})
 	if err != nil {
-		return nil, fmt.Errorf("listen udp6: %w", err)
+		return nil, fmt.Errorf("listen udp: %w", err)
 	}
 	tr := &quic.Transport{Conn: conn}
 	d.udpConn = conn
@@ -112,21 +115,21 @@ func (d *directPeer) ensureTransport() (*quic.Transport, error) {
 	return tr, nil
 }
 
-// setObservedEndpoint 记下反射器观测到的本机端点。
-func (d *directPeer) setObservedEndpoint(endpoint string) {
+// setMyCandidates 记下最近一次收集到的本机候选。
+func (d *directPeer) setMyCandidates(cands []directCandidate) {
 	d.probeMu.Lock()
-	d.observed = endpoint
+	d.myCands = cands
 	d.probeMu.Unlock()
 }
 
-// observedEndpoint 取上次探测到的本机端点; 没探测过时返回空。
-func (d *directPeer) observedEndpoint() string {
+// myCandidates 取上次收集到的本机候选; 没收集过时返回 nil。
+func (d *directPeer) myCandidates() []directCandidate {
 	d.probeMu.Lock()
 	defer d.probeMu.Unlock()
-	return d.observed
+	return d.myCands
 }
 
-// localUDPPort 返回本地 QUIC socket 绑定的端口。**仅用于日志**。
+// localUDPPort 返回本地 QUIC socket 绑定的端口。候选地址要用它拼本机接口地址。
 //
 // 不能拿它当对端可用的端点: 外网端口由路径上的 NAT / 端口映射决定, 与本地端口不一定
 // 相同, 而且映射老化重建后还会变 —— 跟地址一样, 只能靠反射器探测(见 direct_reflect.go)。

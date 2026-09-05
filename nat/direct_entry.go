@@ -128,7 +128,13 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	if err != nil {
 		return nil, err
 	}
-	sess, err := d.connectPeer(tr, r.Email, offer.PeerAddr, offer.Fingerprint)
+	// 多条候选同时打洞, 按 RTT + 地址类型偏置选出最优的那条, 再只对它做一次 QUIC 拨号。
+	// 不对每条候选都拨 QUIC: 那是 N 次完整握手, 而打洞包一来一回就够判断通不通与快慢。
+	winner, err := d.pickPeerAddr(r.Email, offer.PeerAddrs)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := d.connectPeer(tr, r.Email, winner.Addr, offer.Fingerprint)
 	if err != nil {
 		return nil, err
 	}
@@ -196,12 +202,13 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	if err != nil {
 		return "", offer, err
 	}
-	// 每次都重新探测本机端点: 隐私临时地址会轮换, 上一次的结果可能已经作废。
-	endpoint, err := d.probeEndpoint()
+	// 每次都重新收集候选: 隐私临时地址会轮换、NAT 映射会老化重建, 上一次的结果可能
+	// 已经作废。多条路并行探, 少一条不影响其它条。
+	myCands, err := d.gatherCandidates()
 	if err != nil {
-		return "", offer, fmt.Errorf("determine my own quic endpoint: %w", err)
+		return "", offer, fmt.Errorf("determine my own quic endpoints: %w", err)
 	}
-	d.setObservedEndpoint(endpoint)
+	d.setMyCandidates(myCands)
 
 	offerCh := make(chan DirectOffer, 1)
 	d.mu.Lock()
@@ -215,13 +222,12 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 		d.mu.Unlock()
 	}()
 
-	// 把本端的三个地址都打出来: 本地 socket、反射器观测到的外网端点、以及稍后拿到的
-	// 对端端点。排查直连问题时这三者缺一不可 —— 本地端口用于抓包定位, 观测端点用于
-	// 判断 NAT/防火墙是否改写, 对端端点用于确认服务端转交的是不是预期的那台机器。
-	d.logf("requesting %s: local socket port %d, my endpoint %s (as seen by the reflector)",
-		r.Email, d.localUDPPort(), endpoint)
+	// 把本端的地址都打出来: 本地 socket 端口用于抓包定位, 各候选用于判断哪些路探到了、
+	// 哪些没探到 —— 排查直连问题时这些缺一不可。
+	d.logf("requesting %s: local socket port %d, my candidates %v", r.Email, d.localUDPPort(), myCands)
 
-	req := DirectRequest{Email: r.Email, Port: r.Port, Token: token, Endpoint: endpoint}
+	req := DirectRequest{Email: r.Email, Port: r.Port, Token: token,
+		Candidates: myCands, Endpoint: firstAddr(myCands)}
 	if err := d.send(METHOD_DIRECT_REQUEST, reqID, req); err != nil {
 		return "", offer, fmt.Errorf("ask server for peer endpoint: %w", err)
 	}
@@ -234,22 +240,38 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	if offer.Err != "" {
 		return "", offer, errors.New(offer.Err)
 	}
-	if offer.PeerAddr == "" || offer.Fingerprint == "" {
+	offer.PeerAddrs = mergeCandidates(offer.PeerAddrs, offer.PeerAddr)
+	if len(offer.PeerAddrs) == 0 || offer.Fingerprint == "" {
 		return "", offer, errors.New("server returned an incomplete offer")
 	}
-	d.logf("server says %s is at %s (fingerprint %s); dialing %s -> %s",
-		r.Email, offer.PeerAddr, shortFP(offer.Fingerprint), endpoint, offer.PeerAddr)
+	d.logf("server says %s has candidates %v (fingerprint %s)",
+		r.Email, offer.PeerAddrs, shortFP(offer.Fingerprint))
 	return token, offer, nil
+}
+
+// pickPeerAddr 朝对端的所有候选同时打洞并测 RTT, 再按 RTT + 地址类型偏置选一条。
+//
+// 并行而不是逐条试: 逐条的话前面几条不通就要各等一个超时, 轮到能用的那条时入口连接
+// 早就超时了。并行发出去, 谁先回谁先被观测到; 多条都回才谈优先级。
+func (d *directPeer) pickPeerAddr(email string, cands []directCandidate) (directCandidate, error) {
+	results := d.punchAll(cands)
+	winner, err := selectCandidate(results)
+	if err != nil {
+		return directCandidate{}, fmt.Errorf("no path to %s: %w", email, err)
+	}
+	// 把每条候选的 RTT、偏置、得分都打出来。选了哪条、为什么选它, 不打就只能靠猜;
+	// 而"为什么没走 IPv6"这类问题恰恰只有这一行答得了。
+	d.logf("path selection for %s: %s", email, describeResults(results, winner))
+	return winner, nil
 }
 
 // connectPeer 按服务端给的端点与指纹建立 QUIC 连接并登记复用。信令之外的部分独立成
 // 一个方法, 便于不经 websocket 直接测试数据路径。
 func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprint string) (*directSession, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp6", peerAddr)
+	// udp 而不是 udp6: socket 是双栈的, IPv4 与 IPv6 候选都可能胜出。
+	udpAddr, err := net.ResolveUDPAddr("udp", peerAddr)
 	if err != nil {
-		// 对端的 websocket 若是 IPv4 接入的, 这里拿到的就是 IPv4 地址, 直连做不了。
-		// 按约定直接失败, 并把原因说清楚。
-		return nil, fmt.Errorf("peer endpoint %s is not a usable IPv6 address (is its websocket connected over IPv6?): %w", peerAddr, err)
+		return nil, fmt.Errorf("peer endpoint %s is not a usable address: %w", peerAddr, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), directDialWait)
 	defer cancel()

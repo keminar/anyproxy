@@ -47,32 +47,64 @@ func isDirectMethod(method string) bool {
 // 而一台机器可能同时持有多个全局 IPv6 地址(含会轮换的隐私临时地址), 内核按 RFC 6724
 // 按目的地分别选源; 外网端口同理由沿途 NAT/端口映射决定。详见 nat/direct_reflect.go。
 type DirectReady struct {
-	Endpoint    string `json:"endpoint"`    //反射器观测到的 QUIC 端点, 形如 [2001:db8::1]:54321
-	Fingerprint string `json:"fingerprint"` //自签证书的 SHA-256 指纹, 供对端固定校验
-	Err         string `json:"err"`         //非空表示 C 这边没法接受直连(没开 directAccept、没有 IPv6 等)
+	// Candidates 是 C 的全部候选端点(IPv4 / IPv6 / 端口映射 / 本机接口地址), A 会朝
+	// 它们同时打, 谁先通谁被观测到, 都通则按 RTT + 地址类型偏置择优。
+	Candidates  []directCandidate `json:"candidates"`
+	Fingerprint string            `json:"fingerprint"` //自签证书的 SHA-256 指纹, 供对端固定校验
+	Err         string            `json:"err"`         //非空表示 C 这边没法接受直连(没开 directAccept 等)
+
+	// Endpoint 是 Candidates 出现之前的单端点字段, 只为兼容旧版对端而保留(填第一条
+	// 候选)。新版两边都优先看 Candidates。
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // DirectRequest A 向服务端申请连接某个 email 的订阅方。
 type DirectRequest struct {
-	Email    string `json:"email"`    //目标订阅方
-	Port     uint16 `json:"port"`     //要用对方 client.forward 里的哪条规则
-	Token    string `json:"token"`    //本次会话的一次性凭证, A 生成, 经 B 转交给 C, 最后由 A 在 QUIC 流首部出示
-	Endpoint string `json:"endpoint"` //A 自己经反射器观测到的 QUIC 端点, 供 C 朝它打洞
+	Email      string            `json:"email"`      //目标订阅方
+	Port       uint16            `json:"port"`       //要用对方 client.forward 里的哪条规则
+	Token      string            `json:"token"`      //本次会话的一次性凭证, A 生成, 经 B 转交给 C, 最后由 A 在 QUIC 流首部出示
+	Candidates []directCandidate `json:"candidates"` //A 的全部候选端点, 供 C 朝它们同时打洞
+
+	// Endpoint 同 DirectReady.Endpoint, 只为兼容旧版对端。
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // DirectPunch 服务端转交给 C 的连接请求。
 type DirectPunch struct {
-	PeerAddr string `json:"peerAddr"` //A 的 UDP 端点(服务端观测到的地址 + A 自报的端口)
-	Token    string `json:"token"`    //期望 A 出示的凭证
-	Port     uint16 `json:"port"`     //A 要访问的转发规则端口
+	PeerAddrs []directCandidate `json:"peerAddrs"` //A 的全部候选端点, C 朝它们同时打洞
+	Token     string            `json:"token"`     //期望 A 出示的凭证
+	Port      uint16            `json:"port"`      //A 要访问的转发规则端口
+
+	// PeerAddr 同 DirectReady.Endpoint, 只为兼容旧版对端。
+	PeerAddr string `json:"peerAddr,omitempty"`
 }
 
 // DirectOffer 服务端回给 A 的结果。Err 非空表示这次直连没法建立(对方不在线、没开
 // directAccept 等), 此时按"直接失败"处理, 不做中继回落。
 type DirectOffer struct {
-	PeerAddr    string `json:"peerAddr"`    //C 的 QUIC 端点
-	Fingerprint string `json:"fingerprint"` //C 的证书指纹
-	Err         string `json:"err"`         //非空即失败原因
+	PeerAddrs   []directCandidate `json:"peerAddrs"`   //C 的全部候选端点
+	Fingerprint string            `json:"fingerprint"` //C 的证书指纹
+	Err         string            `json:"err"`         //非空即失败原因
+
+	// PeerAddr 同 DirectReady.Endpoint, 只为兼容旧版对端。
+	PeerAddr string `json:"peerAddr,omitempty"`
+}
+
+// mergeCandidates 把新旧两种字段合成一份候选列表。旧版对端只会填单端点字段, 新版两个
+// 都填(单端点填第一条), 所以这里以列表为主、单端点兜底, 再去重。
+func mergeCandidates(list []directCandidate, single string) []directCandidate {
+	if single != "" {
+		list = append(list, directCandidate{Addr: single, Source: candSrcReflectV6})
+	}
+	return dedupCandidates(list)
+}
+
+// firstAddr 取列表里第一条地址, 用于填兼容字段。
+func firstAddr(cands []directCandidate) string {
+	if len(cands) == 0 {
+		return ""
+	}
+	return cands[0].Addr
 }
 
 // newDirectToken 生成一次性会话凭证。
