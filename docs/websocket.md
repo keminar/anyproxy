@@ -164,8 +164,7 @@ A↔C 那一跳不再只走 IPv6。三类候选**同时**探测、同时打洞�
 
 ```
 path selection for home: 1.2.3.4:41203(v4) rtt=38ms bias=0s score=38ms,
-  [2400:3200::1]:41203(v6) rtt=22ms bias=0s score=22ms <-,
-  192.168.1.7:41203(local) failed
+  [2400:3200::1]:41203(v6) rtt=22ms bias=0s score=22ms <-
 ```
 
 "为什么没走 IPv6" 这类问题只有这一行答得了。
@@ -201,6 +200,8 @@ websocket:
       allow:                      # 可选，只允许这些 email 发过来
         - office@example.com
 ```
+
+`allow` 校验的身份不是发送方自己声称的：发起方的 email 由**服务端**在 punch 信令里填（C 自己只看得到对端的 IP/端口和证书指纹，看不到对方的 email），A 就算在自己的 `client.email` 里谎报也没用，服务端填的是它在这条 websocket 上鉴权认出的那个账号。
 
 发送端（一条命令，传完就退出）：
 
@@ -313,7 +314,7 @@ socket 也支持失效重建：网卡下线、地址被撤等情况下会丢弃�
 | 字段 | 说明 |
 |------|------|
 | `listen` | websocket 监听地址，如 `:3002`（订阅端连它的 `/ws`）。等价 `-ws-listen` |
-| `users` | 鉴权账号数组，每条 `{user, pass, disable}`；不同订阅端各用各的账号，可单独停用某个，见下文「多用户鉴权」 |
+| `users` | 鉴权账号数组，每条 `{user, pass, disable}` 或 `{user, key, disable}`（密码/密钥二选一）；不同订阅端各用各的账号，可单独停用某个，见下文「多用户鉴权」「密钥对鉴权」 |
 | `allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP，**IPv4 与 IPv6 都支持**），为空不限制。按**真实 TCP 来源**（`r.RemoteAddr`）判定，不信任 `X-Real-IP` 等可伪造头部；loopback 始终放行。命中即拒绝、连 upgrade 都不做。约束范围：websocket 接入、裸 TCP 转发入口（`forward.listen`）、以及直连用的 UDP 反射器 |
 | `forward` | 裸 TCP 转发入口规则数组（路径 B），每条 `{listen, email}`，见下 |
 
@@ -349,6 +350,9 @@ websocket:
 | `email` | 本订阅端身份，用于服务端定位/选择（HTTP 路径辅助、TCP 路径按它匹配 `server.forward.email`）。非空且不参与 token |
 | `subscribe` | HTTP 头订阅规则数组，每条 `{key, val}`；路径 A 用 |
 | `forward` | 裸 TCP 转发目标规则数组（路径 B），每条 `{port, target}`，见下 |
+| `directAccept` | `true` 时起 QUIC 监听并把端点通告给服务端，允许其它订阅方直连自己（路径 C，见下）；监听按需起、空闲释放，平时不占端口 |
+| `direct` | 本机 QUIC 直连入口规则数组（路径 C），每条 `{listen, email, port, protocol}`，见下 |
+| `receive` | 接收直连传来的文件的配置 `{dir, allow}`，需同时开 `directAccept`；不配 `dir` 则一律拒收，见「直连传文件」 |
 
 ### 密钥对鉴权（免时钟同步）
 
@@ -435,6 +439,22 @@ websocket:
 | `port` | 订阅端 | 对应服务端入口端口号（如 `2222`），TCP 与 UDP 共用同一张表 |
 | `target` | 订阅端 | 收到该端口来的连接/数据报时 dial 的内网真实目标，如 `127.0.0.1:22` |
 
+`client.direct` 每条（`ClientDirect`，路径 C 的本机直连入口，配在**发起方** A 上）：
+
+| 字段 | 说明 |
+|------|------|
+| `listen` | 本机入口监听地址，如 `:13389`；`:13389` 绑 `[::]` 双栈，IPv4 客户端也能连 |
+| `email` | 直连到这个 email 的订阅方（即 C，须与本条 `server` 连接下的另一订阅方一致） |
+| `port` | 告诉 C 用它自己 `client.forward[port]` 里的哪条规则；C 未映射该端口即拒绝 |
+| `protocol` | `tcp`(默认) / `udp` / `both`。两种协议在 QUIC 上走不同承载（stream / datagram），见下文「TCP 与 UDP」；`both` 常用于 RDP |
+
+`client.receive`（`ClientReceive`，接收直连传来的文件，配在**接收方** C 上，需同时开 `directAccept`）：
+
+| 字段 | 说明 |
+|------|------|
+| `dir` | 收到的文件落盘的目录；**不配则一律拒收**（对端会收到明确的拒绝原因，见「直连传文件」） |
+| `allow` | 可选，email 白名单数组；只有列在里面的发送方才能发文件过来，为空表示不限制（仍受直连本身的鉴权约束——对方必须先通过服务端信令拿到一次性凭证）。判断依据是**服务端在 punch 信令里填的发起方身份**，不是对端自己在应用层声称的，无法伪造 |
+
 ## 鉴权与握手
 
 订阅端连服务端的 `/ws`，随后发 `AuthMessage`（`nat/handler.go` 的 `auth`）。服务端先查账号（`LookupUser`），再按该账号配的是 `key` 还是 `pass` 分支（`nat/conn.go` 的 `authClient`）：
@@ -473,6 +493,9 @@ websocket:
 - **UDP 中继的第一个包会慢一拍**：上行是收到第一个数据报才建的，头一个包要等 B→C→B 一个来回。RDP 会自己重试，不用管；自己写的 UDP 应用如果不重试就要注意。
 - **UDP 中继只在 `protocol: udp|both` 时才起**：默认 `tcp`，光配 `client.forward` 是不够的，入口那条规则也得写 `protocol`。
 - **路径 A 的 `CONNECT` 不支持**：HTTP 头订阅路径只处理非 `CONNECT` 的 HTTP 请求。
+- **直连打洞失败没有中继回落**：A 的入口连接会直接被关掉，日志打 `nat direct entry ... failed: no path to <email>: <每条候选卡在哪>`。这是设计如此，不是 bug——直连和中继是两条独立路径，互不兜底；要经中继就配 `server.forward`，不要指望 `direct` 失败会自动退回去。
+- **`-send` 打洞失败同理，退出码非零、一个字节都不传**：常见原因是双方都在严格 NAT/CGNAT 后面、三类候选（反射器 v4/v6、端口映射）全部失败——终端上会打印 `send: direct connect to <email> failed, nothing was sent: ...`，带着每条候选的失败原因。
+- **收文件的一端没配 `receive.dir`**：发送端会收到 `peer does not accept files (websocket.client.receive.dir is not set)` 并非零退出；这不是打洞失败，是对端明确拒绝，检查 C 的配置而不是查网络。
 
 ## 示例
 

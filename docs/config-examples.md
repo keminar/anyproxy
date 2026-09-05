@@ -331,6 +331,78 @@ websocket:
 
 配合 8.3 的写法，两个订阅端各自在自己的 `websocket.client.user`/`pass`（8.1/8.2 的写法）或 `clients[].user`/`pass`（8.3 的写法）里填对应账号即可；不影响 `email`（`email` 仍是独立字段，用于服务端 `forward.email` 定位订阅端，不参与鉴权）。`disable` 热加载生效，字段详见 [websocket.md](websocket.md#多用户鉴权)。
 
+### 8.5 QUIC 直连（打洞，数据不经服务端）
+
+前面几例数据都经服务端转发。这条路径把入口挪到订阅端自己机器上，两个订阅端直接打洞建 QUIC 连接，服务端只转交信令：
+
+```yaml
+# 服务端（公网，只转信令，不转数据）
+websocket:
+  server:
+    listen: :3002
+    users:
+      - user: office
+        pass: officepass
+      - user: home
+        pass: homepass
+```
+
+```yaml
+# C（被连的一方，内网 RDP 所在机器）
+listen: off
+websocket:
+  client:
+    connect: <服务端IP>:3002
+    user: home
+    pass: homepass
+    email: home@example.com
+    directAccept: true         # 允许别人直连自己；监听按需起、空闲释放，平时不占端口
+    forward:
+      - port: 3389              # 复用同一张白名单：未映射的 port 一律拒绝
+        target: 192.168.1.10:3389
+```
+
+```yaml
+# A（发起的一方，入口在自己机器上）
+listen: off
+websocket:
+  client:
+    connect: <服务端IP>:3002
+    user: office
+    pass: officepass
+    email: office@example.com
+    direct:
+      - listen: ":13389"        # 本机入口，mstsc 连这里
+        email: home@example.com # 直连到这个 email 的订阅端
+        port: 3389               # 用对方 forward 里的哪条规则
+        protocol: both            # tcp(默认) / udp / both；RDP 8+ 用 both
+```
+
+用法：`mstsc` 连 `127.0.0.1:13389`，实际字节走 A↔C 的 QUIC 直连，不经服务端。打洞失败就直接失败（连接被关掉，日志写明每条候选卡在哪），**没有中继回落**——要经中继就照 8.2 配 `server.forward`，两条路径互不兜底。字段与打洞机制详见 [websocket.md](websocket.md#配置字段)。
+
+### 8.6 直连传文件（不依赖对端装 sshd/rsync）
+
+复用 8.5 的直连通道传文件。收端只需一个目录，跨 Windows 也不用装任何服务：
+
+```yaml
+# C（收文件的一方，接着 8.5 的 C 配置加一段）
+websocket:
+  client:
+    directAccept: true
+    receive:
+      dir: D:/incoming          # 收到的文件放这里；不配 dir 则一律拒收
+      allow:                    # 可选，只允许这些 email 发过来（身份由服务端给, 不能伪造）
+        - office@example.com
+```
+
+发端不用常驻进程，一条命令传完就退出：
+
+```bash
+anyproxy -c conf/office.yaml -send D:/photos -to home@example.com
+```
+
+打洞不成功就报错、一个字节都不传（退出码非零），脚本里 `anyproxy -send ... && echo ok` 直接可用。设计细节（分块校验、断点占位、重名不覆盖等）详见 [websocket.md](websocket.md#配置字段)。
+
 ---
 
 ## 9. 同机双实例：A 开 TUN + B 作出口（防死循环，Linux）
