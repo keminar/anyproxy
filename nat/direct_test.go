@@ -433,6 +433,35 @@ func TestDirectUDPStats(t *testing.T) {
 	}
 }
 
+// TestReflectorAddrsLiteralFamilyMismatch 覆盖一个真实撞过的坑: connect 填字面量
+// IPv6(而不是同时有 A/AAAA 记录的域名)时, IPv4 反射器地址天然解不出来——这不是网络
+// 问题, 纯语法层面就注定了。关键是: 这个失败必须报出来, 不能因为 IPv6 那族成功了就
+// 被吞掉, 否则"为什么没有 IPv4 候选"这种问题永远查不到。
+func TestReflectorAddrsLiteralFamilyMismatch(t *testing.T) {
+	v4, v6, v4Err, v6Err := reflectorAddrs("[2001:db8::1]:3002")
+	if v4 != nil {
+		t.Fatalf("an IPv6 literal should not resolve as udp4, got %v", v4)
+	}
+	if v4Err == nil {
+		t.Fatal("want a per-family error for the failed udp4 resolution, got nil")
+	}
+	if v6 == nil || v6Err != nil {
+		t.Fatalf("the udp6 family should still succeed: v6=%v err=%v", v6, v6Err)
+	}
+
+	// 反过来同理: connect 填 IPv4 字面量时 IPv6 那族解不出来, 也要单独报错。
+	v4, v6, v4Err, v6Err = reflectorAddrs("1.2.3.4:3002")
+	if v6 != nil {
+		t.Fatalf("an IPv4 literal should not resolve as udp6, got %v", v6)
+	}
+	if v6Err == nil {
+		t.Fatal("want a per-family error for the failed udp6 resolution, got nil")
+	}
+	if v4 == nil || v4Err != nil {
+		t.Fatalf("the udp4 family should still succeed: v4=%v err=%v", v4, v4Err)
+	}
+}
+
 // TestDirectProbeEndpoint 反射器必须把**QUIC 那个 socket**的真实源端口回给订阅方。
 // 这是整套地址交换的地基: websocket 是 TCP、是另一个 socket, 它的地址不能拿来当 QUIC 的
 // 端点用(内核按 RFC 6724 按目的地分别选源, 隐私临时地址还会轮换)。

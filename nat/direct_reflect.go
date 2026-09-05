@@ -143,24 +143,26 @@ func splitPacket(payload string) (verb, nonce, arg string) {
 }
 
 // reflectorAddrs 由 websocket 的连接地址推出反射器的 IPv4 与 IPv6 地址(同主机、同端口号、
-// UDP)。两个都要: 订阅方要分别问出自己在两个地址族下的端点。任一族解析不出就返回 nil,
-// 不算错误 —— 那只说明这台机器(或服务端)没有那一族的地址, 少一个候选而已。
-func reflectorAddrs(wsConnect string) (v4, v6 *net.UDPAddr, err error) {
+// UDP)。两个都要: 订阅方要分别问出自己在两个地址族下的端点。
+//
+// 常见的坑: `connect` 填的是**字面量 IP**(比如 `[2001:db8::1]:3002`)时, 只有那一族
+// 能解出来 —— 字面量 IPv6 地址天然不可能解出 IPv4, 反之亦然, 这跟网络通不通无关,
+// 纯语法层面就注定了。真要两族都探到, `connect` 得填一个**同时有 A 和 AAAA 记录的
+// 域名**, 让 DNS 分别给出两族地址; 服务端本身有没有对应的地址族监听是另一回事,
+// 这里只负责"推出地址", 通不通交给后面的探测去回答。
+//
+// v4Err/v6Err 是各自那族解析失败的原因(某族成功时另一族的错误依然要报出来, 不能被
+// "反正有一族成功了"盖过去 —— 不然"为什么没有 IPv4 候选"这种问题永远查不到)。
+func reflectorAddrs(wsConnect string) (v4, v6 *net.UDPAddr, v4Err, v6Err error) {
 	host, port, err := net.SplitHostPort(wsConnect)
 	if err != nil {
-		return nil, nil, fmt.Errorf("bad websocket connect address %s: %w", wsConnect, err)
+		err = fmt.Errorf("bad websocket connect address %s: %w", wsConnect, err)
+		return nil, nil, err, err
 	}
 	joined := net.JoinHostPort(host, port)
-	if a, e := net.ResolveUDPAddr("udp4", joined); e == nil {
-		v4 = a
-	}
-	if a, e := net.ResolveUDPAddr("udp6", joined); e == nil {
-		v6 = a
-	}
-	if v4 == nil && v6 == nil {
-		return nil, nil, fmt.Errorf("cannot resolve %s as a udp address", wsConnect)
-	}
-	return v4, v6, nil
+	v4, v4Err = net.ResolveUDPAddr("udp4", joined)
+	v6, v6Err = net.ResolveUDPAddr("udp6", joined)
+	return v4, v6, v4Err, v6Err
 }
 
 // probeReply 一次探测的回包。
@@ -292,9 +294,14 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 		mu.Unlock()
 	}
 
-	v4, v6, err := reflectorAddrs(d.cfg.Connect)
-	if err != nil {
-		fail("reflector address", err)
+	v4, v6, v4Err, v6Err := reflectorAddrs(d.cfg.Connect)
+	// 每一族解析失败都要单独报出来, 不能因为另一族成功了就吞掉——"为什么没有 v4
+	// 候选"这种问题, 答案往往就是这里没打出来的一行 fail。
+	if v4 == nil && v4Err != nil {
+		fail(candSrcReflectV4+" address", v4Err)
+	}
+	if v6 == nil && v6Err != nil {
+		fail(candSrcReflectV6+" address", v6Err)
 	}
 	for _, r := range []struct {
 		addr *net.UDPAddr
