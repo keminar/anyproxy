@@ -210,10 +210,13 @@ websocket:
   server:
     # 监听端口
     listen:
-    # 鉴权账号数组(校验接入的订阅方), 每条 user/pass/disable; disable: true 可临时停用某个账号
+    # 鉴权账号数组(校验接入的订阅方), 每条 user + (pass 或 key) + disable
+    # pass 与 key 二选一(都配时用 key): key 是 anyproxy -genkey 生成的公钥, 走挑战-应答,
+    # 不依赖两端时钟同步, 且服务端只存公钥, 配置泄露也登录不了; disable: true 临时停用账号
     users:
       # - user:
       #   pass:
+      #   key:
       #   disable: false
     # 可接入来源IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
     # 同时约束: websocket 订阅方接入 与 下面 forward 裸TCP转发入口(listen)的来源
@@ -231,8 +234,10 @@ websocket:
     host:
     # 用户名(发给服务端)
     user:
-    # 密码
+    # 密码(与 key 二选一)
     pass:
+    # 私钥(与 pass 二选一, 都配时用 key), anyproxy -genkey 生成, 对应公钥配在服务端 users[].key
+    key:
     # Email用于定位用户，不鉴权
     email:
     # 订阅头部信息
@@ -255,7 +260,7 @@ websocket:
       #   port: 3389
       #   protocol: both
   # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
-  # 字段同上面 client 块(connect/host/user/pass/email/subscribe/forward/directAccept/direct)
+  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/directAccept/direct)
   # clients:
   #   - connect:
   #     user:

@@ -201,7 +201,7 @@ socket 也支持失效重建：网卡下线、IPv6 地址被撤等情况下会�
 
 ### 多用户鉴权
 
-服务端只有一种写法：`websocket.server.users` 数组，每项 `{user, pass}`（没有单用户的简写）。只有一个订阅端时也要写成长度为 1 的数组：
+服务端只有一种写法：`websocket.server.users` 数组，每项 `{user, pass}` 或 `{user, key}`（没有单用户的简写）。只有一个订阅端时也要写成长度为 1 的数组：
 
 ```yaml
 websocket:
@@ -215,7 +215,7 @@ websocket:
         disable: true   # 临时停用该账号: 鉴权直接拒绝, 不用删配置/改密码
 ```
 
-订阅端各自在自己的 `websocket.client.user`/`pass`（或 `clients[].user`/`pass`）填对应账号即可，鉴权时服务端按订阅端发来的 `user` 查 `users` 里对应的账号信息算 token（`nat/conn.go` 的 `serveWs` 调用 `utils/conf/router.go` 的 `WsServer.LookupUser`）。
+每个账号是**密码或密钥二选一**（两个都配时用密钥），见下节。订阅端各自在自己的 `websocket.client.user`/`pass`（或 `clients[].user`/`pass`）填对应账号即可，鉴权时服务端按订阅端发来的 `user` 查 `users` 里对应的账号信息算 token（`nat/conn.go` 的 `serveWs` 调用 `utils/conf/router.go` 的 `WsServer.LookupUser`）。
 
 **停用某个账号**：给对应条目加 `disable: true` 即可，不用删掉整条配置或改密码——`user` 还能查到这条记录，但鉴权会直接拒绝（服务端日志打 `user %s is disabled`，返回给订阅端的错误和"查无此人"一样都是 `user err`，不额外暴露账号是否存在）。这个字段热加载生效（下次订阅端重连时就会被拒），不用重启服务端；订阅端本身仍会按自己的退避策略反复重试，只是连不上。
 
@@ -226,10 +226,53 @@ websocket:
 | `connect` | 要回连的服务端 ws 地址，如 `<公网IP>:3002`。无命令行等价，只能配置文件 |
 | `host` | `connect` 用的 `Host` 头/域名（走 TLS 网关时需要；无则可填服务端 IP） |
 | `user` | 鉴权用户，**与服务端一致** |
-| `pass` | 鉴权密码，**与服务端一致**；参与 token 计算，漏配会鉴权失败 |
+| `pass` | 鉴权密码，**与服务端一致**；参与 token 计算，漏配会鉴权失败。与 `key` 二选一 |
+| `key` | 鉴权私钥（`anyproxy -genkey` 生成），与 `pass` 二选一、都配时用它；对应公钥配在服务端 `users[].key` |
 | `email` | 本订阅端身份，用于服务端定位/选择（HTTP 路径辅助、TCP 路径按它匹配 `server.forward.email`）。非空且不参与 token |
 | `subscribe` | HTTP 头订阅规则数组，每条 `{key, val}`；路径 A 用 |
 | `forward` | 裸 TCP 转发目标规则数组（路径 B），每条 `{port, target}`，见下 |
+
+### 密钥对鉴权（免时钟同步）
+
+密码方案把时间戳算进 token 来防重放，代价是两端时钟差超过 300s 就连不上，而没有 NTP 的机器上这很常见。密钥方案换成**挑战-应答**：服务端每次发一个一次性随机数，订阅端用私钥签名，服务端用公钥验签——随机数只用一次，天然防重放，**完全不看时间**。另一个好处是服务端配置里只有公钥，泄露也无法用于登录。
+
+用 Ed25519 而不是 xray 里那种 X25519：这里要证明的是"我持有私钥"，那是签名的活；X25519 是密钥交换原语，拿来做认证还得两边各有一对密钥再派生共享密钥，步骤更多，而多出来的相互认证在这儿用不上。
+
+生成一对（在哪台机器生成都行，两串是配套的）：
+
+```bash
+anyproxy -genkey
+```
+
+```text
+Private key (client, websocket.client.key): b9sbLhlE...（私钥，给订阅端）
+Public key  (server, websocket.server.users[].key): dU0T51WQ...（公钥，给服务端）
+```
+
+服务端把公钥填进对应账号，**`pass` 留空**：
+
+```yaml
+websocket:
+  server:
+    users:
+      - user: dmit
+        key: dU0T51WQ2lgy9xLT+g8CzQuFjcsc8KYawZx7mNXNoXc=
+```
+
+订阅端填私钥，同样 `pass` 留空：
+
+```yaml
+websocket:
+  client:
+    connect: 1.2.3.4:3002
+    user: dmit
+    key: b9sbLhlEnH7TwyDQTHbrI9G0vBVv683WfJGVAwtJcIB1TRPnVZDaWDL3EtP6DwLNC4WNyxzwphrBnHuY1c2hdw==
+    email: me@example.com
+```
+
+**逐账号选择**：走哪套由服务端该账号的配置决定——配了 `key` 就只认密钥，没配就只认密码。所以可以一部分订阅端用密钥、另一部分继续用密码，互不影响，也不用一次性全改。
+
+**两端配错方案时能看出来**，不会只是"连不上"：服务端配了 key 而订阅端发密码 → 订阅端收到 `auth err: server expects key auth for this user, please set websocket.client.key`；反过来 → `auth err: server has no key for this user, please use websocket.client.pass`。私钥本身格式不对的话订阅端在发出去之前就会报 `websocket.client.key is invalid: ...`。
 
 ### 同时订阅多台 server
 
@@ -275,11 +318,19 @@ websocket:
 
 ## 鉴权与握手
 
-订阅端连服务端的 `/ws`，随后发 `AuthMessage`（`nat/handler.go` 的 `auth`）：
+订阅端连服务端的 `/ws`，随后发 `AuthMessage`（`nat/handler.go` 的 `auth`）。服务端先查账号（`LookupUser`），再按该账号配的是 `key` 还是 `pass` 分支（`nat/conn.go` 的 `authClient`）：
+
+**密码方案**（`authByPass`）：
 
 - `token = md5(user | pass | xtime)`，`xtime` 为当前秒级时间戳；
-- 服务端（`nat/conn.go`）校验：`email` 非空、`user` 在 `server.users` 里能查到且未被 `disable`（`LookupUser`）、`|now - xtime| <= 300`（防重放，**两端时钟需大致同步**）、`token` 与用**该 user 对应的 pass** 算出的一致；
-- 之后订阅端发 `subscribe`（可为空）。若 `subscribe` 为空，仅当该 `email` 命中某条服务端 `forward` 规则时才放行（`isForwardEmail`）——即**纯裸 TCP 转发的订阅端不需要 `subscribe`**。
+- 服务端校验 `email` 非空、`user` 能查到且未被 `disable`、`|now - xtime| <= 300`（防重放，**两端时钟需大致同步**）、`token` 与用**该 user 对应的 pass** 算出的一致。时差超限时回包会带上**实际差了多少秒**，不用去服务端翻日志。
+
+**密钥方案**（`authByKey`，见上面「密钥对鉴权」）：
+
+- `AuthMessage` 里 `KeyAuth: true`，`Token`/`Xtime` 不参与；
+- 服务端回 `AuthChallenge{challenge}`（32 字节一次性随机数）而不是 `ok`，订阅端用私钥签名回 `AuthSignature{signature}`，服务端用配置里的公钥验签。**这条路径不检查时钟**；这一步多一个来回，服务端对签名设了 10s 超时。
+
+之后订阅端发 `subscribe`（可为空）。若 `subscribe` 为空，仅当该 `email` 命中某条服务端 `forward` 规则时才放行（`isForwardEmail`）——即**纯裸 TCP 转发的订阅端不需要 `subscribe`**。
 
 失败会断开并退避重连（订阅端自带重连循环）。
 
@@ -288,14 +339,16 @@ websocket:
 | 参数 | 配置项 |
 |------|--------|
 | `-ws-listen` | `websocket.server.listen` |
+| `-genkey` | 生成一对鉴权密钥并退出（私钥填 `websocket.client.key`，公钥填 `websocket.server.users[].key`） |
 
-> 订阅端(客户端)**没有命令行参数**，`connect`/`user`/`pass`/`email`/`subscribe`/`forward` 都只能写在配置文件里；同时订阅多台 server 也只能用 `websocket.clients[]`。所以裸 TCP 转发（依赖 `forward`）和订阅端相关配置只能用配置文件。
+> 订阅端(客户端)**没有命令行参数**，`connect`/`user`/`pass`/`key`/`email`/`subscribe`/`forward` 都只能写在配置文件里；同时订阅多台 server 也只能用 `websocket.clients[]`。所以裸 TCP 转发（依赖 `forward`）和订阅端相关配置只能用配置文件。
 
 ## 常见坑
 
 - **`user`/`pass` 两端不一致** → 订阅端 token 校验失败、连不上。`pass` 必须两端都配（旧文档示例曾漏配订阅端 `pass`）；订阅端的 `user` 要能在服务端 `server.users` 里查到、且该条没设 `disable: true`，否则报 `user err`。
 - **`email` 对不上** → 裸 TCP 转发时服务端日志 `no forward ... no subscriber for email ...`。服务端 `server.forward.email` 必须等于某订阅端的 `client.email`。
-- **时钟漂移 > 300s** → `xtime is error` 鉴权失败。保证两端时间同步。
+- **时钟漂移 > 300s** → 鉴权失败，订阅端会收到 `xtime err: your clock differs from the server by Ns ...`（带实际时差）。保证两端时间同步，或**改用密钥对鉴权**（见上），那套不看时钟。
+- **被服务端 `allowIP` 挡掉** → 订阅端日志 `ws connect err: ... (server replied 403 Forbidden ...)`。注意 IPv6 地址会轮换（RFC 4941 临时地址），白名单建议写前缀网段而不是单个地址。
 - **订阅端只认白名单**：只 dial 自己 `forward` 里写死的 `target`，未映射的 `port` 直接拒绝——服务端入口端口被人乱连也打不进内网。
 - **路径 A 的 `CONNECT` 不支持**：HTTP 头订阅路径只处理非 `CONNECT` 的 HTTP 请求。
 

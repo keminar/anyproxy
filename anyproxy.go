@@ -48,6 +48,7 @@ var (
 	gGeoOut          string
 	gCheck           bool
 	gCheckFix        bool
+	gGenKey          bool
 )
 
 func init() {
@@ -68,6 +69,8 @@ func init() {
 	flag.StringVar(&gGeoCat, "geo-cat", "", "geo-extract: comma-separated categories to keep, e.g. cn,google")
 	flag.StringVar(&gGeoOut, "geo-out", "", "geo-extract: output .dat path")
 	// 系统调优检查/应用(仅 Linux): 对照建议的 sysctl/ulimit 报告, 或一键写入并应用。
+	flag.BoolVar(&gGenKey, "genkey", false, "Generate a websocket auth key pair (private for client, public for server) and exit")
+
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
 	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
 }
@@ -95,6 +98,18 @@ func main() {
 			log.Fatalln("geo-extract:", err)
 		}
 		fmt.Printf("geo-extract: 已从 %s 提取类别 [%s] 写入 %s\n", gGeoIn, gGeoCat, gGeoOut)
+		return
+	}
+	// 生成 websocket 鉴权密钥对: 私钥配订阅方 websocket.client.key, 公钥配服务端
+	// websocket.server.users[].key。与 user/pass 二选一, 好处是鉴权走挑战-应答,
+	// 不依赖两端时钟同步, 且服务端只存公钥。
+	if gGenKey {
+		priv, pub, err := nat.GenerateKeyPair()
+		if err != nil {
+			log.Fatalln("genkey:", err)
+		}
+		fmt.Printf("Private key (client, websocket.client.key): %s\n", priv)
+		fmt.Printf("Public key  (server, websocket.server.users[].key): %s\n", pub)
 		return
 	}
 	// 系统调优检查/一键应用(仅 Linux), 完成即退出。

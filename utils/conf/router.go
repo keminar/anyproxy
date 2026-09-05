@@ -166,8 +166,14 @@ func (d ClientDirect) ValidProtocol() bool {
 
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
 type ServerUser struct {
-	User    string `yaml:"user"`    //认证用户
-	Pass    string `yaml:"pass"`    //密码
+	User string `yaml:"user"` //认证用户
+	Pass string `yaml:"pass"` //密码(与 key 二选一)
+	// Key 为该账号的 Ed25519 公钥(base64), 与 Pass 二选一; 两者都配时优先用 Key。
+	// 用 anyproxy -genkey 生成密钥对: 私钥配在订阅方 client.key, 公钥配在这里。
+	//
+	// 相比密码的两个好处: 鉴权走挑战-应答, 不依赖两端时钟同步(密码方案的 token 带
+	// 时间戳, 时差超限即连不上); 服务端只存公钥, 配置泄露也无法用于登录。
+	Key     string `yaml:"key"`
 	Disable bool   `yaml:"disable"` //true 时该账号停用: 鉴权直接拒绝, 不用删配置/改密码就能临时停掉某个订阅端
 }
 
@@ -198,7 +204,8 @@ type WsClient struct {
 	Connect   string          `yaml:"connect"`   //连接的 ip:端口
 	Host      string          `yaml:"host"`      //connect 的域名(Host头)
 	User      string          `yaml:"user"`      //认证用户(发给服务端)
-	Pass      string          `yaml:"pass"`      //密码
+	Pass      string          `yaml:"pass"`      //密码(与 key 二选一)
+	Key       string          `yaml:"key"`       //Ed25519 私钥(base64), 与 pass 二选一; 两者都配时优先用 key。见 ServerUser.Key
 	Email     string          `yaml:"email"`     //Email用于定位用户, 不鉴权
 	Subscribe []Subscribe     `yaml:"subscribe"` //订阅头部信息
 	Forward   []ClientForward `yaml:"forward"`   //裸TCP端口转发目标(见 ClientForward)

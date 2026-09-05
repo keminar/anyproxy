@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,6 +28,10 @@ const (
 	// 窗口越小越安全, 但两端时钟不同步就会连不上 —— 想彻底摆脱这个限制, 用密钥对
 	// 鉴权(见 docs/websocket.md), 那套是挑战-应答, 不依赖时钟。
 	authSkewLimit int64 = 300
+
+	// authKeyWait 密钥鉴权里等对端回签名的时限。这一步多一个来回, 不设超时的话
+	// 一个不回包的连接会一直占着。
+	authKeyWait = 10 * time.Second
 )
 
 var (
@@ -120,21 +125,8 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, []byte("email error"))
 		return
 	}
-	// 时间窗口必须取绝对值: 原先只判 xtime-user.Xtime > 300, 即只挡住"客户端慢于
-	// 服务端", 客户端时钟快多少都能通过, 防重放窗口是漏的。
-	xtime := time.Now().Unix()
-	skew := xtime - user.Xtime
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > authSkewLimit {
-		log.Printf("serveWs client email %s ignore, clock skew %ds exceeds %ds\n", user.Email, skew, authSkewLimit)
-		// 把实际时差告诉对方: 只说"时间不对"的话, 对端不知道差多少、往哪个方向差,
-		// 而它自己是看不到服务端时间的。
-		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(
-			"xtime err: your clock differs from the server by %ds (limit %ds), please sync time (NTP)", skew, authSkewLimit)))
-		return
-	}
+	// 先查账号再验凭据: 走哪套鉴权(密码还是密钥)由这个账号自己的配置决定, 而时钟检查
+	// 只对密码方案有意义 —— 密钥方案存在的理由正是不依赖时钟, 不能放在分支前一刀切。
 	su, found := conf.RouterConfig.Websocket.Server.LookupUser(user.User)
 	if !found || su.Disable {
 		if found {
@@ -145,11 +137,8 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, []byte("user err"))
 		return
 	}
-
-	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, su.Pass, user.Xtime))
-	if err != nil || user.Token != token {
-		log.Printf("serveWs client email %s ignore, token is error\n", user.Email)
-		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+	if err := authClient(conn, user, su); err != nil {
+		log.Printf("serveWs client email %s ignore, %v\n", user.Email, err)
 		return
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
@@ -257,4 +246,77 @@ func getIPAdress(req *http.Request, head []string) string {
 		ipAddress, _, _ = net.SplitHostPort(req.RemoteAddr)
 	}
 	return ipAddress
+}
+
+// authClient 校验一条订阅方的凭据。两套方案二选一, 由服务端上这个账号配了 key 还是
+// pass 决定: 配了 key 就只认密钥, 否则只认密码。配错的一方要能从回包看出是哪种不匹配,
+// 否则现象只是"连不上"。
+//
+// 失败时原因已经回给对端, 返回的 error 只用于服务端日志。
+func authClient(conn *websocket.Conn, user AuthMessage, su conf.ServerUser) error {
+	if su.Key != "" {
+		if !user.KeyAuth {
+			conn.WriteMessage(websocket.TextMessage, []byte(
+				"auth err: server expects key auth for this user, please set websocket.client.key"))
+			return fmt.Errorf("user %s is key-auth, but client sent a password token", user.User)
+		}
+		return authByKey(conn, user, su.Key)
+	}
+	if user.KeyAuth {
+		conn.WriteMessage(websocket.TextMessage, []byte(
+			"auth err: server has no key for this user, please use websocket.client.pass"))
+		return fmt.Errorf("user %s is password-auth, but client asked for key auth", user.User)
+	}
+	return authByPass(conn, user, su.Pass)
+}
+
+// authByPass 密码方案: token = md5(user|pass|xtime), xtime 必须落在时间窗口内。
+func authByPass(conn *websocket.Conn, user AuthMessage, pass string) error {
+	// 时间窗口必须取绝对值: 原先只判 xtime-user.Xtime > 300, 即只挡住"客户端慢于
+	// 服务端", 客户端时钟快多少都能通过, 防重放窗口是漏的。
+	skew := time.Now().Unix() - user.Xtime
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > authSkewLimit {
+		// 把实际时差告诉对方: 只说"时间不对"的话, 对端不知道差多少、往哪个方向差,
+		// 而它自己是看不到服务端时间的。
+		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(
+			"xtime err: your clock differs from the server by %ds (limit %ds), please sync time (NTP) or switch to key auth",
+			skew, authSkewLimit)))
+		return fmt.Errorf("clock skew %ds exceeds %ds", skew, authSkewLimit)
+	}
+	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, pass, user.Xtime))
+	if err != nil || user.Token != token {
+		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+		return errors.New("token is error")
+	}
+	return nil
+}
+
+// authByKey 密钥方案: 服务端发一次性随机数, 客户端用私钥签名, 服务端用配置里的公钥验签。
+// 随机数只用一次, 防重放不靠时间戳, 所以这条路径完全不看时钟。
+func authByKey(conn *websocket.Conn, user AuthMessage, pubKey string) error {
+	challengeB64, challenge, err := newAuthChallenge()
+	if err != nil {
+		conn.WriteMessage(websocket.TextMessage, []byte("auth err: server failed to create challenge"))
+		return fmt.Errorf("create challenge: %w", err)
+	}
+	if err := conn.WriteJSON(AuthChallenge{Challenge: challengeB64}); err != nil {
+		return fmt.Errorf("send challenge: %w", err)
+	}
+	// 这一步比密码方案多一个来回, 必须有超时: 对端不回签名的话, 没有 deadline 就会
+	// 一直挂在这里占着连接。读完立刻清掉, 后面的 readPump 会设它自己的 deadline。
+	conn.SetReadDeadline(time.Now().Add(authKeyWait))
+	var sig AuthSignature
+	err = conn.ReadJSON(&sig)
+	conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return fmt.Errorf("read signature: %w", err)
+	}
+	if err := verifyChallenge(pubKey, challenge, sig.Signature); err != nil {
+		conn.WriteMessage(websocket.TextMessage, []byte("key err: "+err.Error()))
+		return fmt.Errorf("key auth failed: %w", err)
+	}
+	return nil
 }

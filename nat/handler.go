@@ -2,7 +2,9 @@ package nat
 
 import (
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -150,7 +152,7 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 	defer c.Close()
 
 	ch := newClientHandler(c)
-	err = ch.auth(live.User, live.Pass, live.Email, w.direct != nil)
+	err = ch.auth(live.User, live.Pass, live.Key, live.Email, w.direct != nil)
 	if err != nil {
 		w.logf("auth: %v", err)
 
@@ -244,8 +246,13 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 	return &ClientHandler{c: c}
 }
 
-// auth 认证。direct 表示本端参与 IPv6 QUIC 直连, 供服务端放行空订阅(见 AuthMessage.Direct)。
-func (h *ClientHandler) auth(user string, pass string, email string, direct bool) error {
+// auth 认证。密码与密钥二选一: 配了 key 走挑战-应答(不依赖两端时钟), 否则走原来的
+// md5(user|pass|xtime)。direct 表示本端参与 IPv6 QUIC 直连, 供服务端放行空订阅
+// (见 AuthMessage.Direct)。
+func (h *ClientHandler) auth(user, pass, key, email string, direct bool) error {
+	if key != "" {
+		return h.authKey(user, key, email, direct)
+	}
 	xtime := time.Now().Unix()
 	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user, pass, xtime))
 	if err != nil {
@@ -253,6 +260,33 @@ func (h *ClientHandler) auth(user string, pass string, email string, direct bool
 	}
 	msg := AuthMessage{User: user, Token: token, Xtime: xtime, Email: email, Direct: direct}
 	return h.ask(&msg)
+}
+
+// authKey 密钥鉴权: 先声明要走密钥, 服务端回一个一次性随机数, 本端用私钥签名再发回去。
+// 服务端那边回的可能是挑战, 也可能是一句拒绝的说明(比如该账号其实配的是密码), 两者
+// 都得能识别, 否则本端只会看到"连不上"。
+func (h *ClientHandler) authKey(user, key, email string, direct bool) error {
+	// 先自检私钥: 配错了要在本端就说清楚, 不然错误要等服务端验签失败才回来, 看着像
+	// 是对端的问题。
+	if _, err := signChallenge(key, base64.StdEncoding.EncodeToString(make([]byte, authChallengeSize))); err != nil {
+		return fmt.Errorf("websocket.client.key is invalid: %w", err)
+	}
+	if err := h.c.WriteJSON(&AuthMessage{User: user, Email: email, KeyAuth: true, Direct: direct}); err != nil {
+		return err
+	}
+	message, err := h.readReply()
+	if err != nil {
+		return err
+	}
+	var ch AuthChallenge
+	if json.Unmarshal(message, &ch) != nil || ch.Challenge == "" {
+		return errors.New("fail, " + string(message))
+	}
+	sig, err := signChallenge(key, ch.Challenge)
+	if err != nil {
+		return err
+	}
+	return h.ask(&AuthSignature{Signature: sig})
 }
 
 // subscribe 订阅
@@ -269,12 +303,25 @@ func (h *ClientHandler) ask(v interface{}) error {
 	if err != nil {
 		return err
 	}
+	message, err := h.readReply()
+	if err != nil {
+		return err
+	}
+	if string(message) != "ok" {
+		return errors.New("fail, " + string(message))
+	}
+	return nil
+}
+
+// readReply 读服务端的一条回包, 超时返回 error。
+func (h *ClientHandler) readReply() ([]byte, error) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer func() {
 		ticker.Stop()
 	}()
 
-	send := make(chan []byte)
+	// 带缓冲: 超时走掉后读到的包没人接, 无缓冲的话这个 goroutine 会永远卡在发送上。
+	send := make(chan []byte, 1)
 	go func() {
 		defer close(send)
 		_, message, _ := h.c.ReadMessage()
@@ -283,15 +330,12 @@ func (h *ClientHandler) ask(v interface{}) error {
 	select {
 	case message, ok := <-send: //ok为判断channel是否关闭
 		if !ok {
-			return errors.New("fail")
+			return nil, errors.New("fail")
 		}
-		if string(message) != "ok" {
-			return errors.New("fail, " + string(message))
-		}
+		return message, nil
 	case <-ticker.C:
-		return errors.New("timeout")
+		return nil, errors.New("timeout")
 	}
-	return nil
 }
 
 // md5

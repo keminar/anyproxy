@@ -36,6 +36,11 @@ type AuthMessage struct {
 	// 直连的双方都会在握手阶段被 "subscribe empty err" 拒掉。
 	// 不参与 token 计算; 旧版客户端不发这个字段, 反序列化为 false, 行为不变。
 	Direct bool
+
+	// KeyAuth 表示本端要走密钥对鉴权(client.key), 此时 Token/Xtime 无意义。
+	// 服务端见到它会回一个 AuthChallenge 而不是 "ok", 客户端签名后再发
+	// AuthSignature, 见 authkey.go。旧版客户端不发这个字段, 走原来的密码流程。
+	KeyAuth bool
 }
 
 // SubscribeMessage 订阅
