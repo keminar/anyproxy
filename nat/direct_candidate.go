@@ -10,8 +10,12 @@ import (
 // 直连候选地址与择优。
 //
 // 原先只有一个候选(反射器观测到的 IPv6 端点), 通不了就整条失败。现在改成**多条路
-// 同时打**: IPv4、IPv6、端口映射(UPnP/PCP)、以及本机接口上的地址, 全部并行探测,
-// 哪条先回包就先被观测到。
+// 同时打**: IPv4、IPv6、端口映射(UPnP/PCP), 全部并行探测, 哪条先回包就先被观测到。
+//
+// 不收本机接口地址那一类候选: 那只在"两台机器同网段"时才有用, 而面向的场景是跨网
+// (中间隔着 CGNAT 或真正的公网), 同网段直连不是要解决的问题(见 direct_reflect.go
+// 的 gatherCandidates)。candSrcLocal 仍留着给测试当通用标签用, 也留一条以后要做
+// 同网段优化时的接口。
 //
 // 多条都通时才谈优先级, 按实测 RTT 选, 并按地址类型给一个偏置(相当于给它减去一点
 // RTT, 让它更容易胜出):
@@ -21,6 +25,9 @@ import (
 //	私有 / CGNAT  -20ms   同网段直连优于绕公网
 //	公网          0       基准
 //
+// 这套偏置分档是通用的评分规则, 不是专为哪一类候选来源定的: 即使目前的候选来源都
+// 是跨网场景产出的公网/CGNAT 地址, 分档逻辑本身不需要跟着改。
+//
 // IPv4 与 IPv6 的**公网**地址是平等竞争的, 偏置都是 0, 纯比实测 RTT。这里没有"优先
 // IPv6"这种先验 —— 之前那套 IPv6-only 是因为当时只有那条路通, 不是因为它更好。
 
@@ -29,7 +36,7 @@ const (
 	candSrcReflectV4 = "v4"      //反射器观测到的 IPv4 端点
 	candSrcReflectV6 = "v6"      //反射器观测到的 IPv6 端点
 	candSrcPortmap   = "portmap" //UPnP / PCP / NAT-PMP 映射来的端点
-	candSrcLocal     = "local"   //本机接口上的地址(同机/同网段时才有意义)
+	candSrcLocal     = "local"   //本机接口上的地址; 目前没有代码会产出这类候选(见上), 常量留给测试用
 )
 
 // 地址类型偏置。数值是**减去**的 RTT, 所以越负越优先。
@@ -173,36 +180,6 @@ func dedupCandidates(cands []directCandidate) []directCandidate {
 		}
 		seen[c.Addr] = true
 		out = append(out, c)
-	}
-	return out
-}
-
-// localCandidates 列本机各接口上的地址, 配上给定端口。
-//
-// 这些地址只在"两台机器同机或同网段"时才有用, 但那恰恰是最值得走的情况: 同一个局域网
-// 里绕到公网再回来既慢又可能被发夹 NAT 挡住。探测本身很便宜, 通不了就自然出局。
-func localCandidates(port int) []directCandidate {
-	if port == 0 {
-		return nil
-	}
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil
-	}
-	var out []directCandidate
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok || ipnet.IP == nil || ipnet.IP.IsUnspecified() {
-			continue
-		}
-		// 多播地址不是端点; 未指定地址更不是。
-		if ipnet.IP.IsMulticast() {
-			continue
-		}
-		out = append(out, directCandidate{
-			Addr:   net.JoinHostPort(ipnet.IP.String(), fmt.Sprint(port)),
-			Source: candSrcLocal,
-		})
 	}
 	return out
 }

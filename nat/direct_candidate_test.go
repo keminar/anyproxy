@@ -2,7 +2,6 @@ package nat
 
 import (
 	"errors"
-	"net"
 	"strings"
 	"testing"
 	"time"
@@ -154,31 +153,5 @@ func TestDedupCandidates(t *testing.T) {
 	}
 	if got[0].Source != candSrcReflectV4 {
 		t.Fatalf("dedup should keep the first occurrence, got %v", got[0])
-	}
-}
-
-func TestLocalCandidates(t *testing.T) {
-	if got := localCandidates(0); got != nil {
-		t.Fatalf("port 0 means the socket is not bound yet, want no candidates, got %v", got)
-	}
-	got := localCandidates(4242)
-	if len(got) == 0 {
-		t.Skip("host reports no interface addresses")
-	}
-	for _, c := range got {
-		if c.Source != candSrcLocal {
-			t.Errorf("%v: wrong source", c)
-		}
-		host, port, err := net.SplitHostPort(c.Addr)
-		if err != nil {
-			t.Errorf("%v: not a host:port: %v", c, err)
-			continue
-		}
-		if port != "4242" {
-			t.Errorf("%v: want port 4242", c)
-		}
-		if host == "" {
-			t.Errorf("%v: empty host", c)
-		}
 	}
 }

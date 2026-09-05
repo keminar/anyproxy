@@ -260,7 +260,12 @@ func (d *directPeer) probeReflector(raddr *net.UDPAddr) (string, error) {
 
 // gatherCandidates 收集本机的全部候选端点, **并行**探测:
 //
-//	反射器 IPv4 端点 / 反射器 IPv6 端点 / 端口映射(UPnP·PCP) / 本机接口地址
+//	反射器 IPv4 端点 / 反射器 IPv6 端点 / 端口映射(UPnP·PCP)
+//
+// 不收本机接口地址: 那一类候选只在"两台机器同网段"时才有用, 而这里面向的场景是
+// 跨网(两台机器分处不同网络, 中间要么隔着运营商 NAT/CGNAT, 要么就是真正的公网),
+// 同网段直连不是要解决的问题, 报出去只会占服务端候选上限的名额、干扰排查。真到了
+// 需要同网段优化的时候再加回来。
 //
 // 任何一路失败都只是少一个候选, 不影响其它路 —— 这正是多候选的意义: 以前只探 IPv6,
 // 探不到整条直连就废了。全部失败才算失败。
@@ -310,7 +315,7 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 		}(r.addr, r.src)
 	}
 
-	// 端口映射与本机接口地址都不依赖反射器, 一起并行。
+	// 端口映射不依赖反射器, 一起并行。
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -321,10 +326,6 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 		}
 		add(directCandidate{Addr: ep, Source: candSrcPortmap})
 	}()
-
-	for _, c := range localCandidates(int(port)) {
-		add(c)
-	}
 
 	wg.Wait()
 	cands = dedupCandidates(cands)
