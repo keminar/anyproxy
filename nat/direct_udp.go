@@ -188,6 +188,15 @@ type directUDPEntry struct {
 	rule conf.ClientDirect
 	conn *net.UDPConn
 
+	// 累计流量。TCP 那条路每条连接关闭时会打 up/down 汇总, UDP 没有"关闭"事件,
+	// 只能累计后按周期汇报 —— 排查"RDP 到底有没有走 UDP 通道"时这是唯一依据。
+	upBytes   atomic.Int64 // 用户 -> 对端
+	upPkts    atomic.Int64
+	downBytes atomic.Int64 // 对端 -> 用户
+	downPkts  atomic.Int64
+	// lastReported 上次汇报时的总字节, 用来跳过没有新流量的那些轮次。
+	lastReported atomic.Int64
+
 	mu       sync.Mutex
 	byAddr   map[string]uint32
 	byID     map[uint32]*net.UDPAddr
@@ -244,7 +253,10 @@ func (e *directUDPEntry) pump(getSession func() (*directSession, error)) {
 		sess.touch()
 		if err := sendDatagram(sess.conn, sessionID, e.rule.Port, buf[:n]); err != nil {
 			e.peer.logf("direct udp entry %s: send failed: %v", e.rule.Listen, err)
+			continue
 		}
+		e.upBytes.Add(int64(n))
+		e.upPkts.Add(1)
 	}
 }
 
@@ -276,6 +288,25 @@ func (e *directUDPEntry) sessionFor(from *net.UDPAddr) uint32 {
 	return id
 }
 
+// stats 返回累计流量, 供周期汇报。
+func (e *directUDPEntry) stats() (upBytes, upPkts, downBytes, downPkts int64) {
+	return e.upBytes.Load(), e.upPkts.Load(), e.downBytes.Load(), e.downPkts.Load()
+}
+
+// sessionCount 当前活着的用户会话数。
+func (e *directUDPEntry) sessionCount() int {
+	now := time.Now()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for _, seen := range e.lastSeen {
+		if now.Sub(seen) <= directUDPIdle {
+			n++
+		}
+	}
+	return n
+}
+
 // hasActiveSessions 是否还有活着的用户会话(任一源地址在空闲窗口内有过流量)。
 // 供 QUIC 连接的空闲回收判断用: UDP 没有连接可数, 这是唯一能说明"还在用"的依据。
 func (e *directUDPEntry) hasActiveSessions() bool {
@@ -303,7 +334,10 @@ func (e *directUDPEntry) deliver(sessionID uint32, payload []byte) {
 	}
 	if _, err := e.conn.WriteToUDP(payload, addr); err != nil {
 		e.peer.logf("direct udp entry %s: reply to %s failed: %v", e.rule.Listen, addr, err)
+		return
 	}
+	e.downBytes.Add(int64(len(payload)))
+	e.downPkts.Add(1)
 }
 
 // ---------- datagram 编解码 ----------

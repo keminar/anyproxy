@@ -342,6 +342,90 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDirectUDPStats UDP 两个方向的字节都要被计入。
+//
+// UDP 没有"连接关闭"事件, 不主动统计就完全看不出数据有没有在走 —— 排查"mstsc 到底
+// 用上 UDP 图形通道没有"时这是唯一依据, 统计恒为 0 会让人误判成没通。
+func TestDirectUDPStats(t *testing.T) {
+	tconn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp target: %v", err)
+	}
+	defer tconn.Close()
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := tconn.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			tconn.WriteToUDP(buf[:n], from)
+		}
+	}()
+
+	const port = uint16(3389)
+	c := newAcceptPeer(t, map[uint16]string{port: tconn.LocalAddr().String()})
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("ensure transport: %v", err)
+	}
+	const token = "test-token-udp-stats"
+	c.tokens.put(token, port)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect peer: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, port); err != nil {
+		t.Fatalf("authenticate session: %v", err)
+	}
+	go a.receiveDatagrams(sess)
+
+	entry := &directUDPEntry{
+		peer:     a,
+		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", Port: port},
+		byAddr:   make(map[string]uint32),
+		byID:     make(map[uint32]*net.UDPAddr),
+		lastSeen: make(map[uint32]time.Time),
+	}
+	econn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen udp entry: %v", err)
+	}
+	defer econn.Close()
+	entry.conn = econn
+	sess.bindUDPEntry(port, entry)
+	go entry.pump(func() (*directSession, error) { return sess, nil })
+
+	user, err := net.DialUDP("udp", nil, econn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dial entry: %v", err)
+	}
+	defer user.Close()
+
+	payload := "counted bytes"
+	if _, err := user.Write([]byte(payload)); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	user.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 2048)
+	if _, err := user.Read(buf); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+
+	up, upPkts, down, downPkts := entry.stats()
+	if up != int64(len(payload)) || upPkts != 1 {
+		t.Errorf("up stats = %dB/%dpkt, want %dB/1pkt", up, upPkts, len(payload))
+	}
+	if down != int64(len(payload)) || downPkts != 1 {
+		t.Errorf("down stats = %dB/%dpkt, want %dB/1pkt", down, downPkts, len(payload))
+	}
+	if n := entry.sessionCount(); n != 1 {
+		t.Errorf("session count = %d, want 1", n)
+	}
+}
+
 // TestDirectProbeEndpoint 反射器必须把**QUIC 那个 socket**的真实源端口回给订阅方。
 // 这是整套地址交换的地基: websocket 是 TCP、是另一个 socket, 它的地址不能拿来当 QUIC 的
 // 端点用(内核按 RFC 6724 按目的地分别选源, 隐私临时地址还会轮换)。

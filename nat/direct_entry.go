@@ -215,6 +215,12 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 		d.mu.Unlock()
 	}()
 
+	// 把本端的三个地址都打出来: 本地 socket、反射器观测到的外网端点、以及稍后拿到的
+	// 对端端点。排查直连问题时这三者缺一不可 —— 本地端口用于抓包定位, 观测端点用于
+	// 判断 NAT/防火墙是否改写, 对端端点用于确认服务端转交的是不是预期的那台机器。
+	d.logf("requesting %s: local socket port %d, my endpoint %s (as seen by the reflector)",
+		r.Email, d.localUDPPort(), endpoint)
+
 	req := DirectRequest{Email: r.Email, Port: r.Port, Token: token, Endpoint: endpoint}
 	if err := d.send(METHOD_DIRECT_REQUEST, reqID, req); err != nil {
 		return "", offer, fmt.Errorf("ask server for peer endpoint: %w", err)
@@ -231,6 +237,8 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	if offer.PeerAddr == "" || offer.Fingerprint == "" {
 		return "", offer, errors.New("server returned an incomplete offer")
 	}
+	d.logf("server says %s is at %s (fingerprint %s); dialing %s -> %s",
+		r.Email, offer.PeerAddr, shortFP(offer.Fingerprint), endpoint, offer.PeerAddr)
 	return token, offer, nil
 }
 
@@ -311,6 +319,7 @@ func (d *directPeer) reapSessions() {
 	t := time.NewTicker(directReapEvery)
 	defer t.Stop()
 	for range t.C {
+		d.logUDPTraffic()
 		var stale []string
 		d.mu.Lock()
 		for email, s := range d.sessions {
@@ -328,6 +337,37 @@ func (d *directPeer) reapSessions() {
 			}(email, s)
 		}
 		d.mu.Unlock()
+	}
+}
+
+// logUDPTraffic 周期汇报各 UDP 入口的累计流量。
+//
+// TCP 那条路每条连接关闭时会打一行 up/down 汇总, 但 UDP 没有"关闭"事件, 不主动汇报
+// 就完全看不出数据有没有在走 —— 排查"mstsc 到底用上 UDP 图形通道没有"时, 这是唯一
+// 能直接回答的依据。只在有变化时打, 免得空闲期刷屏。
+func (d *directPeer) logUDPTraffic() {
+	d.mu.Lock()
+	entries := make(map[uint16]*directUDPEntry)
+	for _, s := range d.sessions {
+		s.udpMu.Lock()
+		for port, e := range s.udpEntries {
+			entries[port] = e
+		}
+		s.udpMu.Unlock()
+	}
+	d.mu.Unlock()
+
+	for _, e := range entries {
+		up, upPkts, down, downPkts := e.stats()
+		if up == 0 && down == 0 {
+			continue
+		}
+		last := e.lastReported.Swap(up + down)
+		if last == up+down {
+			continue // 这一轮没有新流量
+		}
+		d.logf("direct udp %s -> email %s: sessions=%d up=%dB/%dpkt down=%dB/%dpkt",
+			e.rule.Listen, e.rule.Email, e.sessionCount(), up, upPkts, down, downPkts)
 	}
 }
 

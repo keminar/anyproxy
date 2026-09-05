@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -136,9 +137,13 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 		NetDial:          func(network, addr string) (net.Conn, error) { return bypassDial(network, addr, 30*time.Second) },
 		HandshakeTimeout: 45 * time.Second,
 	}
-	c, _, err := wsDialer.Dial(u.String(), h)
+	c, resp, err := wsDialer.Dial(u.String(), h)
 	if err != nil {
-		w.logf("ws connect err: %v", err)
+		// 必须把 HTTP 响应也读出来: 服务端在 upgrade 之前拒绝时(如 allowIP 命中回
+		// 403)只会返回普通 HTTP 响应, 而 gorilla 一律报 "websocket: bad handshake",
+		// 把状态码和原因全丢掉 —— 现象是本端只看到"连不上"并无限重连, 完全不知道是
+		// 被白名单挡了。
+		w.logf("ws connect err: %v%s", err, httpRejectReason(resp))
 		time.Sleep(time.Duration(3) * time.Second)
 		return
 	}
@@ -209,6 +214,25 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 			return
 		}
 	}
+}
+
+// httpRejectReason 从被拒的 HTTP 响应里提取状态码与响应体, 拼成可读的原因。
+// 无响应(纯网络错误)时返回空串。
+func httpRejectReason(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	reason := strings.TrimSpace(string(body))
+	if reason == "" {
+		return fmt.Sprintf(" (server replied %s)", resp.Status)
+	}
+	hint := ""
+	if resp.StatusCode == http.StatusForbidden {
+		hint = "; 本端地址不在服务端 websocket.server.allowIP 里(注意 IPv6 地址会轮换, 建议白名单写前缀网段)"
+	}
+	return fmt.Sprintf(" (server replied %s: %s%s)", resp.Status, reason, hint)
 }
 
 // ClientHandler 认证助手

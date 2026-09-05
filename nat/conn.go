@@ -22,6 +22,11 @@ const (
 
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
+
+	// authSkewLimit 鉴权允许的最大时钟偏差(秒), 双向。token 里带时间戳是为了防重放,
+	// 窗口越小越安全, 但两端时钟不同步就会连不上 —— 想彻底摆脱这个限制, 用密钥对
+	// 鉴权(见 docs/websocket.md), 那套是挑战-应答, 不依赖时钟。
+	authSkewLimit int64 = 300
 )
 
 var (
@@ -115,10 +120,19 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, []byte("email error"))
 		return
 	}
+	// 时间窗口必须取绝对值: 原先只判 xtime-user.Xtime > 300, 即只挡住"客户端慢于
+	// 服务端", 客户端时钟快多少都能通过, 防重放窗口是漏的。
 	xtime := time.Now().Unix()
-	if xtime-user.Xtime > 300 {
-		log.Printf("serveWs client email %s ignore, xtime is error\n", user.Email)
-		conn.WriteMessage(websocket.TextMessage, []byte("xtime err, please check local time"))
+	skew := xtime - user.Xtime
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > authSkewLimit {
+		log.Printf("serveWs client email %s ignore, clock skew %ds exceeds %ds\n", user.Email, skew, authSkewLimit)
+		// 把实际时差告诉对方: 只说"时间不对"的话, 对端不知道差多少、往哪个方向差,
+		// 而它自己是看不到服务端时间的。
+		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(
+			"xtime err: your clock differs from the server by %ds (limit %ds), please sync time (NTP)", skew, authSkewLimit)))
 		return
 	}
 	su, found := conf.RouterConfig.Websocket.Server.LookupUser(user.User)
