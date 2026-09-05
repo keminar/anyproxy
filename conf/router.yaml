@@ -254,7 +254,7 @@ websocket:
     forward:
       # - port: 2222
       #   target: 127.0.0.1:22
-    # ===== IPv6 QUIC 直连(数据不经服务端, 详见 docs/websocket.md 路径 C) =====
+    # ===== QUIC 直连(数据不经服务端, 详见 docs/websocket.md 路径 C) =====
     # 允许别的订阅方直连本机(监听按需起, 平时不占端口); 落地目标仍受上面 forward 白名单约束
     directAccept: false
     # 本机直连入口: 在 listen 起监听, 连接直接送给 email 对应的订阅方, 由对方按 port 查它的 forward

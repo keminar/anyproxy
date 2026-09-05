@@ -37,7 +37,7 @@ type Client struct {
 	forward map[uint16]string // 替代原全局 localForward, 每条 server 连接一份, 避免入口端口撞车
 	tag     string            // 日志前缀, 区分多条并发的 server 连接
 
-	// IPv6 QUIC 直连运行时(仅订阅方侧使用, 见 nat/direct_accept.go / direct_entry.go)。
+	// QUIC 直连运行时(仅订阅方侧使用, 见 nat/direct_accept.go / direct_entry.go)。
 	// 服务端侧不存端点: 端点由对端在收到请求时当场探测并回报, 不预先缓存。
 	directMu sync.Mutex
 	direct   *directPeer

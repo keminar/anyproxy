@@ -34,7 +34,7 @@ type wsClientConn struct {
 	forward   map[uint16]string
 	tempDelay time.Duration
 	tag       string      // 日志前缀, 用 cfg.Connect 区分是哪条连接
-	direct    *directPeer // IPv6 QUIC 直连运行时, 未启用时为 nil
+	direct    *directPeer // QUIC 直连运行时, 未启用时为 nil
 	uplink    *udpUplink  // UDP 中继上行运行时, 没有 forward 目标时为 nil
 }
 
@@ -82,7 +82,7 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	go w.hub.run()
 	go w.bridge.run()
 
-	// IPv6 QUIC 直连。
+	// QUIC 直连。
 	//
 	// 入口 TCP/UDP 监听在这里起一次: 下面的 for 循环每次重连都会新建 Client, 放进
 	// connect() 里会重复绑定同一端口。
@@ -259,7 +259,7 @@ func newClientHandler(c *websocket.Conn) *ClientHandler {
 }
 
 // auth 认证。密码与密钥二选一: 配了 key 走挑战-应答(不依赖两端时钟), 否则走原来的
-// md5(user|pass|xtime)。direct 表示本端参与 IPv6 QUIC 直连, 供服务端放行空订阅
+// md5(user|pass|xtime)。direct 表示本端参与 QUIC 直连, 供服务端放行空订阅
 // (见 AuthMessage.Direct)。
 func (h *ClientHandler) auth(user, pass, key, email string, direct bool) error {
 	if key != "" {

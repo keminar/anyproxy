@@ -159,7 +159,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	if len(subscribe) == 0 {
 		// 空订阅只在两种情况下放行:
 		//   1. 该 email 是某条 server.forward 规则的目标(仅走裸TCP转发);
-		//   2. 该订阅方参与 IPv6 QUIC 直连 —— 直连的入口在订阅方自己机器上, 服务端
+		//   2. 该订阅方参与 QUIC 直连 —— 直连的入口在订阅方自己机器上, 服务端
 		//      不需要配 server.forward, 订阅方也不需要头部订阅规则, 不放行的话直连
 		//      双方都会卡在这一步连不上。
 		switch {

@@ -19,7 +19,7 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
-// C 侧: 起 IPv6 QUIC 监听、把端点通告给服务端、按服务端转来的请求朝对端打洞,
+// C 侧: 起 QUIC 监听、把端点通告给服务端、按服务端转来的请求朝对端打洞,
 // 并把每条进来的 stream 接到 client.forward 指定的内网目标上。
 
 // ensureAccept 按需起 QUIC 监听, 已经起着就直接复用。

@@ -14,7 +14,7 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
-// A 侧: 在本机起裸TCP入口监听, 每条进来的连接向服务端要一次对端端点, 然后用 IPv6 QUIC
+// A 侧: 在本机起裸TCP入口监听, 每条进来的连接向服务端要一次对端端点, 然后用 QUIC
 // 直接连过去。数据全程不经服务端。
 //
 // 与服务端上的 forward 入口(nat/forward.go)相比, 这里少了 bridge 那一整套, 因为字节
