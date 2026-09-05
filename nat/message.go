@@ -54,8 +54,10 @@ type Message struct {
 	ID     uint
 	Type   uint8 //连接类型(ConnHTTP/ConnTCP), 与 ID 组成复合键
 	Method string
-	Body   []byte
-	Port   uint16 //仅 METHOD_CREATE 用: 服务端裸TCP入口端口, 订阅方据此查固定 target
+	// Body 数据消息(Method 为空)时是要转发的业务字节; METHOD_CLOSE 时借用同一个字段
+	// 承载拒绝/关闭原因(可为空), 两种用法按 Method 互斥, 不会混淆(见 Bridge.CloseReason)。
+	Body []byte
+	Port uint16 //仅 METHOD_CREATE 用: 服务端裸TCP入口端口, 订阅方据此查固定 target
 }
 
 // CMessage 普通消息体的复合类型，标记要向哪个Client发送

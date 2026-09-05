@@ -187,7 +187,10 @@ func (c *Client) localReadPump() {
 			proxConn, derr := dialForCreate(c, msg)
 			if derr != nil {
 				log.Println(trace.ID(msg.ID), c.tag, "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
-				closeMsg := &Message{ID: msg.ID, Type: msg.Type, Method: METHOD_CLOSE}
+				// 把拒绝原因带回给服务端(经 Body, METHOD_CLOSE 平时不用这个字段, 见
+				// nat/message.go): 否则服务端只看得到"连接没数据就断了", 真正的原因
+				// (比如查不到 forward 映射)只留在这台机器自己的本地日志里。
+				closeMsg := &Message{ID: msg.ID, Type: msg.Type, Method: METHOD_CLOSE, Body: []byte(derr.Error())}
 				c.hub.broadcast <- &CMessage{client: c, message: closeMsg}
 				continue
 			}

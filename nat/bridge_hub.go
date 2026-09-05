@@ -57,6 +57,9 @@ func (h *BridgeHub) run() {
 					continue
 				}
 				if message.Method == METHOD_CLOSE {
+					// 顺序要紧: 必须先记原因再关通道, 靠 channel close 的 happens-before
+					// 保证调用方在 WritePump 返回后读到的是这次写入的值(见 Bridge.CloseReason)。
+					bridge.setCloseReason(string(message.Body))
 					close(bridge.send)
 					delete(h.bridges, bridge)
 					break Exit

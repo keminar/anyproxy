@@ -30,8 +30,34 @@ type Bridge struct {
 	// 超时判断使用: 双向都无新流量超过阈值即视为僵尸连接(见 forward.go forwardIdleTimeout)。
 	lastActive int64
 
+	// closeReason 对端(订阅方)经 METHOD_CLOSE 带回的关闭原因, 可能为空。
+	//
+	// 存在的理由: 订阅方拒绝一条连接(比如 client.forward 里查不到入口端口对应的
+	// target)时, 原因原本只会打在订阅方自己的本地日志里 —— 服务端这边看到的只是
+	// "连接没数据就断了", 真正的根因要跑去另一台机器翻日志才找得到。让订阅方把原因
+	// 带回来, 服务端才能在自己的关闭汇总日志里直接说清楚"为什么"。
+	closeReason atomic.Value // string
+
 	// Buffered channel of outbound messages.
 	send chan []byte
+}
+
+// setCloseReason 由 bridge_hub 收到 METHOD_CLOSE 时调用, 记下对端带回的原因(可能为空)。
+func (b *Bridge) setCloseReason(reason string) {
+	if reason != "" {
+		b.closeReason.Store(reason)
+	}
+}
+
+// CloseReason 取对端给的关闭原因; 对端没给理由(纯粹传完数据正常关闭)则返回空串。
+// 只能在 WritePump 返回之后调用才有意义: closeReason 是随 METHOD_CLOSE 一起、在
+// send 通道关闭之前写入的, channel close 建立的 happens-before 保证 WritePump 的
+// 调用方读到的一定是最新值。
+func (b *Bridge) CloseReason() string {
+	if v, ok := b.closeReason.Load().(string); ok {
+		return v
+	}
+	return ""
 }
 
 // Stats 返回本连接两个方向的累计字节(原子读), 供调用方打存活/汇总日志。

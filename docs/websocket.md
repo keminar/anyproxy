@@ -47,7 +47,7 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
 ```
 
 - 服务端：`websocket.server.forward[].listen` 每条起一个裸 TCP 监听（`protocol` 含 udp 时同端口再起一个 UDP 中继）（`nat/forward.go` 的 `StartForward`/`listenForward`），每个进来的连接按该规则的 `email` 找订阅端（`GetClientByEmail`）桥接。
-- 订阅端：`websocket.client.forward[].port → target` 建映射（`nat/forward.go` 的 `buildForward`，每台 server 连接各自一份）。收到服务端「入口端口 Port」来的连接时，dial 对应 `target`；**Port 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。
+- 订阅端：`websocket.client.forward[].port → target` 建映射（`nat/forward.go` 的 `buildForward`，每台 server 连接各自一份）。收到服务端「入口端口 Port」来的连接时，dial 对应 `target`；**Port 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。拒绝原因会经 `METHOD_CLOSE` 带回服务端（`Bridge.CloseReason`），折进服务端自己的 `nat forward closed ... reason=peer close: ...` 汇总行——不用再跨机器去翻订阅端的本地日志。
 - 适合：暴露内网 Web/DB 等任意 TCP 服务（如远程 SSH、内网 Web）。
 
 #### 路径 B 的第二条通道：UDP 中继（`protocol: udp | both`）
@@ -489,7 +489,7 @@ websocket:
 - **`email` 对不上** → 裸 TCP 转发时服务端日志 `no forward ... no subscriber for email ...`。服务端 `server.forward.email` 必须等于某订阅端的 `client.email`。
 - **时钟漂移 > 300s** → 鉴权失败，订阅端会收到 `xtime err: your clock differs from the server by Ns ...`（带实际时差）。保证两端时间同步，或**改用密钥对鉴权**（见上），那套不看时钟。
 - **被服务端 `allowIP` 挡掉** → 订阅端日志 `ws connect err: ... (server replied 403 Forbidden ...)`。注意 IPv6 地址会轮换（RFC 4941 临时地址），白名单建议写前缀网段而不是单个地址。
-- **订阅端只认白名单**：只 dial 自己 `forward` 里写死的 `target`，未映射的 `port` 直接拒绝——服务端入口端口被人乱连也打不进内网。
+- **订阅端只认白名单**：只 dial 自己 `forward` 里写死的 `target`，未映射的 `port` 直接拒绝——服务端入口端口被人乱连也打不进内网。**`forward[].port` 填的是服务端 `forward.listen` 的入口端口号**（比如 `:2224` 就填 `2224`），不是内网真实服务的端口（比如 RDP 的 `3389`）——两者混淆是最常见的配错。这条拒绝的原因会经 `METHOD_CLOSE` 带回服务端，体现在服务端 `nat forward closed ... reason=peer close: no forward target for entry port N` 这一行里，不用再去订阅端本地日志找；老版本 anyproxy 没有这个回传，服务端只看得到症状（`up=19 down=0 dur=0s reason=...connection reset by peer`，客户端发了握手包却什么都没收到，很快自己断开）。
 - **UDP 中继的第一个包会慢一拍**：上行是收到第一个数据报才建的，头一个包要等 B→C→B 一个来回。RDP 会自己重试，不用管；自己写的 UDP 应用如果不重试就要注意。
 - **UDP 中继只在 `protocol: udp|both` 时才起**：默认 `tcp`，光配 `client.forward` 是不够的，入口那条规则也得写 `protocol`。
 - **路径 A 的 `CONNECT` 不支持**：HTTP 头订阅路径只处理非 `CONNECT` 的 HTTP 请求。

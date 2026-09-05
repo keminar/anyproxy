@@ -204,9 +204,18 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 
 	// 关闭汇总: 无条件打一行, 含累计上/下行字节、连接时长、关闭原因, 用来判断这条连接
 	// 到底传没传数据、活了多久、怎么断的(TCP连通≠真登录, 登录审计仍以内网机器为准)。
+	//
+	// 订阅方主动拒绝时带的原因优先: 那才是根因(比如查不到 forward 映射), 而 upErr/
+	// downErr 只是它的下游症状 —— 订阅方一发 CLOSE、这边的 WritePump 就半关(FIN)
+	// 给外部客户端, 客户端收到没数据的 FIN 常会自己 RST, 那个 RST 才是 upErr 里
+	// 抓到的东西, 单看它只会让人怀疑网络, 找不到真正原因。
 	up, down := b.Stats()
+	reason := forwardCloseReason(upErr, downErr)
+	if peer := b.CloseReason(); peer != "" {
+		reason = "peer close: " + peer
+	}
 	log.Println(trace.ID(id), fmt.Sprintf("nat forward closed %s up=%d down=%d dur=%s reason=%s",
-		src, up, down, time.Since(start).Round(time.Second), forwardCloseReason(upErr, downErr)))
+		src, up, down, time.Since(start).Round(time.Second), reason))
 }
 
 // forwardCloseReason 归纳裸TCP转发连接的关闭原因: CopyBuffer/WritePump 正常结束(含对端EOF)
