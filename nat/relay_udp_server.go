@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"crypto/subtle"
 	"log"
 	"net"
 	"sync"
@@ -130,7 +131,9 @@ func (u *udpRelay) tryRegister(pkt []byte, from *net.UDPAddr) bool {
 		return false
 	}
 	u.mu.Lock()
-	if u.upToken == "" || string(payload) != u.upToken {
+	// 常量时间比对: token 是网络上送来的, 逐字节短路比较会把"前几位对了"的信息
+	// 漏进响应时机里。UDP 上做时序测量很吃力, 但这个防护是免费的。
+	if u.upToken == "" || subtle.ConstantTimeCompare(payload, []byte(u.upToken)) != 1 {
 		u.mu.Unlock()
 		log.Printf("nat relay udp %s: register from %s rejected, token mismatch", u.rule.Listen, from)
 		return true
