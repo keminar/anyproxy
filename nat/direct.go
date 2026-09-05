@@ -333,7 +333,10 @@ type directTokenStore struct {
 }
 
 type directTokenEntry struct {
-	port    uint16
+	port uint16
+	// email 是发起方的身份, 由服务端在 punch 里告知(C 自己看不到对端是谁 —— QUIC
+	// 那侧只有地址和证书指纹)。收文件时按它匹配 client.receive.allow。
+	email   string
 	expires time.Time
 }
 
@@ -341,7 +344,7 @@ func newDirectTokenStore() *directTokenStore {
 	return &directTokenStore{tokens: make(map[string]directTokenEntry)}
 }
 
-func (s *directTokenStore) put(token string, port uint16) {
+func (s *directTokenStore) put(token string, port uint16, email string) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -351,22 +354,22 @@ func (s *directTokenStore) put(token string, port uint16) {
 			delete(s.tokens, t)
 		}
 	}
-	s.tokens[token] = directTokenEntry{port: port, expires: now.Add(directTokenTTL)}
+	s.tokens[token] = directTokenEntry{port: port, email: email, expires: now.Add(directTokenTTL)}
 }
 
 // take 校验并消费一个凭证, 一次性: 取走即删, 重放无效。
-func (s *directTokenStore) take(token string) (uint16, bool) {
+func (s *directTokenStore) take(token string) (directTokenEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.tokens[token]
 	if !ok {
-		return 0, false
+		return directTokenEntry{}, false
 	}
 	delete(s.tokens, token)
 	if time.Now().After(e.expires) {
-		return 0, false
+		return directTokenEntry{}, false
 	}
-	return e.port, true
+	return e, true
 }
 
 // 流首部的 Kind: 纯鉴权流只认证连接、不落地; 数据流承载一条入口 TCP 连接。
@@ -387,38 +390,47 @@ type directStreamHead struct {
 }
 
 func writeStreamHead(w io.Writer, h directStreamHead) error {
-	body, err := json.Marshal(h)
-	if err != nil {
-		return err
-	}
-	if len(body) > directStreamHeadMax {
-		return errors.New("stream head too large")
-	}
-	var size [2]byte
-	binary.BigEndian.PutUint16(size[:], uint16(len(body)))
-	if _, err := w.Write(size[:]); err != nil {
-		return err
-	}
-	_, err = w.Write(body)
-	return err
+	return writeFrame(w, h)
 }
 
 func readStreamHead(r io.Reader) (directStreamHead, error) {
 	var h directStreamHead
+	err := readFrame(r, &h, directStreamHeadMax)
+	return h, err
+}
+
+// writeFrame 写一个"2 字节长度 + JSON"的控制帧。流首部、文件首部/尾部/结果都用它。
+func writeFrame(w io.Writer, v interface{}) error {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if len(body) > 0xFFFF {
+		return errors.New("frame too large")
+	}
+	var size [2]byte
+	binary.BigEndian.PutUint16(size[:], uint16(len(body)))
+	// 一次写出去而不是分两次: 分两次会在网络上产生两个小包, 也让对端更容易读到半个帧。
+	buf := append(size[:], body...)
+	_, err = w.Write(buf)
+	return err
+}
+
+// readFrame 读一个控制帧。max 限制帧体大小, 免得对端用超长长度撑爆内存。
+func readFrame(r io.Reader, v interface{}, max int) error {
 	var size [2]byte
 	if _, err := io.ReadFull(r, size[:]); err != nil {
-		return h, err
+		return err
 	}
-	n := binary.BigEndian.Uint16(size[:])
-	if int(n) > directStreamHeadMax {
-		return h, fmt.Errorf("stream head too large: %d", n)
+	n := int(binary.BigEndian.Uint16(size[:]))
+	if n > max {
+		return fmt.Errorf("frame too large: %d > %d", n, max)
 	}
 	body := make([]byte, n)
 	if _, err := io.ReadFull(r, body); err != nil {
-		return h, err
+		return err
 	}
-	err := json.Unmarshal(body, &h)
-	return h, err
+	return json.Unmarshal(body, v)
 }
 
 // directCopy 在 QUIC stream 与普通连接之间双向搬字节, 返回两个方向的字节数。

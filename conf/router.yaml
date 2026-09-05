@@ -264,8 +264,14 @@ websocket:
       #   email: someone@example.com
       #   port: 3389
       #   protocol: both
+    # 接收别人直连传来的文件(需同时开 directAccept)。对端用 anyproxy -send 发过来,
+    # 本机不需要装 sshd/rsync 之类的服务 —— anyproxy 自己落盘
+    receive:
+      # dir: /data/incoming      # 收到的文件放这里; 不配则一律拒收
+      # allow:                   # 只允许这些 email 发过来; 为空不限制
+      #   - someone@example.com
   # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
-  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/directAccept/direct)
+  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/directAccept/direct/receive)
   # clients:
   #   - connect:
   #     user:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -49,6 +50,8 @@ var (
 	gCheck           bool
 	gCheckFix        bool
 	gGenKey          bool
+	gSend            string
+	gSendTo          string
 )
 
 func init() {
@@ -70,6 +73,9 @@ func init() {
 	flag.StringVar(&gGeoOut, "geo-out", "", "geo-extract: output .dat path")
 	// 系统调优检查/应用(仅 Linux): 对照建议的 sysctl/ulimit 报告, 或一键写入并应用。
 	flag.BoolVar(&gGenKey, "genkey", false, "Generate a websocket auth key pair (private for client, public for server) and exit")
+
+	flag.StringVar(&gSend, "send", "", "Send a file or directory to another subscriber over a direct connection and exit (extra paths may follow as arguments)")
+	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email")
 
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
 	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
@@ -129,6 +135,23 @@ func main() {
 	if conf.RouterConfig == nil {
 		time.Sleep(60 * time.Second)
 		os.Exit(2)
+	}
+
+	// 直连传文件: 一次性动作, 传完就退出, 不启动代理。
+	//
+	// 放在配置加载之后(要用 websocket.client 的连接与凭证), 但在日志目录初始化之前 ——
+	// 这是个前台命令, 输出该直接打在终端上, 而不是写进日志文件。
+	if gSend != "" {
+		paths := append([]string{gSend}, flag.Args()...)
+		cfg, err := sendClientConfig()
+		if err != nil {
+			log.Fatalln("send:", err)
+		}
+		if err := nat.SendFiles(cfg, gSendTo, paths); err != nil {
+			// 打洞失败也走这里: 按约定不做中继回落, 一个字节都不传, 退出码非零。
+			log.Fatalln("send:", err)
+		}
+		return
 	}
 
 	cmdName := "anyproxy"
@@ -490,4 +513,19 @@ func loadGeo() {
 			log.Printf("geo: 规则 %q 需要 geo.site 加载 geosite.dat, 当前未加载, 该规则不会命中", h.Name)
 		}
 	}
+}
+
+// sendClientConfig 挑一条 websocket.client 配置给 -send 用。
+//
+// 多台 server 时取第一条: 传文件只需要一条能到达对端的信令通道, 而"对端在哪台 server
+// 上"要连上去问了才知道。真要指定的话, 用 -c 换一份只留目标那台的配置。
+func sendClientConfig() (conf.WsClient, error) {
+	list := conf.RouterConfig.Websocket.ClientList()
+	if len(list) == 0 {
+		return conf.WsClient{}, errors.New("no websocket.client configured (need connect/user/email to reach the server)")
+	}
+	if len(list) > 1 {
+		log.Printf("send: %d client blocks configured, using the first one (%s)", len(list), list[0].Connect)
+	}
+	return list[0], nil
 }

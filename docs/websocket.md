@@ -185,6 +185,47 @@ path selection for home: 1.2.3.4:41203(v4) rtt=38ms bias=0s score=38ms,
 
 **为什么 QUIC socket 必须是同一个双栈 socket**，而不是 v4/v6 各一个：打洞在对端防火墙上开出来的状态是按"本地 ip:port ↔ 对端 ip:port"记的。两个 socket 就是两个源端口，那边开出来的状态和这边实际拨号用的对不上。
 
+### 直连传文件（`-send` / `receive`）
+
+隧道本身能跑 scp/rsync，但那要求对端装了 sshd——跨 Windows 时这条往往不成立（OpenSSH 服务器是可选功能，默认不装）。所以内置了一条文件传输，**对端机器上不需要任何额外服务**，anyproxy 自己落盘。
+
+接收端（配置里指定目录，需同时开 `directAccept`）：
+
+```yaml
+websocket:
+  client:
+    directAccept: true
+    receive:
+      dir: D:/incoming            # 收到的文件放这里；不配则一律拒收
+      allow:                      # 可选，只允许这些 email 发过来
+        - office@example.com
+```
+
+发送端（一条命令，传完就退出）：
+
+```bash
+anyproxy -send bigfile.zip -to home@example.com
+```
+
+```bash
+anyproxy -send D:/photos -to home@example.com    # 目录递归，收端保持同样的结构
+```
+
+多个路径直接跟在后面：`anyproxy -send a.zip -to home@example.com b.zip D:/dir`。
+
+**打洞不成功就报失败，一个字节都不传**——这条路径没有经服务端中继的回落，和直连入口的约定一致。失败时退出码非零、原因打在终端上，脚本里 `anyproxy -send ... && echo ok` 直接可用。
+
+几个设计上的选择：
+
+- **一个文件一条 QUIC stream**。每个文件的结果（存成什么名字、校验过没有、错在哪）互相独立，中间一个出错不会把整批的状态搅乱；开一条 stream 在 QUIC 上几乎不要钱。
+- **SHA-256 校验，摘要放在数据后面**（不是首部）。放后面发送端才能边读边算——写首部的话必须先把整个文件读一遍算摘要，大文件等于白读一遍。收端摘要对不上就删掉并报错：留着一个内容错误、名字正确的文件比没收到更糟。
+- **先写 `.part` 再改名**。中断留下的是一眼看得出没传完的东西，而不是一个看着正常、内容是半截的文件。
+- **不覆盖同名文件**，自动改成 `x (1).zip`。覆盖会悄无声息毁掉收方已有的数据，代价远大于多一个带序号的名字；实际存成什么名字会回报给发送端。
+- **文件名是对端说了算的，所以要防越界**：拒绝绝对路径、`..`、反斜杠和盘符，拼完之后再确认结果确实落在接收目录内。两道都做——先检查原始名字再规范化，顺序反了的话 `path.Clean` 会把 `..` 直接吃掉，检查永远不触发。
+- **发送端是独立进程**，不要求本机已经跑着 anyproxy。传文件是有明确起止的动作，独立进程的退出码就能表达成败。它会临时多开一条 websocket，不影响常驻那条——直连信令是按"发起请求的那条连接"回的，不是按 email 查的。
+
+**千兆链路上的吞吐**：QUIC 接收窗口已按千兆调过（单流 32MB / 连接 64MB）。quic-go 的默认值（单流 6MB）是按网页流量定的，吞吐上限约等于 `窗口 / RTT`，6MB 在 50ms RTT 下只剩约 960Mbps、100ms 下掉到约 480Mbps，跨省传大文件正好撞上。Linux 上还要保证 UDP 收包缓冲够大（`anyproxy -check` 会检查 `net.core.rmem_max`），否则 quic-go 会打一行 "failed to sufficiently increase receive buffer size" 并跑不满。
+
 ### TCP 与 UDP：两种协议在 QUIC 上的承载不同
 
 `protocol` 决定入口与落地要还原哪种协议，两者在 QUIC 上走不同机制，语义才对得上：
@@ -417,6 +458,7 @@ websocket:
 |------|--------|
 | `-ws-listen` | `websocket.server.listen` |
 | `-genkey` | 生成一对鉴权密钥并退出（私钥填 `websocket.client.key`，公钥填 `websocket.server.users[].key`） |
+| `-send PATH -to EMAIL` | 经直连把文件/目录发给另一个订阅端并退出（见"直连传文件"） |
 
 > 订阅端(客户端)**没有命令行参数**，`connect`/`user`/`pass`/`key`/`email`/`subscribe`/`forward` 都只能写在配置文件里；同时订阅多台 server 也只能用 `websocket.clients[]`。所以裸 TCP 转发（依赖 `forward`）和订阅端相关配置只能用配置文件。
 

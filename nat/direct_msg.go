@@ -73,7 +73,8 @@ type DirectRequest struct {
 type DirectPunch struct {
 	PeerAddrs []directCandidate `json:"peerAddrs"` //A 的全部候选端点, C 朝它们同时打洞
 	Token     string            `json:"token"`     //期望 A 出示的凭证
-	Port      uint16            `json:"port"`      //A 要访问的转发规则端口
+	Port      uint16            `json:"port"`      //A 要访问的转发规则端口, 0 表示文件传输
+	FromEmail string            `json:"fromEmail"` //发起方身份, 由服务端填(C 自己看不到对端是谁)
 
 	// PeerAddr 同 DirectReady.Endpoint, 只为兼容旧版对端。
 	PeerAddr string `json:"peerAddr,omitempty"`

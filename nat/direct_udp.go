@@ -47,6 +47,8 @@ type directConn struct {
 	conn *quic.Conn
 
 	authed atomic.Bool
+	// email 是通过鉴权那一刻从凭证里取出的发起方身份, 收文件时要用。
+	email string
 
 	udpMu       sync.Mutex
 	udpSessions map[uint32]*directUDPTarget
@@ -65,14 +67,15 @@ func (dc *directConn) authorize(token string, port uint16) bool {
 	if dc.authed.Load() {
 		return true
 	}
-	wantPort, ok := dc.peer.tokens.take(token)
+	e, ok := dc.peer.tokens.take(token)
 	if !ok {
 		return false
 	}
-	if wantPort != port {
-		dc.peer.logf("token was issued for port %d but stream asks for %d", wantPort, port)
+	if e.port != port {
+		dc.peer.logf("token was issued for port %d but stream asks for %d", e.port, port)
 		return false
 	}
+	dc.email = e.email
 	dc.authed.Store(true)
 	return true
 }

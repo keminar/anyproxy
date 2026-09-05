@@ -184,6 +184,32 @@ func (d ClientDirect) WantUDP() bool { return protoWantUDP(d.Protocol) }
 // ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
 func (d ClientDirect) ValidProtocol() bool { return protoValid(d.Protocol) }
 
+// ClientReceive 订阅方接收直连传来的文件。不配 Dir 就一律拒收。
+//
+// 与 ClientForward 的区别: forward 是把流量转给本机某个**已有的服务**(sshd、RDP 等),
+// 这里则是 anyproxy 自己落盘 —— 对端机器上不需要装 sshd/rsync 之类的东西, 这正是它
+// 存在的理由(跨 Windows 时那些服务往往没有)。
+type ClientReceive struct {
+	Dir string `yaml:"dir"` //收到的文件放这个目录; 为空表示不接收
+
+	// Allow 限定哪些 email 可以发过来; 为空表示不限制(仍受直连本身的鉴权约束:
+	// 对方必须先通过服务端的信令拿到一次性凭证)。
+	Allow []string `yaml:"allow"`
+}
+
+// Allowed 判断某个 email 是否可以往这里发文件。
+func (r ClientReceive) Allowed(email string) bool {
+	if len(r.Allow) == 0 {
+		return true
+	}
+	for _, a := range r.Allow {
+		if a == email {
+			return true
+		}
+	}
+	return false
+}
+
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
 type ServerUser struct {
 	User string `yaml:"user"` //认证用户
@@ -234,6 +260,7 @@ type WsClient struct {
 	// 两者互相独立: 只想被别人直连就单开 directAccept, 只想主动直连别人就单配 direct。
 	DirectAccept bool           `yaml:"directAccept"` //true 时起 QUIC 监听并把端点通告给服务端, 允许其它订阅方直连自己
 	Direct       []ClientDirect `yaml:"direct"`       //本机直连入口规则(见 ClientDirect)
+	Receive      ClientReceive  `yaml:"receive"`      //接收直连传来的文件(见 ClientReceive), 需同时开 directAccept
 }
 
 // Websocket 会话订阅通信, 按角色分 server(服务端)/ client(客户端)两块配置。

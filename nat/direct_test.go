@@ -82,7 +82,7 @@ func TestDirectEndToEnd(t *testing.T) {
 
 	// 模拟服务端把请求转交给 C: C 记下这个一次性凭证(回环上不需要真打洞)。
 	const token = "test-token-1"
-	c.tokens.put(token, port)
+	c.tokens.put(token, port, "a@example.com")
 
 	tr, err := a.ensureTransport()
 	if err != nil {
@@ -152,7 +152,7 @@ func TestDirectRejectsUnmappedPort(t *testing.T) {
 
 	const unmapped = uint16(3389)
 	const token = "test-token-2"
-	c.tokens.put(token, unmapped) // 凭证有效, 但端口没映射
+	c.tokens.put(token, unmapped, "a@example.com") // 凭证有效, 但端口没映射
 
 	tr, err := a.ensureTransport()
 	if err != nil {
@@ -211,7 +211,7 @@ func TestDirectParallelStreams(t *testing.T) {
 	}
 	// 一条连接, 认证一次。
 	const token = "test-token-parallel"
-	c.tokens.put(token, port)
+	c.tokens.put(token, port, "a@example.com")
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
@@ -292,7 +292,7 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 		t.Fatalf("ensure transport: %v", err)
 	}
 	const token = "test-token-udp"
-	c.tokens.put(token, port)
+	c.tokens.put(token, port, "a@example.com")
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
@@ -372,7 +372,7 @@ func TestDirectUDPStats(t *testing.T) {
 		t.Fatalf("ensure transport: %v", err)
 	}
 	const token = "test-token-udp-stats"
-	c.tokens.put(token, port)
+	c.tokens.put(token, port, "a@example.com")
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
@@ -604,7 +604,7 @@ func TestDirectAcceptLifecycle(t *testing.T) {
 
 	a := newDialPeer(t)
 	const token = "test-token-lifecycle"
-	c.tokens.put(token, port)
+	c.tokens.put(token, port, "a@example.com")
 	tr, err := a.ensureTransport()
 	if err != nil {
 		t.Fatalf("ensure transport: %v", err)
@@ -672,10 +672,15 @@ func TestDirectIdleKeepsQuietUDPAlive(t *testing.T) {
 // TestDirectTokenIsOneShot 凭证取走即失效, 重放无效。
 func TestDirectTokenIsOneShot(t *testing.T) {
 	s := newDirectTokenStore()
-	s.put("tok", 2222)
+	s.put("tok", 2222, "a@example.com")
 
-	if port, ok := s.take("tok"); !ok || port != 2222 {
-		t.Fatalf("first take should succeed with the stored port, got %d %v", port, ok)
+	e, ok := s.take("tok")
+	if !ok || e.port != 2222 {
+		t.Fatalf("first take should succeed with the stored port, got %d %v", e.port, ok)
+	}
+	// 发起方身份也要一起带出来: 收文件时按它匹配 receive.allow, C 自己看不到对端是谁。
+	if e.email != "a@example.com" {
+		t.Fatalf("token should carry the requester email, got %q", e.email)
 	}
 	if _, ok := s.take("tok"); ok {
 		t.Fatal("token should not be reusable")

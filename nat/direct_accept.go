@@ -127,7 +127,7 @@ func (d *directPeer) onPunch(msg *Message) {
 	d.setMyCandidates(myCands)
 	d.touchAccept()
 
-	d.tokens.put(p.Token, p.Port)
+	d.tokens.put(p.Token, p.Port, p.FromEmail)
 	// 朝对端的**所有**候选一起打, 不等回执: C 这侧不需要知道哪条更快(择优是 A 做的),
 	// 只需要把每条路上的返回通道都开出来。等回执会白白拖住 ready, 让 A 多等近一秒。
 	d.punchOnly(peerCands)
@@ -201,6 +201,12 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 		}
 		return
 	}
+	if head.Kind == directStreamFile {
+		// 文件流不落到任何 TCP 目标, 由 anyproxy 自己写盘(见 nat/file.go)。收不收、
+		// 写到哪, 由 client.receive 决定, 与 forward 白名单无关。
+		dc.recvFile(stream, remote.String())
+		return
+	}
 	// 复用 websocket 转发那套白名单: 未在 client.forward 里映射的端口一律拒绝,
 	// 对端只能到达本机明确开放的目标。
 	target, ok := d.forward[head.Port]
@@ -238,6 +244,23 @@ func directQUICConfig() *quic.Config {
 		// 显式写出来: quic-go 不设时默认 100, 超过后 OpenStreamSync 会阻塞等待而不是
 		// 报错, 现象是新会话卡住不动, 光看日志很难想到是撞了上限。
 		MaxIncomingStreams: directMaxStreams,
+
+		// 接收窗口。吞吐上限约等于 窗口/RTT, 所以窗口要盖住带宽时延积(BDP)。
+		//
+		// quic-go 的默认值(单流 6MB / 连接 15MB)是按普通网页流量定的, 对千兆家宽偏小:
+		// 千兆 = 125MB/s, 6MB 窗口在 50ms RTT 下就只剩 ~960Mbps, 100ms 下掉到 ~480Mbps
+		// —— 跨省传大文件正好撞上。这里放到单流 32MB, 够千兆跑到 250ms RTT。
+		//
+		// 代价是内存: 这些是**上限**, quic-go 会按实测 BDP 自动调节, 只有真的在满速传
+		// 时才涨到这么大, RDP 那种空闲连接一直贴着初始值。连接级上限同时封住了单条
+		// 连接的总占用(256 条流也不会各占 32MB)。
+		//
+		// 初始值也一并调大: 默认 512KB 要好几个 RTT 才爬到位, 传一个几百 MB 的文件时
+		// 这段爬坡很显眼。
+		InitialStreamReceiveWindow:     2 << 20,  // 2MB
+		MaxStreamReceiveWindow:         32 << 20, // 32MB
+		InitialConnectionReceiveWindow: 4 << 20,  // 4MB
+		MaxConnectionReceiveWindow:     64 << 20, // 64MB
 	}
 }
 

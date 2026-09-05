@@ -35,6 +35,8 @@ func Usage() {
 	fmt.Fprintf(os.Stdout, "                   (with -geo-in <src.dat> -geo-cat cn,google -geo-out <small.dat>)\n")
 	fmt.Fprintf(os.Stdout, "  -genkey          Generate a websocket auth key pair and exit\n")
 	fmt.Fprintf(os.Stdout, "                   (private key -> websocket.client.key, public key -> websocket.server.users[].key)\n")
+	fmt.Fprintf(os.Stdout, "  -send PATH       Send a file/dir to another subscriber over a direct connection and exit\n")
+	fmt.Fprintf(os.Stdout, "                   (with -to <email>; extra paths may follow as arguments)\n")
 	fmt.Fprintf(os.Stdout, "  -check           Check system tuning (sysctl/ulimit) vs recommendations and exit (Linux)\n")
 	fmt.Fprintf(os.Stdout, "  -check-fix       Apply recommended sysctl tuning (needs root) and exit (Linux)\n")
 	fmt.Fprintf(os.Stdout, "  -v               Show build version\n\n")

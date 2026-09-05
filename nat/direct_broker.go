@@ -84,7 +84,10 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 
 	// 用 B 自己的 ID 与 C 通信: A 那侧的 ID 是各 A 自行采番的, 不同 A 会撞号。
 	id := b.track(c, msg.ID, req.Email)
-	punch := DirectPunch{PeerAddrs: reqCands, PeerAddr: firstAddr(reqCands), Token: req.Token, Port: req.Port}
+	// FromEmail 只能由服务端填: 它是从这条已鉴权的 websocket 上得到的, A 自报的身份
+	// 不能信 —— 收方要拿它做 receive.allow 判断。
+	punch := DirectPunch{PeerAddrs: reqCands, PeerAddr: firstAddr(reqCands),
+		Token: req.Token, Port: req.Port, FromEmail: c.Email}
 	body, err := encodeDirect(punch)
 	if err != nil {
 		b.take(id)
