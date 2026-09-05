@@ -53,6 +53,13 @@ type directConn struct {
 	udpMu       sync.Mutex
 	udpSessions map[uint32]*directUDPTarget
 	udpClosed   bool
+
+	// traffic 这条连接上 UDP 通路的累计流量 + 瞬时速率。up = A -> 内网目标(收到
+	// datagram 后写给本地目标), down = 内网目标 -> A(读到目标回包后封成 datagram
+	// 送回)。A 侧(directUDPEntry)一直有这个计数, C 侧原来完全没有——排查
+	// "mstsc 用没用上 UDP 图形通道"时只能看 A 那一头, C 这一头是不是真收到、真转发
+	// 出去了反而看不见, 这里补上让两头能对得上。
+	traffic trafficMeter
 }
 
 // directUDPTarget C 侧一条 UDP 会话: 对应对端某个用户源地址, 连到一个内网目标。
@@ -106,7 +113,9 @@ func (dc *directConn) receiveDatagrams() {
 		}
 		if _, err := target.conn.Write(payload); err != nil {
 			d.logf("udp forward to target failed: %v", err)
+			continue
 		}
+		dc.traffic.addUp(len(payload))
 	}
 }
 
@@ -167,7 +176,9 @@ func (dc *directConn) pumpTargetReplies(sessionID uint32, t *directUDPTarget) {
 		}
 		if err := sendDatagram(dc.conn, sessionID, t.port, buf[:n]); err != nil {
 			dc.peer.logf("udp reply for session %d dropped: %v", sessionID, err)
+			continue
 		}
+		dc.traffic.addDown(n)
 	}
 }
 
@@ -182,6 +193,28 @@ func (dc *directConn) closeUDPSessions() {
 	}
 }
 
+// logUDPTraffic 周期性汇报这条连接上 UDP 通路的流量, 直到连接关闭(ctx 是
+// conn.Context(), 随 QUIC 连接一起结束, 不需要额外的收尾信号)。C 侧原来对这块完全
+// 没有可观测性, 只能看 A 那一头; 现在两头都能看, 排查"到底是哪一段没转发/丢了包"
+// 才有依据。
+func (dc *directConn) logUDPTraffic(ctx context.Context) {
+	t := time.NewTicker(directReapEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			snap, ok := dc.traffic.snapshot()
+			if !ok {
+				continue
+			}
+			dc.peer.logf("udp from %s: up=%dB/%dpkt(%s) down=%dB/%dpkt(%s)",
+				dc.conn.RemoteAddr(), snap.UpBytes, snap.UpPkts, snap.UpRate, snap.DownBytes, snap.DownPkts, snap.DownRate)
+		}
+	}
+}
+
 // ---------- A 侧 ----------
 
 // directUDPEntry A 侧一条 UDP 入口监听的状态。用户的每个源地址算一个会话, 用一个
@@ -191,14 +224,10 @@ type directUDPEntry struct {
 	rule conf.ClientDirect
 	conn *net.UDPConn
 
-	// 累计流量。TCP 那条路每条连接关闭时会打 up/down 汇总, UDP 没有"关闭"事件,
-	// 只能累计后按周期汇报 —— 排查"RDP 到底有没有走 UDP 通道"时这是唯一依据。
-	upBytes   atomic.Int64 // 用户 -> 对端
-	upPkts    atomic.Int64
-	downBytes atomic.Int64 // 对端 -> 用户
-	downPkts  atomic.Int64
-	// lastReported 上次汇报时的总字节, 用来跳过没有新流量的那些轮次。
-	lastReported atomic.Int64
+	// 累计流量 + 瞬时速率。TCP 那条路每条连接关闭时会打 up/down 汇总, UDP 没有
+	// "关闭"事件, 只能累计后按周期汇报 —— 排查"RDP 到底有没有走 UDP 通道、走多快"
+	// 时这是唯一依据。up = 用户 -> 对端, down = 对端 -> 用户。
+	traffic trafficMeter
 
 	mu       sync.Mutex
 	byAddr   map[string]uint32
@@ -258,8 +287,7 @@ func (e *directUDPEntry) pump(getSession func() (*directSession, error)) {
 			e.peer.logf("direct udp entry %s: send failed: %v", e.rule.Listen, err)
 			continue
 		}
-		e.upBytes.Add(int64(n))
-		e.upPkts.Add(1)
+		e.traffic.addUp(n)
 	}
 }
 
@@ -293,7 +321,7 @@ func (e *directUDPEntry) sessionFor(from *net.UDPAddr) uint32 {
 
 // stats 返回累计流量, 供周期汇报。
 func (e *directUDPEntry) stats() (upBytes, upPkts, downBytes, downPkts int64) {
-	return e.upBytes.Load(), e.upPkts.Load(), e.downBytes.Load(), e.downPkts.Load()
+	return e.traffic.stats()
 }
 
 // sessionCount 当前活着的用户会话数。
@@ -339,8 +367,7 @@ func (e *directUDPEntry) deliver(sessionID uint32, payload []byte) {
 		e.peer.logf("direct udp entry %s: reply to %s failed: %v", e.rule.Listen, addr, err)
 		return
 	}
-	e.downBytes.Add(int64(len(payload)))
-	e.downPkts.Add(1)
+	e.traffic.addDown(len(payload))
 }
 
 // ---------- datagram 编解码 ----------

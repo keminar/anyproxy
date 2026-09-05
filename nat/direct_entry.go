@@ -81,8 +81,9 @@ func (d *directPeer) handleEntry(conn net.Conn, r conf.ClientDirect) {
 	defer sess.release()
 
 	up, down := directCopy(conn, stream)
-	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry closed %s up=%d down=%d dur=%s",
-		src, up, down, time.Since(start).Round(time.Second)))
+	dur := time.Since(start)
+	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry closed %s up=%d(%s) down=%d(%s) dur=%s",
+		src, up, rate(up, dur), down, rate(down, dur), dur.Round(time.Second)))
 }
 
 // openStream 拿到一条承载数据的 QUIC stream, 并一并返回它所属的连接(调用方要
@@ -380,16 +381,13 @@ func (d *directPeer) logUDPTraffic() {
 	d.mu.Unlock()
 
 	for _, e := range entries {
-		up, upPkts, down, downPkts := e.stats()
-		if up == 0 && down == 0 {
-			continue
+		snap, ok := e.traffic.snapshot()
+		if !ok {
+			continue // 这一轮没有新流量, 或还没有上一轮可比
 		}
-		last := e.lastReported.Swap(up + down)
-		if last == up+down {
-			continue // 这一轮没有新流量
-		}
-		d.logf("direct udp %s -> email %s: sessions=%d up=%dB/%dpkt down=%dB/%dpkt",
-			e.rule.Listen, e.rule.Email, e.sessionCount(), up, upPkts, down, downPkts)
+		d.logf("direct udp %s -> email %s: sessions=%d up=%dB/%dpkt(%s) down=%dB/%dpkt(%s)",
+			e.rule.Listen, e.rule.Email, e.sessionCount(),
+			snap.UpBytes, snap.UpPkts, snap.UpRate, snap.DownBytes, snap.DownPkts, snap.DownRate)
 	}
 }
 

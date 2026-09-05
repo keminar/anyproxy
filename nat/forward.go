@@ -168,6 +168,12 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	go func() {
 		t := time.NewTicker(forwardAliveInterval)
 		defer t.Stop()
+		// prevUp/prevDown/prevAt 只在这个 goroutine 里用, 不需要放进 Bridge: 算的是
+		// "这一轮心跳区间"的瞬时速率, 不是从连接建立到现在的累计平均——长连接(RDP
+		// 一开就是几小时)的累计平均没法告诉你"现在是不是被限速了", 只有瞬时值能看
+		// 出变化, 跟 -send 进度条改瞬时速率是同一个理由。
+		prevUp, prevDown := int64(0), int64(0)
+		prevAt := start
 		for {
 			select {
 			case <-alive:
@@ -175,7 +181,11 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 			case <-t.C:
 				up, down := b.Stats()
 				idle := b.IdleFor()
-				log.Println(trace.ID(id), fmt.Sprintf("nat forward alive %s up=%d down=%d dur=%s idle=%s", src, up, down, time.Since(start).Round(time.Second), idle.Round(time.Second)))
+				now := time.Now()
+				upRate, downRate := rate(up-prevUp, now.Sub(prevAt)), rate(down-prevDown, now.Sub(prevAt))
+				prevUp, prevDown, prevAt = up, down, now
+				log.Println(trace.ID(id), fmt.Sprintf("nat forward alive %s up=%d(%s) down=%d(%s) dur=%s idle=%s",
+					src, up, upRate, down, downRate, time.Since(start).Round(time.Second), idle.Round(time.Second)))
 				if idle >= forwardIdleTimeout {
 					log.Println(trace.ID(id), fmt.Sprintf("nat forward zombie %s up=%d down=%d dur=%s idle=%s, closing", src, up, down, time.Since(start).Round(time.Second), idle.Round(time.Second)))
 					conn.Close()
@@ -214,8 +224,11 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	if peer := b.CloseReason(); peer != "" {
 		reason = "peer close: " + peer
 	}
-	log.Println(trace.ID(id), fmt.Sprintf("nat forward closed %s up=%d down=%d dur=%s reason=%s",
-		src, up, down, time.Since(start).Round(time.Second), reason))
+	dur := time.Since(start)
+	// 这里的速率是整条连接从建到断的**平均值**, 跟存活心跳里的瞬时速率是两回事:
+	// 一次性汇总只有这一个值可算, 想看变化过程要看上面那几行 alive 心跳。
+	log.Println(trace.ID(id), fmt.Sprintf("nat forward closed %s up=%d(%s) down=%d(%s) dur=%s reason=%s",
+		src, up, rate(up, dur), down, rate(down, dur), dur.Round(time.Second), reason))
 }
 
 // forwardCloseReason 归纳裸TCP转发连接的关闭原因: CopyBuffer/WritePump 正常结束(含对端EOF)

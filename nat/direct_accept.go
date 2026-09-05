@@ -164,6 +164,7 @@ func (d *directPeer) serveConn(conn *quic.Conn) {
 	dc := &directConn{peer: d, conn: conn}
 	defer dc.closeUDPSessions()
 	go dc.receiveDatagrams()
+	go dc.logUDPTraffic(conn.Context())
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
@@ -226,8 +227,9 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept %s -> %s (port %d)", remote, target, head.Port))
 
 	up, down := directCopy(stream, targetConn)
-	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept closed %s up=%d down=%d dur=%s",
-		remote, up, down, time.Since(start).Round(time.Second)))
+	dur := time.Since(start)
+	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept closed %s up=%d(%s) down=%d(%s) dur=%s",
+		remote, up, rate(up, dur), down, rate(down, dur), dur.Round(time.Second)))
 }
 
 // directQUICConfig 两侧共用的 QUIC 参数。

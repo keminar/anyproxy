@@ -36,10 +36,29 @@ type udpUplink struct {
 	sessions map[uint32]*relayLocalSession
 	stop     chan struct{} // 随 conn 一起换, 用来收掉保活/回收 goroutine
 	last     atomic.Int64  // 上行最近一次收发时间
+
+	// traffic 这条上行的累计流量 + 瞬时速率。up = 从 B 收到、转发给内网目标(对应
+	// B 那侧的 up 方向), down = 从内网目标读到、发回 B(对应 B 那侧的 down 方向)——
+	// 两端各自独立计数、各自打日志, 中间丢的包两边看到的量本来就可能不同, 这正是
+	// 排查"到底是哪一段丢的"时需要两边分别看的原因, 不用指望对上完全一致。
+	traffic trafficMeter
 }
 
 func newUDPUplink(tag, connect string, forward map[uint16]string) *udpUplink {
 	return &udpUplink{tag: tag, connect: connect, forward: forward, sessions: map[uint32]*relayLocalSession{}}
+}
+
+// logTraffic 只在有变化时打, 免得空闲期刷屏。
+func (u *udpUplink) logTraffic() {
+	snap, ok := u.traffic.snapshot()
+	if !ok {
+		return
+	}
+	u.mu.Lock()
+	n := len(u.sessions)
+	u.mu.Unlock()
+	u.logf("uplink sessions=%d up=%dB/%dpkt(%s) down=%dB/%dpkt(%s)",
+		n, snap.UpBytes, snap.UpPkts, snap.UpRate, snap.DownBytes, snap.DownPkts, snap.DownRate)
 }
 
 func (u *udpUplink) logf(format string, args ...interface{}) {
@@ -176,7 +195,9 @@ func (u *udpUplink) toLocal(conn *net.UDPConn, h relayUDPHead, payload []byte) {
 	s.last.Store(time.Now().UnixNano())
 	if _, err := s.conn.Write(payload); err != nil {
 		u.logf("session %d write to %s: %v", h.session, s.target, err)
+		return
 	}
+	u.traffic.addUp(len(payload))
 }
 
 func (u *udpUplink) session(conn *net.UDPConn, h relayUDPHead) (*relayLocalSession, error) {
@@ -236,6 +257,7 @@ func (u *udpUplink) fromLocal(conn *net.UDPConn, s *relayLocalSession, port uint
 			u.logf("session %d write uplink: %v", s.id, err)
 			return
 		}
+		u.traffic.addDown(n)
 	}
 }
 
@@ -269,7 +291,8 @@ func (u *udpUplink) keepalive(conn *net.UDPConn, stop chan struct{}) {
 	}
 }
 
-// reap 回收空闲会话; 整条上行都没动静时把 socket 一起撤掉, 不再发保活包。
+// reap 回收空闲会话; 整条上行都没动静时把 socket 一起撤掉, 不再发保活包。顺带周期性
+// 汇报流量, 理由同 udpRelay.reap(B 那侧): 没有别的事件能证明数据确实在走。
 func (u *udpUplink) reap(conn *net.UDPConn, stop chan struct{}) {
 	t := time.NewTicker(relayUDPReapEvery)
 	defer t.Stop()
@@ -278,6 +301,7 @@ func (u *udpUplink) reap(conn *net.UDPConn, stop chan struct{}) {
 		case <-stop:
 			return
 		case now := <-t.C:
+			u.logTraffic()
 			var dead []*relayLocalSession
 			u.mu.Lock()
 			for id, s := range u.sessions {

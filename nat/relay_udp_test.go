@@ -291,3 +291,43 @@ func TestRelayUDPUnmappedPort(t *testing.T) {
 		t.Fatal("an unmapped entry port was accepted")
 	}
 }
+
+// UDP 中继原来完全没有持续的流量计数——只有"新会话"/"上行注册"这类一次性事件,
+// 数据正常流动时日志里再也不会冒出任何东西, 没法确认它到底在不在转发。这条用例
+// 覆盖两端(B 的 udpRelay 与 C 的 udpUplink)都要把业务负载字节数记下来, 双向都算。
+func TestRelayUDPCountsTraffic(t *testing.T) {
+	target := echoUDP(t, "echo:")
+	relay, up := relayPair(t, target)
+
+	client, err := net.DialUDP("udp", nil, relay.conn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("client dial: %v", err)
+	}
+	defer client.Close()
+
+	msg := []byte("count-me")
+	if _, err := client.Write(msg); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	buf := make([]byte, 2048)
+	client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("no reply: %v", err)
+	}
+	replyLen := n
+
+	// B 侧: up 是客户端发进来的原始负载(不含 8 字节帧头), down 是回程 echo 服务器
+	// 加了前缀之后的负载。
+	waitFor(t, 2*time.Second, func() bool {
+		relayUp, _, relayDown, _ := relay.traffic.stats()
+		return relayUp == int64(len(msg)) && relayDown == int64(replyLen)
+	}, "relay (B side) did not count the traffic")
+
+	// C 侧: up 是从 B 转发给内网目标的(与 B 的 up 是同一份数据, 只是从另一端观测),
+	// down 是从内网目标读回、发回 B 的。
+	waitFor(t, 2*time.Second, func() bool {
+		upUp, _, upDown, _ := up.traffic.stats()
+		return upUp == int64(len(msg)) && upDown == int64(replyLen)
+	}, "uplink (C side) did not count the traffic")
+}

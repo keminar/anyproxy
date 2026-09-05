@@ -42,6 +42,10 @@ type udpRelay struct {
 	upAt    time.Time
 	opening bool     // 已经发过 u_open, 正在等 C 注册
 	pending [][]byte // 等上行期间暂存的客户端数据报(已拼好包头)
+
+	// traffic 这条中继的累计流量 + 瞬时速率。up = 客户端 -> C, down = C -> 客户端。
+	// 计数口径是业务负载字节数(不含 8 字节帧头), 在 reap() 的周期性 tick 里按需汇报。
+	traffic trafficMeter
 }
 
 // relayRegistry 入口端口 -> 中继, 供 u_ready 信令回查。
@@ -175,6 +179,7 @@ func (u *udpRelay) onUplink(pkt []byte) {
 		}
 		s.touch()
 		u.conn.WriteToUDP(payload, s.addr)
+		u.traffic.addDown(len(payload))
 	}
 }
 
@@ -185,6 +190,9 @@ func (u *udpRelay) onClient(pkt []byte, from *net.UDPAddr) {
 		return // 被 allowIP 挡掉
 	}
 	s.touch()
+	// 在收下这一刻就计数, 不分"立刻转发"还是"暂存等上行"两条路径——两条路径最终都会
+	// 送到 C, 在这里数一次最简单, 也不用在 flush 时解一遍帧头才能拿到长度。
+	u.traffic.addUp(len(pkt))
 	frame := encodeRelayUDP(relayUDPHead{kind: relayKindData, session: s.id, port: u.port}, pkt)
 
 	u.mu.Lock()
@@ -319,13 +327,31 @@ func handleRelayUDPServer(c *Client, msg *Message) bool {
 }
 
 // reap 回收空闲会话; 会话全没了且上行也长期没动静时, 连上行一起忘掉 —— 下次有数据报
-// 再让 C 重新建, 免得 C 无限期为一条早已没人用的中继发保活包。
+// 再让 C 重新建, 免得 C 无限期为一条早已没人用的中继发保活包。顺带周期性汇报流量:
+// UDP 中继除了"新会话"/"上行注册"这类一次性事件, 没有别的动静能证明数据确实在走,
+// 借用同一个 ticker 省一个 goroutine。
 func (u *udpRelay) reap() {
 	t := time.NewTicker(relayUDPReapEvery)
 	defer t.Stop()
 	for now := range t.C {
 		u.reapOnce(now, relayUDPSessionIdle)
+		u.logTraffic()
 	}
+}
+
+// logTraffic 只在有变化时打, 免得空闲期刷屏——跟 direct_entry.go 的 logUDPTraffic
+// 是同一个理由。
+func (u *udpRelay) logTraffic() {
+	snap, ok := u.traffic.snapshot()
+	if !ok {
+		return
+	}
+	u.mu.Lock()
+	n := len(u.sessions)
+	u.mu.Unlock()
+	log.Printf("nat relay udp %s -> email %s: sessions=%d up=%dB/%dpkt(%s) down=%dB/%dpkt(%s)",
+		u.rule.Listen, u.rule.Email, n,
+		snap.UpBytes, snap.UpPkts, snap.UpRate, snap.DownBytes, snap.DownPkts, snap.DownRate)
 }
 
 func (u *udpRelay) reapOnce(now time.Time, idle time.Duration) {
