@@ -35,9 +35,9 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
 - 落地：订阅端收到后 dial **自己的本地代理**（`127.0.0.1:ListenPort`，`nat/handler.go` 的 `dialProxy`），把原始 HTTP 请求原样重放，由订阅端的 router 规则决定后续（直连/再代理）。
 - 适合：把「带特定标记的公网请求」定向送进某内网环境走它的代理。
 
-### 路径 B：裸 TCP 端口转发（`ConnTCP`，新路径）
+### 路径 B：端口转发（`ConnTCP`，新路径）
 
-在服务端开一个**裸 TCP 入口端口**，整条 TCP 连接经 ws 桥接到订阅端，订阅端 dial 一个**写死的内网目标**。就是反向隧道，即内网穿透。
+在服务端开一个**裸入口端口**，整条 TCP 连接经 ws 桥接到订阅端，订阅端 dial 一个**写死的内网目标**。就是反向隧道，即内网穿透。同一个端口还可以再开一条并行的 UDP 通道，见下。
 
 ```
 任意 client ──TCP──▶ 服务端 :2222 (裸TCP监听)
@@ -46,9 +46,44 @@ anyproxy 内置一套基于 websocket 长连接的内网穿透：**内网侧主�
      订阅端 ──dial 写死的 target 127.0.0.1:22──▶ 内网 sshd
 ```
 
-- 服务端：`websocket.server.forward[].listen` 每条起一个裸 TCP 监听（`nat/forward.go` 的 `StartForward`/`listenForward`），每个进来的连接按该规则的 `email` 找订阅端（`GetClientByEmail`）桥接。
+- 服务端：`websocket.server.forward[].listen` 每条起一个裸 TCP 监听（`protocol` 含 udp 时同端口再起一个 UDP 中继）（`nat/forward.go` 的 `StartForward`/`listenForward`），每个进来的连接按该规则的 `email` 找订阅端（`GetClientByEmail`）桥接。
 - 订阅端：`websocket.client.forward[].port → target` 建映射（`nat/forward.go` 的 `buildForward`，每台 server 连接各自一份）。收到服务端「入口端口 Port」来的连接时，dial 对应 `target`；**Port 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。
 - 适合：暴露内网 Web/DB 等任意 TCP 服务（如远程 SSH、内网 Web）。
+
+#### 路径 B 的第二条通道：UDP 中继（`protocol: udp | both`）
+
+上面那条通道只有 TCP。给规则加 `protocol: both`，服务端会在**同一个 host:port** 上再起一个 UDP 监听，UDP 走自己的一条路，跟 TCP 那条互不相干：
+
+```
+mstsc ──TCP 3389──▶ B:2222 ──websocket(TCP)──▶ C ──▶ 127.0.0.1:3389
+mstsc ──UDP 3389──▶ B:2222 ═══════UDP════════▶ C ──▶ 127.0.0.1:3389
+```
+
+```yaml
+websocket:
+  server:
+    forward:
+      - listen: ":3389"
+        email: c@example.com
+        protocol: both      # tcp(默认) / udp / both
+```
+
+订阅端不用改：落地目标仍查同一张 `client.forward[port] → target` 白名单，未映射的端口一样拒绝。
+
+**为什么必须另开一条，而不是把 UDP 塞进 websocket**：websocket 跑在 TCP 上，把数据报塞进去等于给每个包重新套上重传和保序——丢一个包，后面已经到达的帧全得排队等它。这正是 RDP 的 UDP 通道特意要绕开的东西，那样做只会比纯 TCP 更卡。这里三段全程都是 UDP，丢包就是丢包，不会被放大成停顿。
+
+**为什么不用打洞**：两头都是 NAT 内侧主动发起的，B 是公网。`mstsc → B` 是 A 主动发；`C → B` 的上行是 C 主动发，出去时就在自己 NAT 上开了映射，B 顺着回发即可。映射会老化，所以 C 每 20 秒发一个保活包。
+
+**上行是请求驱动的**（和路径 C 一个思路）：C 平时不占 UDP 端口、不发保活包。B 收到第一个客户端数据报时才通过 websocket 发 `u_open` 让 C 建上行，等待期间暂存最多 16 个数据报，C 注册成功后补发。代价是第一个包要等一个来回——RDP 的 UDP 通道是在 TCP 主通道之后才协商的，本来就有富余，且它自己会重试。所有会话空闲 30 分钟后，C 撤掉上行 socket，B 忘掉端点。
+
+**B↔C 那一段带 8 字节包头**（`magic | kind | session(4) | port(2)`，见 `nat/relay_udp.go`）。会话号让 C 知道回包该送回哪个客户端——所以内网目标看到的每个客户端是**各自独立的源端口**，不会被并成一个。端口号每个包都带，不只带在首包：UDP 会乱序，绑在首包上一旦乱序就查不到目标。发给客户端的包是**裸**数据报，包头只存在于 B↔C 之间。
+
+**上行冒充的防护**：C 注册时要出示 B 通过 websocket 下发的一次性 token；注册之后，只有来自那个确切端点的包才当上行处理。光看包头魔数是不够的——那样任何人发个 `0xA5` 开头的包就能往客户端方向注入数据。
+
+**两个已知限制**：
+
+- **B↔C 那段每包多 8 字节**。RDP-UDP 自己探的是到 B 的路径 MTU，不知道后面还有一跳要加头。实际负载在 1200 上下、离 1500 还远，所以基本碰不到；真跑满 MTU 的应用要留意。
+- **中继本身不加密**。`mstsc → B` 这段是客户端直接发的裸数据报，本来就没法包一层，所以只给 B↔C 加密并不能让整条路径变私密。RDP 的 UDP 通道自带 DTLS，不受影响；但换成别的明文 UDP 协议就要自己考虑。真要端到端保密，用路径 C 的直连（那条是 QUIC，全程加密）。
 
 ### 路径 C：IPv6 QUIC 直连（`direct`，数据不经服务端）
 
@@ -311,10 +346,11 @@ websocket:
 
 | 字段 | 角色 | 说明 |
 |------|------|------|
-| `listen` | 服务端 | 裸 TCP 入口监听地址，如 `:2222` |
+| `listen` | 服务端 | 入口监听地址，如 `:2222` |
 | `email` | 服务端 | 把该入口端口的连接转发给此 `email` 的订阅端 |
-| `port` | 订阅端 | 对应服务端入口端口号（如 `2222`） |
-| `target` | 订阅端 | 收到该端口来的连接时 dial 的内网真实目标，如 `127.0.0.1:22` |
+| `protocol` | 服务端 | `tcp`(默认) / `udp` / `both`。TCP 经 websocket 转发，UDP 另起一条 UDP 中继，两条各走各的（见路径 B 的第二条通道） |
+| `port` | 订阅端 | 对应服务端入口端口号（如 `2222`），TCP 与 UDP 共用同一张表 |
+| `target` | 订阅端 | 收到该端口来的连接/数据报时 dial 的内网真实目标，如 `127.0.0.1:22` |
 
 ## 鉴权与握手
 
@@ -350,6 +386,8 @@ websocket:
 - **时钟漂移 > 300s** → 鉴权失败，订阅端会收到 `xtime err: your clock differs from the server by Ns ...`（带实际时差）。保证两端时间同步，或**改用密钥对鉴权**（见上），那套不看时钟。
 - **被服务端 `allowIP` 挡掉** → 订阅端日志 `ws connect err: ... (server replied 403 Forbidden ...)`。注意 IPv6 地址会轮换（RFC 4941 临时地址），白名单建议写前缀网段而不是单个地址。
 - **订阅端只认白名单**：只 dial 自己 `forward` 里写死的 `target`，未映射的 `port` 直接拒绝——服务端入口端口被人乱连也打不进内网。
+- **UDP 中继的第一个包会慢一拍**：上行是收到第一个数据报才建的，头一个包要等 B→C→B 一个来回。RDP 会自己重试，不用管；自己写的 UDP 应用如果不重试就要注意。
+- **UDP 中继只在 `protocol: udp|both` 时才起**：默认 `tcp`，光配 `client.forward` 是不够的，入口那条规则也得写 `protocol`。
 - **路径 A 的 `CONNECT` 不支持**：HTTP 头订阅路径只处理非 `CONNECT` 的 HTTP 请求。
 
 ## 示例

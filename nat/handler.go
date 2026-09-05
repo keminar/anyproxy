@@ -35,6 +35,7 @@ type wsClientConn struct {
 	tempDelay time.Duration
 	tag       string      // 日志前缀, 用 cfg.Connect 区分是哪条连接
 	direct    *directPeer // IPv6 QUIC 直连运行时, 未启用时为 nil
+	uplink    *udpUplink  // UDP 中继上行运行时, 没有 forward 目标时为 nil
 }
 
 // liveAuthCfg 每次重连前重新取一遍 user/pass/host/email/subscribe, 保留热加载语义
@@ -89,6 +90,12 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	// 但 C 侧的 QUIC 监听**不在这里起** —— 它是请求驱动的: 收到服务端转来的 punch 才
 	// 起监听并当场探测端点, 没有活跃连接且空闲一段后自动释放。这样 C 平时不占端口、
 	// 空闲时零后台流量, 也不存在"开机时 IPv6 还没就绪导致永久禁用"的问题。
+	// UDP 中继上行: 只要本端有 forward 落地目标就备着。这里只建运行时不占端口 ——
+	// 真正的 socket 要等服务端下发 u_open 才建(见 nat/relay_udp_client.go)。
+	if len(w.forward) > 0 {
+		w.uplink = newUDPUplink(w.tag, cfg.Connect, w.forward)
+	}
+
 	if cfg.DirectAccept || len(cfg.Direct) > 0 {
 		w.direct = newDirectPeer(w.tag, cfg, w.forward)
 		w.direct.startEntries(cfg.Direct)
@@ -182,6 +189,11 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 		// 不需要在这里通告端点: 端点是收到请求时当场探测的, 不预先上报。
 		client.setDirectPeer(w.direct)
 		w.direct.setClient(client)
+	}
+	if w.uplink != nil {
+		// 只挂到新连接上, 不动已有的 UDP 上行: 上行与 websocket 各自独立, B 那侧记的
+		// 是 C 的 UDP 端点, websocket 重连并不会让它失效。
+		client.setUplink(w.uplink)
 	}
 	client.hub.register <- client
 	defer func() {

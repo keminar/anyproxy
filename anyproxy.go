@@ -195,6 +195,8 @@ func main() {
 		go nat.NewServer(&gWebsocketListen)
 		// 服务端裸TCP端口转发入口(内网穿透)
 		go nat.StartForward(conf.RouterConfig.Websocket.Server.Forward)
+		// UDP 中继入口: 与上面的 TCP 入口同端口、各走各的, 只对 protocol: udp/both 生效。
+		go nat.StartRelayUDP(conf.RouterConfig.Websocket.Server.Forward)
 	}
 	// websocket 客户端: 可同时订阅多台 server(见 conf.Websocket.ClientList)
 	clientList := conf.RouterConfig.Websocket.ClientList()

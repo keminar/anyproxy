@@ -222,10 +222,15 @@ websocket:
     # 同时约束: websocket 订阅方接入 与 下面 forward 裸TCP转发入口(listen)的来源
     allowIP:
     #  - 172.17.0.0/16
-    # 裸TCP端口转发入口(内网穿透): 在 listen 端口收连接, 经 websocket 转给该 email 的订阅方
+    # 端口转发入口(内网穿透): 在 listen 端口收连接, 转给该 email 的订阅方
+    # protocol: tcp(默认) / udp / both。两种协议各走各的通道, 不共用:
+    #   tcp -> 经 websocket 转发(原有)
+    #   udp -> 另起一条 UDP 中继, 全程还是 UDP(见 docs/websocket.md)
+    # both 适合 RDP: 主通道 TCP 3389 + RDP 8+ 图形通道 UDP 3389, 两个监听同端口
     forward:
       # - listen: ":2222"
       #   email: someone@example.com
+      #   protocol: both
   # ===== 客户端(proxy侧) =====
   client:
     # ip 端口

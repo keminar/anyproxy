@@ -104,9 +104,29 @@ type Subscribe struct {
 // ServerForward 服务端(tunnel侧)裸TCP端口转发入口(内网穿透)。
 // 在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
 type ServerForward struct {
-	Listen string `yaml:"listen"` //裸TCP监听地址, 如 ":2222"
+	Listen string `yaml:"listen"` //监听地址, 如 ":2222"
 	Email  string `yaml:"email"`  //转发给此email的订阅方
+
+	// Protocol 入口协议: tcp(默认) / udp / both, 取值同 ClientDirect.Protocol。
+	//
+	// 两种协议在这条中继路径上**各走各的**, 不共用一条通道: TCP 仍旧经 websocket
+	// 转发, UDP 另起一条 UDP 中继(见 nat/relay_udp.go)。绝不能把 UDP 塞进 websocket
+	// —— 那是 TCP, 会给每个数据报强加重传与保序, 把 RDP 的 UDP 通道特意要绕开的
+	// 队头阻塞又请回来, 只会更卡。
+	//
+	// both 用于 RDP: mstsc 的主通道是 TCP 3389, RDP 8+ 的图形通道另用同号 UDP 3389,
+	// 只转发 TCP 等于把后者堵死。入口两个监听同号, 客户端不用改配置。
+	Protocol string `yaml:"protocol"`
 }
+
+// WantTCP 是否要起 TCP 入口(经 websocket 中继)。留空按 tcp 处理, 与旧配置一致。
+func (f ServerForward) WantTCP() bool { return protoWantTCP(f.Protocol) }
+
+// WantUDP 是否要起 UDP 中继入口。
+func (f ServerForward) WantUDP() bool { return protoWantUDP(f.Protocol) }
+
+// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
+func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol) }
 
 // ClientForward 订阅方(proxy侧)裸TCP端口转发目标。
 // 收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
@@ -138,31 +158,31 @@ type ClientDirect struct {
 	Protocol string `yaml:"protocol"`
 }
 
-// 直连入口支持的协议取值。
+// 入口支持的协议取值。直连入口(ClientDirect)与中继入口(ServerForward)共用。
 const (
-	DirectProtoTCP  = "tcp"
-	DirectProtoUDP  = "udp"
-	DirectProtoBoth = "both"
+	ProtoTCP  = "tcp"
+	ProtoUDP  = "udp"
+	ProtoBoth = "both"
 )
 
-// WantTCP 是否要起 TCP 入口。留空按 tcp 处理, 保持与旧配置一致。
-func (d ClientDirect) WantTCP() bool {
-	return d.Protocol == "" || d.Protocol == DirectProtoTCP || d.Protocol == DirectProtoBoth
-}
-
-// WantUDP 是否要起 UDP 入口。
-func (d ClientDirect) WantUDP() bool {
-	return d.Protocol == DirectProtoUDP || d.Protocol == DirectProtoBoth
-}
-
-// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
-func (d ClientDirect) ValidProtocol() bool {
-	switch d.Protocol {
-	case "", DirectProtoTCP, DirectProtoUDP, DirectProtoBoth:
+func protoWantTCP(p string) bool { return p == "" || p == ProtoTCP || p == ProtoBoth }
+func protoWantUDP(p string) bool { return p == ProtoUDP || p == ProtoBoth }
+func protoValid(p string) bool {
+	switch p {
+	case "", ProtoTCP, ProtoUDP, ProtoBoth:
 		return true
 	}
 	return false
 }
+
+// WantTCP 是否要起 TCP 入口。留空按 tcp 处理, 保持与旧配置一致。
+func (d ClientDirect) WantTCP() bool { return protoWantTCP(d.Protocol) }
+
+// WantUDP 是否要起 UDP 入口。
+func (d ClientDirect) WantUDP() bool { return protoWantUDP(d.Protocol) }
+
+// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
+func (d ClientDirect) ValidProtocol() bool { return protoValid(d.Protocol) }
 
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
 type ServerUser struct {

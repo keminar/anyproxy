@@ -95,6 +95,13 @@ func StartForward(rules []conf.ServerForward) {
 		if r.Listen == "" {
 			continue
 		}
+		if !r.ValidProtocol() {
+			log.Printf("nat forward %s has unknown protocol %q, skipped", r.Listen, r.Protocol)
+			continue
+		}
+		if !r.WantTCP() {
+			continue // protocol: udp, 只起 UDP 中继(见 nat/relay_udp_server.go)
+		}
 		go listenForward(r)
 	}
 }

@@ -41,6 +41,10 @@ type Client struct {
 	// 服务端侧不存端点: 端点由对端在收到请求时当场探测并回报, 不预先缓存。
 	directMu sync.Mutex
 	direct   *directPeer
+
+	// UDP 中继运行时(仅订阅方侧, 见 nat/relay_udp_client.go)。与 direct 一样挂在
+	// wsClientConn 上, 每次重连重新挂到新的 Client。
+	uplink *udpUplink
 }
 
 // setDirectPeer 订阅方侧挂上本地直连运行时。
@@ -55,6 +59,20 @@ func (c *Client) directPeerOf() *directPeer {
 	c.directMu.Lock()
 	defer c.directMu.Unlock()
 	return c.direct
+}
+
+// setUplink 订阅方侧挂上 UDP 中继运行时。
+func (c *Client) setUplink(u *udpUplink) {
+	c.directMu.Lock()
+	c.uplink = u
+	c.directMu.Unlock()
+}
+
+// uplinkOf 取订阅方侧的 UDP 中继运行时。
+func (c *Client) uplinkOf() *udpUplink {
+	c.directMu.Lock()
+	defer c.directMu.Unlock()
+	return c.uplink
 }
 
 // 写数据到websocket的对端
@@ -127,6 +145,10 @@ func (c *Client) serverReadPump() {
 		if handleDirectServer(c, msg) {
 			continue
 		}
+		// UDP 中继信令同理: 数据面走的是另一条 UDP 通道, websocket 上只有这条回执。
+		if handleRelayUDPServer(c, msg) {
+			continue
+		}
 		ServerBridge.broadcast <- msg
 	}
 }
@@ -152,6 +174,10 @@ func (c *Client) localReadPump() {
 
 		// 直连信令(d_punch / d_offer)由直连运行时消费, 不走 bridge。
 		if handleDirectClient(c, msg) {
+			continue
+		}
+		// UDP 中继信令(u_open)同理: 它只是让本端去建那条 UDP 上行, 数据不走 websocket。
+		if handleRelayUDPClient(c, msg) {
 			continue
 		}
 
