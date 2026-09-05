@@ -160,11 +160,12 @@ func dialSender(cfg conf.WsClient) (*oneShotSender, error) {
 // 限流刷新: 千兆下一次 io.Copy 循环就是 256KB, 不限流的话每秒要打几千行, 光是写
 // 终端就能拖慢传输本身。
 type progress struct {
-	prefix string
-	total  int64
-	last   time.Time
-	start  time.Time
-	shown  bool
+	prefix   string
+	total    int64
+	start    time.Time
+	last     time.Time
+	lastSent int64
+	shown    bool
 }
 
 func newProgress(prefix string, total int64) *progress {
@@ -173,17 +174,23 @@ func newProgress(prefix string, total int64) *progress {
 }
 
 func (p *progress) update(sent int64) {
-	if time.Since(p.last) < 200*time.Millisecond {
+	now := time.Now()
+	if now.Sub(p.last) < 200*time.Millisecond {
 		return
 	}
-	p.last = time.Now()
+	// 显示的是**这一小段区间**的速率, 不是从头到现在的累计平均: 排查限速/拥塞退避
+	// 时要看的是"现在多快、有没有往下掉", 累计平均会把开头的高速和后面的骤降拉平抹
+	// 掉, 看着一直是个温吞的数字, 分不清是从来没快过还是快过又掉了下去。
+	instRate := rate(sent-p.lastSent, now.Sub(p.last))
+	p.lastSent = sent
+	p.last = now
 	p.shown = true
 	pct := 0.0
 	if p.total > 0 {
 		pct = float64(sent) * 100 / float64(p.total)
 	}
 	fmt.Fprintf(os.Stderr, "\r%s  %s/%s  %.1f%%  %s   ",
-		p.prefix, humanBytes(sent), humanBytes(p.total), pct, rate(sent, time.Since(p.start)))
+		p.prefix, humanBytes(sent), humanBytes(p.total), pct, instRate)
 }
 
 // done 收尾: 把进度那一行擦掉, 让后面的结果行从行首开始打。
