@@ -4,6 +4,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync/atomic"
+	"time"
 
 	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/trace"
@@ -14,11 +16,64 @@ type Bridge struct {
 	bridgeHub *BridgeHub
 	client    *Client
 
-	reqID uint //请求id
+	reqID uint  //请求id
+	typ   uint8 //连接类型(ConnHTTP/ConnTCP), 与 reqID 组成复合键
 	conn  *net.TCPConn
+
+	// 本连接累计流量(原子, 供存活心跳/关闭汇总实时读取):
+	//   copyBytes: CopyBuffer 写出方向(请求端->websocket)
+	//   pumpBytes: WritePump 写入方向(websocket->请求端)
+	copyBytes int64
+	pumpBytes int64
+
+	// lastActive 最近一次两个方向任一发生真实收发的时间(unix nano, 原子), 供空闲
+	// 超时判断使用: 双向都无新流量超过阈值即视为僵尸连接(见 forward.go forwardIdleTimeout)。
+	lastActive int64
+
+	// closeReason 对端(订阅方)经 METHOD_CLOSE 带回的关闭原因, 可能为空。
+	//
+	// 存在的理由: 订阅方拒绝一条连接(比如 client.forward 里查不到入口端口对应的
+	// target)时, 原因原本只会打在订阅方自己的本地日志里 —— 服务端这边看到的只是
+	// "连接没数据就断了", 真正的根因要跑去另一台机器翻日志才找得到。让订阅方把原因
+	// 带回来, 服务端才能在自己的关闭汇总日志里直接说清楚"为什么"。
+	closeReason atomic.Value // string
 
 	// Buffered channel of outbound messages.
 	send chan []byte
+}
+
+// setCloseReason 由 bridge_hub 收到 METHOD_CLOSE 时调用, 记下对端带回的原因(可能为空)。
+func (b *Bridge) setCloseReason(reason string) {
+	if reason != "" {
+		b.closeReason.Store(reason)
+	}
+}
+
+// CloseReason 取对端给的关闭原因; 对端没给理由(纯粹传完数据正常关闭)则返回空串。
+// 只能在 WritePump 返回之后调用才有意义: closeReason 是随 METHOD_CLOSE 一起、在
+// send 通道关闭之前写入的, channel close 建立的 happens-before 保证 WritePump 的
+// 调用方读到的一定是最新值。
+func (b *Bridge) CloseReason() string {
+	if v, ok := b.closeReason.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
+// Stats 返回本连接两个方向的累计字节(原子读), 供调用方打存活/汇总日志。
+// 服务端入口连接视角: copyBytes 为上行(请求端->内网), pumpBytes 为下行(内网->请求端)。
+func (b *Bridge) Stats() (copyBytes, pumpBytes int64) {
+	return atomic.LoadInt64(&b.copyBytes), atomic.LoadInt64(&b.pumpBytes)
+}
+
+// touch 记录一次真实收发, 刷新 lastActive。
+func (b *Bridge) touch() {
+	atomic.StoreInt64(&b.lastActive, time.Now().UnixNano())
+}
+
+// IdleFor 返回距离上次任一方向有真实收发数据过去的时长。
+func (b *Bridge) IdleFor() time.Duration {
+	return time.Since(time.Unix(0, atomic.LoadInt64(&b.lastActive)))
 }
 
 // Unregister 包外面调用取消注册
@@ -31,7 +86,7 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 	// 先把p拷贝一份，否则会被外面的CopyBuffer再次修改，因为是引入传递
 	body := make([]byte, len(p))
 	copy(body, p)
-	msg := &Message{ID: b.reqID, Body: body}
+	msg := &Message{ID: b.reqID, Type: b.typ, Body: body}
 
 	if config.DebugLevel >= config.LevelDebugBody {
 		md5Val, _ := md5Byte(msg.Body)
@@ -43,9 +98,10 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Open 通知websocket 创建连接
-func (b *Bridge) Open() {
-	msg := &Message{ID: b.reqID, Method: METHOD_CREATE}
+// Open 通知websocket 创建连接。port 仅用于裸TCP路径(ConnTCP), 供订阅方查固定
+// target; HTTP 路径传 0 即可。
+func (b *Bridge) Open(port uint16) {
+	msg := &Message{ID: b.reqID, Type: b.typ, Method: METHOD_CREATE, Port: port}
 	//b.client.send <- msg //注意:不能直接写send会与close有并发安全冲突
 	cmsg := &CMessage{client: b.client, message: msg}
 	b.client.hub.broadcast <- cmsg
@@ -53,7 +109,7 @@ func (b *Bridge) Open() {
 
 // CloseWrite 通知tcp关闭连接
 func (b *Bridge) CloseWrite() {
-	msg := &Message{ID: b.reqID, Method: METHOD_CLOSE}
+	msg := &Message{ID: b.reqID, Type: b.typ, Method: METHOD_CLOSE}
 	cmsg := &CMessage{client: b.client, message: msg}
 	b.client.hub.broadcast <- cmsg
 }
@@ -85,6 +141,8 @@ func (b *Bridge) WritePump() (written int64, err error) {
 				return
 			}
 			written += int64(nw)
+			atomic.AddInt64(&b.pumpBytes, int64(nw))
+			b.touch()
 		}
 	}
 }
@@ -104,11 +162,13 @@ func (b *Bridge) CopyBuffer(dst io.Writer, src io.Reader, srcname string) (writt
 		if nr > 0 {
 			if config.DebugLevel >= config.LevelDebugBody {
 				md5Val, _ := md5Byte(buf[0:nr])
-				log.Println("net_debug_copy_buffer", trace.ID(b.reqID), srcname, i, nr, md5Val)
+				log.Println(trace.ID(b.reqID), "net_debug_copy_buffer", srcname, i, nr, md5Val)
 			}
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
+				atomic.AddInt64(&b.copyBytes, int64(nw))
+				b.touch()
 			}
 			if ew != nil {
 				err = ew

@@ -1,11 +1,13 @@
 package nat
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,6 +24,15 @@ const (
 
 	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
+
+	// authSkewLimit 鉴权允许的最大时钟偏差(秒), 双向。token 里带时间戳是为了防重放,
+	// 窗口越小越安全, 但两端时钟不同步就会连不上 —— 想彻底摆脱这个限制, 用密钥对
+	// 鉴权(见 docs/websocket.md), 那套是挑战-应答, 不依赖时钟。
+	authSkewLimit int64 = 300
+
+	// authKeyWait 密钥鉴权里等对端回签名的时限。这一步多一个来回, 不设超时的话
+	// 一个不回包的连接会一直占着。
+	authKeyWait = 10 * time.Second
 )
 
 var (
@@ -34,21 +45,62 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
-// ServerHub 服务端的ws链接信息
-var ServerHub *Hub
+// connSeq 服务端(B)连接序号, 用于给每条连接生成一个贯穿其生命周期的日志前缀
+// (见 serveWs 的 tag), 方便在同一 email 多次重连/并发中继时把日志行对上号。
+var connSeq atomic.Uint64
 
-// ServerBridge 服务端的http与ws链接
-var ServerBridge *BridgeHub
+// serverState 服务端(B 侧)的整套全局状态: hub(在线订阅方) + bridge(http/ws 桥接表)
+// + 是否已启动。三者必须一起换、一起看 —— 分开成三个全局变量时, 读方可能读到"新 hub
+// 配旧 bridge"这种半更新的组合。
+//
+// 生产上它只在 NewServer 启动时装配一次, 之后全是只读, 本来不会出问题。真正必须原子化
+// 的是测试: fileRelayTestServer 会在每个用例里重新装配、结束时再还原这套状态, 而上一轮
+// 用例遗留的 serverReadPump goroutine 可能还在跑(它的 websocket 是 hijack 的, httptest
+// 的 Close 收不到它), 于是"用例写全局量、遗留 goroutine 读"就是实打实的 data race ——
+// 看 client.go 的 serverReadPump, 它每条消息都要读 bridge; -race 下整个 nat 包直接判
+// 失败(CI 上就是这么挂的)。打包成一个不可变快照、用原子指针发布: 写方先填好快照再
+// Store, 读方 Load 到指针后再解引用, 原子操作本身提供 happens-before, 竞争检测器认。
+type serverState struct {
+	hub     *Hub
+	bridge  *BridgeHub
+	started bool
+}
 
-// serverStart 是否开启服务
-var serverStart = false
+var serverStatePtr atomic.Pointer[serverState]
+
+// currentServerState 取一份当前服务端全局状态的快照。未启动时各字段为零值
+// (hub/bridge 为 nil, started 为 false), 所以调用方拿到后仍要判 nil。
+func currentServerState() serverState {
+	if s := serverStatePtr.Load(); s != nil {
+		return *s
+	}
+	return serverState{}
+}
+
+// setServerState 原子地整体替换服务端全局状态: 生产在 NewServer 里调一次, 测试 helper
+// 在装配与还原时各调一次。
+func setServerState(hub *Hub, bridge *BridgeHub, started bool) {
+	serverStatePtr.Store(&serverState{hub: hub, bridge: bridge, started: started})
+}
+
+// ServerHubAndBridge 取一份"当前服务端 hub + bridge"的快照, 给包外(proto 的 ws 转发)
+// 用。未启动时两个都是 nil, 调用方必须判空。
+//
+// 以前这里是两个可直接读的导出变量(nat.ServerHub / nat.ServerBridge)。改成访问器是
+// 因为裸读包级变量和测试装配/还原时的写会构成 data race; 而且分两次读还有可能读成
+// "新 hub 配旧 bridge"——一次拿一份快照就没这个问题。
+func ServerHubAndBridge() (*Hub, *BridgeHub) {
+	st := currentServerState()
+	return st.hub, st.bridge
+}
 
 // Eable 检查是否可以发送nat请求
 func Eable() bool {
-	if !serverStart {
+	st := currentServerState()
+	if !st.started {
 		return false
 	}
-	if len(ServerHub.clients) == 0 {
+	if st.hub == nil || st.hub.ClientCount() == 0 {
 		return false
 	}
 	return true
@@ -56,15 +108,21 @@ func Eable() bool {
 
 // NewServer 开启服务
 func NewServer(addr *string) {
-	ServerHub = newHub()
-	go ServerHub.run()
-	ServerBridge = newBridgeHub()
-	go ServerBridge.run()
-	serverStart = true
+	hub := newHub()
+	go hub.run()
+	bridge := newBridgeHub()
+	go bridge.run()
+	setServerState(hub, bridge, true)
 
+	// 闭包直接捕获本次装配的 hub, 不再每次请求去读全局量 —— 少一次共享读, 语义也更直白。
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(ServerHub, w, r)
+		serveWs(hub, w, r)
 	})
+
+	// 直连用的 UDP 反射器, 绑同一个端口号(TCP/UDP 互不冲突), 订阅方可直接从 websocket
+	// 的连接地址推出它, 不用额外配置。订阅方必须用 QUIC 那个 socket 去问它要端点 ——
+	// websocket 是 TCP、是另一个 socket, 观测到的地址不能代表 UDP 会用哪个源地址。
+	StartDirectReflector(*addr)
 
 	log.Printf("Listening for websocket connections on %s\n", *addr)
 
@@ -82,11 +140,23 @@ func NewServer(addr *string) {
 
 // serveWs handles websocket requests from the peer.
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	// server.allowIP 白名单: 按真实 TCP 来源(r.RemoteAddr)判定, 不信可伪造的头部;
+	// 命中即拒绝, 连 upgrade 都不做。为空则不限制。
+	peerIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if !serverIPAllowed(peerIP) {
+		log.Printf("serveWs deny ip %s, not in websocket.server.allowIP\n", peerIP)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("serveWs", err)
 		return
 	}
+
+	// tag 贯穿这条连接生命周期的日志前缀, 见 connSeq 的注释。
+	tag := fmt.Sprintf("#%d", connSeq.Add(1))
 
 	// 认证
 	var user AuthMessage
@@ -101,22 +171,20 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, []byte("email error"))
 		return
 	}
-	xtime := time.Now().Unix()
-	if xtime-user.Xtime > 300 {
-		log.Printf("serveWs client email %s ignore, xtime is error\n", user.Email)
-		conn.WriteMessage(websocket.TextMessage, []byte("xtime err, please check local time"))
-		return
-	}
-	if user.User != conf.RouterConfig.Websocket.User {
-		log.Printf("serveWs client email %s ignore, user is error\n", user.Email)
+	// 先查账号再验凭据: 走哪套鉴权(密码还是密钥)由这个账号自己的配置决定, 而时钟检查
+	// 只对密码方案有意义 —— 密钥方案存在的理由正是不依赖时钟, 不能放在分支前一刀切。
+	su, found := conf.RouterConfig().Websocket.Server.LookupUser(user.User)
+	if !found || su.Disable {
+		if found {
+			log.Printf("serveWs client email %s ignore, user %s is disabled\n", user.Email, user.User)
+		} else {
+			log.Printf("serveWs client email %s ignore, user is error\n", user.Email)
+		}
 		conn.WriteMessage(websocket.TextMessage, []byte("user err"))
 		return
 	}
-
-	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, conf.RouterConfig.Websocket.Pass, user.Xtime))
-	if err != nil || user.Token != token {
-		log.Printf("serveWs client email %s ignore, token is error\n", user.Email)
-		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+	if err := authClient(conn, user, su); err != nil {
+		log.Printf("serveWs client email %s ignore, %v\n", user.Email, err)
 		return
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
@@ -135,26 +203,101 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(subscribe) == 0 {
-		log.Printf("serveWs client email %s ignore, subscribe is empty\n", user.Email)
-		conn.WriteMessage(websocket.TextMessage, []byte("subscribe empty err"))
-		return
+		if reason, ok := emptySubscribeAllowed(user); ok {
+			log.Printf("[%s] serveWs client email %s empty subscribe, allowed for %s\n", tag, user.Email, reason)
+		} else {
+			log.Printf("[%s] serveWs client email %s ignore, subscribe is empty\n", tag, user.Email)
+			conn.WriteMessage(websocket.TextMessage, []byte("subscribe empty err"))
+			return
+		}
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
 
-	clientNum := len(hub.clients)
+	clientNum := hub.ClientCount()
 	// 注册连接
-	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Email: user.Email, Subscribe: subscribe}
+	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Email: user.Email, Subscribe: subscribe, tag: tag}
 	client.hub.register <- client
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 
 	remote := getIPAdress(r, []string{"X-Real-IP"})
-	log.Printf("serveWs client email %s ip %s connected, subscribe %v, total client nums %d\n", user.Email, remote, subscribe, clientNum)
+	log.Printf("[%s] serveWs client email %s user %s ip %s connected, subscribe %v, total client nums %d\n", tag, user.Email, user.User, remote, subscribe, clientNum)
 
 	go client.writePump()
 	go client.serverReadPump()
 }
 
+// emptySubscribeAllowed 判断一条没有 subscribe 头部规则的连接该不该被放行。
+// ok=false 时 reason 无意义, 调用方应拒绝并断开。
+//
+// 空订阅只在三种情况下放行, 各自对应一种"这条连接虽然没有 subscribe, 但确实有活
+// 要干"的场景, 缺了任何一种服务端都会一直拒绝:
+//  1. isForwardEmail: 该 email 是某条 server.forward 规则的目标(仅走裸TCP转发),
+//     这是服务端自己的配置, 不需要客户端声明什么。
+//  2. user.Direct: 该订阅方参与 QUIC 直连(配了 directAccept 或 direct[]) —— 直连
+//     的入口在订阅方自己机器上, 服务端不需要配 server.forward, 订阅方也不需要头部
+//     订阅规则, 不放行的话直连双方都会卡在这一步连不上。
+//  3. user.Receive: 该订阅方配了 websocket.client.receive.dir, 可能被别人用
+//     -send/-recv 中继(relay)方式收发文件——中继要靠服务端从 hub 按 email 查到这条
+//     连接, 不要求配 directAccept, 不放行的话 receive 永远收不到任何东西。
+//
+// 三者都没有的连接才是真的"什么都不做"——继续放行的话服务端也无法把它路由给任何
+// 请求方, 保留这条连接纯属陪跑。
+func emptySubscribeAllowed(user AuthMessage) (reason string, ok bool) {
+	var reasons []string
+	if isForwardEmail(user.Email) {
+		reasons = append(reasons, "forward")
+	}
+	if user.Direct {
+		reasons = append(reasons, "direct")
+	}
+	if user.Receive {
+		reasons = append(reasons, "receive")
+	}
+	if len(reasons) == 0 {
+		return "", false
+	}
+	return strings.Join(reasons, ","), true
+}
+
 // getIPAdress 客户端IP
+// serverIPAllowed 判断接入 websocket 服务端的客户端 IP 是否在 server.allowIP 内。
+// 为空则不限制; loopback(本机自连) 始终放行; 支持 CIDR 与单 IP。
+func serverIPAllowed(ip string) bool {
+	allows := conf.RouterConfig().Websocket.Server.AllowIP
+	if len(allows) == 0 {
+		return true
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	if parsed.IsLoopback() {
+		return true
+	}
+	for _, p := range allows {
+		if ipInCIDR(parsed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ipInCIDR 判断 IP 是否在 cidr 内(支持 ipv4/ipv6); 不是 CIDR 时按单 IP 比较。
+//
+// 单 IP 分支必须解析后用 IP.Equal 比, 不能比字符串: 同一个 IPv6 地址有多种写法
+// (大小写、是否压缩零段), 而 IP.String() 只产出规范形式 —— 配置里写
+// 2001:0DB8::1 或 2001:db8:0:0:0:0:0:1 都会匹配不上同一个地址。IPv4 因为写法
+// 唯一所以看不出问题。
+func ipInCIDR(ip net.IP, cidr string) bool {
+	if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
+		return ipNet.Contains(ip)
+	}
+	if single := net.ParseIP(strings.TrimSpace(cidr)); single != nil {
+		return single.Equal(ip)
+	}
+	return false
+}
+
 func getIPAdress(req *http.Request, head []string) string {
 	var ipAddress string
 	// X-Forwarded-For容易被伪造,最好不用
@@ -174,4 +317,77 @@ func getIPAdress(req *http.Request, head []string) string {
 		ipAddress, _, _ = net.SplitHostPort(req.RemoteAddr)
 	}
 	return ipAddress
+}
+
+// authClient 校验一条订阅方的凭据。两套方案二选一, 由服务端上这个账号配了 key 还是
+// pass 决定: 配了 key 就只认密钥, 否则只认密码。配错的一方要能从回包看出是哪种不匹配,
+// 否则现象只是"连不上"。
+//
+// 失败时原因已经回给对端, 返回的 error 只用于服务端日志。
+func authClient(conn *websocket.Conn, user AuthMessage, su conf.ServerUser) error {
+	if su.Key != "" {
+		if !user.KeyAuth {
+			conn.WriteMessage(websocket.TextMessage, []byte(
+				"auth err: server expects key auth for this user, please set websocket.client.key"))
+			return fmt.Errorf("user %s is key-auth, but client sent a password token", user.User)
+		}
+		return authByKey(conn, user, su.Key)
+	}
+	if user.KeyAuth {
+		conn.WriteMessage(websocket.TextMessage, []byte(
+			"auth err: server has no key for this user, please use websocket.client.pass"))
+		return fmt.Errorf("user %s is password-auth, but client asked for key auth", user.User)
+	}
+	return authByPass(conn, user, su.Pass)
+}
+
+// authByPass 密码方案: token = md5(user|pass|xtime), xtime 必须落在时间窗口内。
+func authByPass(conn *websocket.Conn, user AuthMessage, pass string) error {
+	// 时间窗口必须取绝对值: 原先只判 xtime-user.Xtime > 300, 即只挡住"客户端慢于
+	// 服务端", 客户端时钟快多少都能通过, 防重放窗口是漏的。
+	skew := time.Now().Unix() - user.Xtime
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > authSkewLimit {
+		// 把实际时差告诉对方: 只说"时间不对"的话, 对端不知道差多少、往哪个方向差,
+		// 而它自己是看不到服务端时间的。
+		conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(
+			"xtime err: your clock differs from the server by %ds (limit %ds), please sync time (NTP) or switch to key auth",
+			skew, authSkewLimit)))
+		return fmt.Errorf("clock skew %ds exceeds %ds", skew, authSkewLimit)
+	}
+	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, pass, user.Xtime))
+	if err != nil || user.Token != token {
+		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
+		return errors.New("token is error")
+	}
+	return nil
+}
+
+// authByKey 密钥方案: 服务端发一次性随机数, 客户端用私钥签名, 服务端用配置里的公钥验签。
+// 随机数只用一次, 防重放不靠时间戳, 所以这条路径完全不看时钟。
+func authByKey(conn *websocket.Conn, user AuthMessage, pubKey string) error {
+	challengeB64, challenge, err := newAuthChallenge()
+	if err != nil {
+		conn.WriteMessage(websocket.TextMessage, []byte("auth err: server failed to create challenge"))
+		return fmt.Errorf("create challenge: %w", err)
+	}
+	if err := conn.WriteJSON(AuthChallenge{Challenge: challengeB64}); err != nil {
+		return fmt.Errorf("send challenge: %w", err)
+	}
+	// 这一步比密码方案多一个来回, 必须有超时: 对端不回签名的话, 没有 deadline 就会
+	// 一直挂在这里占着连接。读完立刻清掉, 后面的 readPump 会设它自己的 deadline。
+	conn.SetReadDeadline(time.Now().Add(authKeyWait))
+	var sig AuthSignature
+	err = conn.ReadJSON(&sig)
+	conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return fmt.Errorf("read signature: %w", err)
+	}
+	if err := verifyChallenge(pubKey, challenge, sig.Signature); err != nil {
+		conn.WriteMessage(websocket.TextMessage, []byte("key err: "+err.Error()))
+		return fmt.Errorf("key auth failed: %w", err)
+	}
+	return nil
 }
