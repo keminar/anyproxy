@@ -2,6 +2,22 @@
 
 本页汇总最常用的启动示例：本机代理、tunneld 服务端、转发到上级代理、端口转发、平滑重启与 Docker 部署。运行模式与配置的完整说明见 [modes.md](modes.md)、[configuration.md](configuration.md)。
 
+## 生成配置文件
+
+新机器上还没有配置、也记不住字段格式时，先生成一份带注释的模板（按运行模式裁剪，已存在的文件不覆盖）：
+
+```bash
+# 生成到程序目录下的 conf/router.yaml，并建出默认日志目录
+./anyproxy -genconf
+
+# 按模式生成 / 指定路径 / 只打到屏幕
+./anyproxy -genconf -mode tunnel
+./anyproxy -genconf -c /etc/anyproxy/router.yaml
+./anyproxy -genconf -mode tun -c -
+```
+
+生成后按输出提示改几个值即可启动，详见 [cli.md](cli.md#新机器初始化配置)。
+
 ## 本机启动
 
 ```bash

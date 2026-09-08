@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,8 +49,6 @@ const (
 	tcpTimeWait = 5 * time.Second
 )
 
-// connSeq 为每个TUN连接生成日志追踪ID
-var connSeq uint64
 
 // runStack 在TUN设备上运行 gVisor 用户态协议栈，把捕获到的TCP连接交给
 // proto.ForwardTCP 复用已有代理路由逻辑。阻塞直到 ctx 结束或设备关闭。
@@ -152,7 +149,7 @@ func handleTCP(ctx context.Context, r *tcp.ForwarderRequest) {
 	r.Complete(false)
 
 	conn := gonet.NewTCPConn(&wq, tcpEP)
-	reqID := uint(atomic.AddUint64(&connSeq, 1))
+	reqID := grace.NextTraceID()
 	cctx := context.WithValue(ctx, grace.TraceIDContextKey, reqID)
 
 	go func() {

@@ -20,6 +20,7 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 	"github.com/keminar/anyproxy/utils/cache"
 	"github.com/keminar/anyproxy/utils/conf"
+	"github.com/keminar/anyproxy/utils/dnsutil"
 	"github.com/keminar/anyproxy/utils/tools"
 	"github.com/keminar/anyproxy/utils/trace"
 	"golang.org/x/net/proxy"
@@ -56,15 +57,9 @@ var outbound *stats.Manager
 func init() {
 	inbound = stats.NewManager()
 	outbound = stats.NewManager()
-	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
-		defer ticker.Stop()
-		for range ticker.C {
-			//log.Println("ticker...")
-			inbound.UnregisterCounter()
-			outbound.UnregisterCounter()
-		}
-	}()
+	// 1 分钟一次的 stats ticker 改为懒启动, 见 stats.Manager.startTicker:
+	// 一次性进程 (-send/-recv 等) 不走 tunnel, 不会调用 RegisterCounter,
+	// 也就不会空转起 ticker / 打出 "stats links: 0"。
 }
 
 // 转发实体
@@ -434,6 +429,18 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	} else {
 		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
 	}
+	// routeTag: 未命中带 target 的 host 规则(host.Target 为空)即走了 default, 标出本次按哪类
+	// 默认分流及其策略值(tcp 用 default.tcpTarget, http/https 用 default.target)。不单独占一行,
+	// 而是拼到下面 PROXY/direct/auto 决策行末尾, 便于排查两类默认不一致导致的分叉。命中 host 规则则为空。
+	// 取此处的 confTarget(default 原始值, 尚未被 localport/auto 改写), 反映默认到底怎么配的。
+	routeTag := ""
+	if host.Target == "" {
+		field := "target"
+		if proto == protoTCP {
+			field = "tcpTarget"
+		}
+		routeTag = fmt.Sprintf(" (default.%s=%s)", field, confTarget)
+	}
 	// localport: 命中的端口走本地直连，其余走代理。内置 21/22/3306(ftp/ssh/mysql)，可在配置追加。
 	if confTarget == "localport" {
 		if isLocalTCPPort(dstPort) {
@@ -451,6 +458,21 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	} else if dstName != "" && confDNS != "remote" && !s.req.TUN {
 		// http请求的dns解析；TUN 连接的目标 IP 已由内核路由确定，无需重新解析
 		dstIP, state = s.lookup(dstName, dstIP)
+	}
+
+	// 黑洞哨兵 IP: 目标 IP 命中黑洞地址(系统 hosts 或本配置把域名指向不可路由的哨兵 IP,
+	// 如 192.0.0.0)。语义: 无代理时该 IP 不可达=本地拦截; 走到这里说明已被引擎接管, 强制
+	// target=remote + dns=remote —— 必须经下级代理、由下级按域名解析真实 IP 连出(绝不直连
+	// 哨兵 IP)。显式 deny 的规则优先, 不被覆盖。需要域名才能远程解析, 嗅不到则拒绝。
+	blackhole := dnsutil.IsBlackholeIP(dstIP)
+	if blackhole && confTarget != "deny" {
+		if dstName == "" {
+			err = fmt.Errorf("blackhole ip %s but no domain to proxy, deny", dstIP)
+			return
+		}
+		confTarget = "remote"
+		confDNS = "remote"
+		log.Println(trace.ID(s.req.ID), fmt.Sprintf("blackhole ip %s -> force remote dns for %s", dstIP, dstName))
 	}
 
 	// 检查是否要换端口
@@ -482,7 +504,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 					forName = " for " + dstName
 				}
 				if e := s.dail(network, connAddr, autoDirectSec); e == nil {
-					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s", connAddr, forName))
+					log.Println(trace.ID(s.req.ID), fmt.Sprintf("auto to %s%s%s", connAddr, forName, routeTag))
 					s.curState = stateNew
 					return
 				} else {
@@ -564,6 +586,12 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		logSelfProxy(s.req.ID, proxyServer, proxyPort)
 		proxyServer, proxyPort = "", 0
 	}
+	// 黑洞 IP 必须经代理出去: 走到这里仍无可用代理, 直连只会连向不可路由的哨兵 IP,
+	// 直接判失败, 避免徒劳拨号超时。等价于"无代理时该域名不可访问"。
+	if blackhole && (proxyServer == "" || proxyPort == 0) {
+		err = fmt.Errorf("blackhole ip %s requires an upstream proxy, none available for %s", dstIP, dstName)
+		return
+	}
 	if proxyServer != "" && proxyPort > 0 && confTarget != "local" {
 		// remote 请求(auto 的直连探测已在前面完成, 到这里说明要走代理)
 		var targetAddr string
@@ -586,20 +614,20 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		s.registerCounter(dstName, dstIP, dstPort, fmt.Sprintf("%s:%d", proxyServer, proxyPort))
 		switch proxyScheme {
 		case "socks5":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 			err = s.socks5(network, connAddr, targetNet, targetAddr)
 		case "tunnel":
-			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+			log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 			err = s.httpConnect(network, connAddr, targetAddr, true)
 		case "http":
 			// 直发原始请求这条分支要求请求已被 http.go 解析改写成绝对形式(absolute-form)，
 			// 仅适用于监听入口的 HTTP 流。TUN 是原始字节转发(origin-form: GET /path)，
 			// http 代理不认，故 TUN 的 http 也必须用 CONNECT 隧道。
-			if proto == protoHTTP && !s.req.TUN { //可避免转发到charles显示2次域名，且部分电脑请求出错
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s", connAddr))
+			if proto == protoHTTP && !s.req.Raw { //可避免转发到charles显示2次域名，且部分电脑请求出错
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s%s", connAddr, routeTag))
 				err = s.dail(network, connAddr, 0)
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s", connAddr, targetAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("PROXY %s for %s%s", connAddr, targetAddr, routeTag))
 				err = s.httpConnect(network, connAddr, targetAddr, false)
 			}
 		default:
@@ -610,9 +638,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 		network, connAddr := s.buildAddress(dstName, dstIP, dstPort, true)
 		if connAddr != "" {
 			if dstName == "" {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s", connAddr))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s%s", connAddr, routeTag))
 			} else {
-				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s", connAddr, dstName))
+				log.Println(trace.ID(s.req.ID), fmt.Sprintf("direct to %s for %s%s", connAddr, dstName, routeTag))
 			}
 			err = s.dail(network, connAddr, 0)
 		} else {

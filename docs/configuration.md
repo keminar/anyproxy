@@ -94,6 +94,7 @@ hosts:
 | `default.dns` | `local` | DNS 服务器：`local` 当前环境 / `remote` 远程（仅 `target=remote` 有效） |
 | `default.match` | `equal` | 默认域名比对方式：`contain`/`equal`（仅 `name` 无星号且未显式配 `match` 时生效） |
 | `default.proxy` | 空 | 全局代理服务器，优先级低于 `-p`；支持多代理与 `local`/`deny` 后缀，见 [routing.md](routing.md#proxy-字段) |
+| `default.blackholeIP` | `192.0.0.0` | 黑洞哨兵 IP：把域名(系统 hosts 或本配置)指向它，达成「无代理时本地不可达=拦截、有代理时强制走代理并远程解析」。命中该 IP 的连接强制 `target=remote`+`dns=remote`；Windows WinDivert 下强制拦截进引擎(不受 `bypassPrivate` 影响)。设 `off`/`none`/`disable` 关闭。专题详见 [blackhole-sentinel.md](blackhole-sentinel.md) |
 
 ## hosts（域名规则列表，可热加载）
 
@@ -190,12 +191,12 @@ macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`
 
 ## websocket（内网穿透）
 
-配置按角色分 `server`（服务端）/ `client`（客户端）两块。服务端需配 `server.listen`/`user`/`pass`；客户端需配 `client.connect`/`user`/`email`（缺一不发起连接）。详见 [modes.md](modes.md#websocket-内网穿透)。
+配置按角色分 `server`（服务端）/ `client`（客户端）两块。服务端需配 `server.listen`/`users`；客户端需配 `client.connect`/`user`/`email`（缺一不发起连接）。详见 [modes.md](modes.md#websocket-内网穿透)。
 
 | 字段 | 说明 |
 |------|------|
 | `websocket.server.listen` | 服务端监听地址端口 |
-| `websocket.server.user` / `.pass` | 服务端认证用户名 / 密码（校验接入的订阅端） |
+| `websocket.server.users` | 鉴权账号数组，每条 `{user, pass, disable}`，校验接入的订阅端；`disable: true` 可临时停用某个账号 |
 | `websocket.server.allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP），为空不限制；按真实 TCP 来源判定，loopback 始终放行 |
 | `websocket.server.forward` | 服务端裸TCP转发入口列表，元素为 `{listen, email}` |
 | `websocket.client.connect` | 客户端连接的地址端口 |

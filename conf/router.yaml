@@ -146,6 +146,16 @@ default:
   # (全部代理都连不通时: local 走本地直连, deny 拒绝)。例:
   #   proxy: http://127.0.0.1:8888, http://127.0.0.1:7777 local
   proxy:
+  # 黑洞哨兵IP, 不配默认 192.0.0.0; 设 off/none/disable 关闭。
+  # 用法: 把域名指向它, 如系统 hosts 写 `192.0.0.0 example.com`。达成两个效果:
+  #   ① 没开代理时: 192.0.0.0 不可路由, 本机连它必然失败 = 天然屏蔽该域名。
+  #   ② 开了 tun/WinDivert 代理(未设系统代理)时: 命中该 IP 的连接被强制拦截进引擎,
+  #      并强制按 target=remote + dns=remote 处理 —— 不直连哨兵, 而是从 SNI 取域名交下级
+  #      代理远程解析真实 IP 连出, 于是该域名经代理可正常访问。
+  # windows WinDivert 下该 IP 强制进引擎(不受 tun.windows.bypassPrivate 影响)。
+  # 注意: 哨兵必须用 192.0.0.0(不能用 127.0.0.1 或私网, 否则不进 TUN/引擎); ②依赖能嗅到
+  # SNI/Host 域名(ECH 等嗅不到则拒绝), 且需有可用下级代理。专题详见 docs/blackhole-sentinel.md。
+  #blackholeIP: 192.0.0.0
 
 # 域名，可热加载
 # name 支持首/尾 * 通配，无需再配 match(去掉星号的部分记为 X)：
@@ -186,26 +196,43 @@ hosts:
         to: 88
     allowIP:
      # - 172.17.0.12
+  # 黑洞哨兵用法(配置 hosts 版, 对 DoH 客户端也生效): 把域名 ip 指到 default.blackholeIP。
+  # 效果同系统 hosts 写 192.0.0.0, 但因走 DNS 层劫持, DoH/系统解析都拿到哨兵 IP;
+  # 命中后强制 remote+remote 经下级代理远程解析访问, 无代理时不可达=屏蔽。
+  #- name: blocked-but-proxyable.com
+  #  ip: 192.0.0.0
 
 #websocket 配置, 按角色分 server(服务端) / client(客户端) 两块
-#  server: 需配 listen, user, pass 才起服务
-#  client: 未配 connect / user / email 则不发起连接
+#  server: 需配 listen, users 才起服务
+#  client: 未配 connect / user / email 则不发起连接; 要同时订阅多台 server 用 clients(数组)代替, 见下方注释
 websocket:
   # ===== 服务端(tunnel侧) =====
   server:
     # 监听端口
     listen:
-    # 认证用户(校验接入的订阅方)
-    user:
-    # 密码
-    pass:
-    # 可接入的客户端IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
+    # 鉴权账号数组(校验接入的订阅方), 每条 user + (pass 或 key) + disable
+    # pass 与 key 二选一(都配时用 key): key 是 anyproxy -genkey 生成的公钥, 走挑战-应答,
+    # 不依赖两端时钟同步, 且服务端只存公钥, 配置泄露也登录不了; disable: true 临时停用账号
+    # pass 要求至少 18 位, 且英文字母、数字都要有; 不达标(含没配 pass 又没配 key)的账号
+    # 加载时会被自动置为 disable, 不会悄悄放行一个弱密码/空密码账号
+    users:
+      # - user:
+      #   pass:
+      #   key:
+      #   disable: false
+    # 可接入来源IP白名单(CIDR/单IP)，为空不限制；按真实TCP来源判定，loopback 始终放行
+    # 同时约束: websocket 订阅方接入 与 下面 forward 裸TCP转发入口(listen)的来源
     allowIP:
     #  - 172.17.0.0/16
-    # 裸TCP端口转发入口(内网穿透): 在 listen 端口收连接, 经 websocket 转给该 email 的订阅方
+    # 端口转发入口(内网穿透): 在 listen 端口收连接, 转给该 email 的订阅方
+    # protocol: tcp(默认) / udp / both。两种协议各走各的通道, 不共用:
+    #   tcp -> 经 websocket 转发(原有)
+    #   udp -> 另起一条 UDP 中继, 全程还是 UDP(见 docs/websocket.md)
+    # both 适合 RDP: 主通道 TCP 3389 + RDP 8+ 图形通道 UDP 3389, 两个监听同端口
     forward:
       # - listen: ":2222"
       #   email: someone@example.com
+      #   protocol: both
   # ===== 客户端(proxy侧) =====
   client:
     # ip 端口
@@ -214,15 +241,75 @@ websocket:
     host:
     # 用户名(发给服务端)
     user:
-    # 密码
+    # 密码(与 key 二选一), 要求至少 18 位、英文字母和数字都要有; 但这条强度校验只在
+    # 服务端做(见 websocket.server.users[].pass), 本机不判断、弱密码照样会拿去发起
+    # 连接——这样新版本订阅端也能连尚未升级的旧服务端, 服务端那一关本来就够了
     pass:
+    # 私钥(与 pass 二选一, 都配时用 key), anyproxy -genkey 生成, 对应公钥配在服务端 users[].key
+    key:
     # Email用于定位用户，不鉴权
     email:
+    # 这台机器的身份凭证, 只在文件传输(-send)收发双方之间用, 服务端完全不感知。
+    # 这项不可在此配置——启动时自动生成并持久化到配置文件同目录、同名的隐藏文件
+    # (这份配置若叫 router.yaml 就是 .router.uuid; 打在启动日志里), 重启不变; 同一份
+    # 配置下多个 client 块(clients[])共用这一个; 用 -c 指到不同配置文件则各自独立,
+    # 不共用
     # 订阅头部信息
     subscribe:
       - key:
         val:
     # 裸TCP端口转发目标: 收到服务端 port 入口来的连接时, dial 写死的 target
+    # 直连(direct)落地也复用这张表: 未在此映射的 port 一律拒绝
     forward:
       # - port: 2222
       #   target: 127.0.0.1:22
+    # ===== QUIC 直连(数据不经服务端, 详见 docs/websocket.md 路径 C) =====
+    # 允许别的订阅方直连本机(监听按需起, 平时不占端口); 落地目标仍受上面 forward 白名单约束
+    directAccept: false
+    # 本机直连入口: 在 listen 起监听, 连接直接送给 email 对应的订阅方, 由对方按 port 查它的 forward
+    # protocol: tcp(默认) / udp / both; both 适合 RDP(主通道 TCP 3389 + Enhanced RDP 的 UDP 3389)
+    direct:
+      # - listen: ":13389"
+      #   email: someone@example.com
+      #   port: 3389
+      #   protocol: both
+    # 与别人交换文件的目录。本机不需要装 sshd/rsync 之类的服务 —— anyproxy 自己收发。
+    # 两个方向共用这一份配置:
+    #   收: 对端跑 anyproxy -send, 文件落到 dir 下
+    #   取: 对端跑 anyproxy -recv 本机email:路径, 把 dir 下的东西拿走(本机不用有人操作)
+    # 默认走打洞直连(此时本机需同时开 directAccept), 打洞不通时对端可以加 -via relay
+    # 改走服务端中继(本机不需要开 directAccept); 两条路径都是端到端加密, 服务端看不到内容
+    receive:
+      # dir: /data/incoming      # 收到的文件放这里, 也是允许被取走的根目录; 不配则收发都拒绝
+      # readonly: false          # true 时 dir 只能被取走、不接受任何人写入(-send 过来一律拒收)。
+      #                          # 用于"对外放一份东西让几台机器自己来拿"这种场景: 不开的话
+      #                          # allow 一填就是读写一起给, 没法只给读
+      # allow:                   # 一条一个 {email, uuid}; 留空=谁都不接受。
+      #                          # 注意这份名单是双向的: 列在这里的人既能往 dir 里发文件,
+      #                          # 也能取走 dir 下的任何东西, 只配一个方向要靠上面的 readonly
+      #   - email: someone@example.com    # 仅备注/查找用, 不是安全边界
+      #     uuid: 3fa85f64-5717-4562-b3fc-2c963f66afa6  # 真正的凭证, 抄对方的 websocket.client.uuid
+    # true 时强制这条配置只用来给 -send/-recv 命令行取凭证(以及生成/持久化上面的 uuid),
+    # 常驻的 anyproxy 进程不会为它发起连接, 哪怕配了 subscribe/forward/direct/
+    # directAccept/receive 中的几项也照样跳过。
+    # 通常不需要手动开它: 这几项全空时(这份 client 块本来就只是给 -send/-recv 用)
+    # 常驻进程会自动判断出没什么可连的而跳过, 不开这个开关效果一样。留着是给"配了
+    # 其中一项、但现在仍只想给 -send/-recv 用"这种少见场景用的显式开关。
+    sendRecvOnly: false
+  # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
+  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/directAccept/direct/receive/sendRecvOnly; uuid 不可配, 自动生成)
+  # clients:
+  #   - connect:
+  #     user:
+  #     pass:
+  #     email:
+  #     forward:
+  #       - port: 2222
+  #         target: 127.0.0.1:22
+  #   - connect:
+  #     user:
+  #     pass:
+  #     email:
+  #     forward:
+  #       - port: 2222
+  #         target: 192.168.1.10:3389

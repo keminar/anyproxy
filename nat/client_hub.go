@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"errors"
 	"log"
 
 	"github.com/keminar/anyproxy/config"
@@ -42,7 +43,12 @@ func (h *Hub) run() {
 			if _, ok := h.clients[client]; ok {
 				close(client.send)
 				delete(h.clients, client)
-				log.Printf("client email %s disconnected, total client nums %d\n", client.Email, len(h.clients))
+				client.quietLog("client email %s disconnected, total client nums %d\n", client.Email, len(h.clients))
+				// 拆掉这个 Client 牵涉到的文件中继路由(如果有): 不拆的话另一端的
+				// msgPipe 会在 Read() 上无限期挂着, 表现就是"传输莫名其妙卡住"。
+				// 这个 Hub 类型两处角色(B 的 ServerHub、订阅方自己的本地 hub)共用
+				// 同一份代码, 但路由表只会在 B 上有条目, 订阅方侧调用是无操作的空查。
+				fileRelay.clientGone(client)
 			}
 		case cmessage := <-h.broadcast:
 			if config.DebugLevel >= config.LevelDebug {
@@ -54,6 +60,11 @@ func (h *Hub) run() {
 			}
 			// 使用broadcast 无缓冲且不会关闭解决并发问题
 			// 如果在外部直接写client.send,会与close()有并发安全冲突
+			//
+			// 投递结果要回报给调用方(见 CMessage.done): 队列满时这条消息是被丢掉的,
+			// 不告知的话发送方会以为发成功了 —— 对文件中继这种"一个字节流切成多条
+			// 消息"的用法, 悄悄少一条就是对端帧错位, 排查起来毫无头绪。
+			err := errors.New("client is not registered on this hub")
 		Exit:
 			for client := range h.clients {
 				if client != cmessage.client {
@@ -61,13 +72,17 @@ func (h *Hub) run() {
 				}
 				select {
 				case client.send <- cmessage.message:
+					err = nil
 					break Exit
 				default: // 当send chan写不进时会走进default，防止某一个send卡着影响整个系统
 					close(client.send)
 					delete(h.clients, client)
 					log.Printf("net_client_send_chan_full, client email %s disconnected\n", client.Email)
+					err = errors.New("send queue is full, this client was disconnected")
+					break Exit
 				}
 			}
+			cmessage.signal(err)
 		}
 	}
 }
