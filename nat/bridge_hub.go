@@ -3,6 +3,7 @@ package nat
 import (
 	"log"
 	"net"
+	"time"
 
 	"github.com/keminar/anyproxy/config"
 )
@@ -56,6 +57,9 @@ func (h *BridgeHub) run() {
 					continue
 				}
 				if message.Method == METHOD_CLOSE {
+					// 顺序要紧: 必须先记原因再关通道, 靠 channel close 的 happens-before
+					// 保证调用方在 WritePump 返回后读到的是这次写入的值(见 Bridge.CloseReason)。
+					bridge.setCloseReason(string(message.Body))
 					close(bridge.send)
 					delete(h.bridges, bridge)
 					break Exit
@@ -75,7 +79,7 @@ func (h *BridgeHub) run() {
 
 // Register 注册。typ 与 ID 组成复合键(ConnHTTP/ConnTCP)。
 func (h *BridgeHub) Register(c *Client, ID uint, typ uint8, conn *net.TCPConn) *Bridge {
-	b := &Bridge{bridgeHub: h, reqID: ID, typ: typ, conn: conn, send: make(chan []byte, 100), client: c}
+	b := &Bridge{bridgeHub: h, reqID: ID, typ: typ, conn: conn, send: make(chan []byte, 1000), client: c, lastActive: time.Now().UnixNano()}
 	h.register <- b
 	return b
 }

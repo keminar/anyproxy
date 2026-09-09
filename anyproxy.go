@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,7 +40,6 @@ var (
 	gProxyServerSpec string
 	gConfigFile      string
 	gWebsocketListen string
-	gWebsocketConn   string
 	gMode            string
 	gHelp            bool
 	gDebug           int
@@ -49,6 +51,13 @@ var (
 	gGeoOut          string
 	gCheck           bool
 	gCheckFix        bool
+	gGenKey          bool
+	gGenConf         bool
+	gSend            string
+	gSendTo          string
+	gSendVia         string
+	gRecv            string
+	gParallel        int
 )
 
 func init() {
@@ -57,7 +66,6 @@ func init() {
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
-	flag.StringVar(&gWebsocketConn, "ws-connect", "", "Websocket Address and port to connect")
 	flag.StringVar(&gMode, "mode", "", "Run mode: proxy (default) | tunnel | tun (build TUN NIC, needs admin/root) | bypass (bind physical NIC only, escape another process's TUN) | tcpcopy (forward every connection to tcpcopy.ip:port)")
 	flag.IntVar(&gDebug, "debug", 0, "debug mode (0, 1, 2, 3)")
 	flag.StringVar(&gPprof, "pprof", "", "pprof port, disable if empty")
@@ -70,6 +78,18 @@ func init() {
 	flag.StringVar(&gGeoCat, "geo-cat", "", "geo-extract: comma-separated categories to keep, e.g. cn,google")
 	flag.StringVar(&gGeoOut, "geo-out", "", "geo-extract: output .dat path")
 	// 系统调优检查/应用(仅 Linux): 对照建议的 sysctl/ulimit 报告, 或一键写入并应用。
+	flag.BoolVar(&gGenKey, "genkey", false, "Generate a websocket auth key pair (private for client, public for server) and exit")
+	// 配置模板生成: 新机器上不知道配置长什么样时, 先生成一份带注释的骨架再改。
+	// 模板按 -mode 裁剪, 写到 -c 指定的路径(默认程序目录 conf/router.yaml, 写 "-" 打到标准输出)。
+	flag.BoolVar(&gGenConf, "genconf", false, "Write a commented config template (tailored to -mode) and exit; -c sets the output path (\"-\" for stdout)")
+
+	flag.StringVar(&gSend, "send", "", "Send a file or directory to another subscriber and exit (extra paths may follow as arguments)")
+	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory")
+	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path) or \"relay\" (through the server B, no punching needed); both are end-to-end encrypted")
+
+	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
+	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
+
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
 	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
 }
@@ -99,6 +119,26 @@ func main() {
 		fmt.Printf("geo-extract: 已从 %s 提取类别 [%s] 写入 %s\n", gGeoIn, gGeoCat, gGeoOut)
 		return
 	}
+	// 生成 websocket 鉴权密钥对: 私钥配订阅方 websocket.client.key, 公钥配服务端
+	// websocket.server.users[].key。与 user/pass 二选一, 好处是鉴权走挑战-应答,
+	// 不依赖两端时钟同步, 且服务端只存公钥。
+	if gGenKey {
+		priv, pub, err := nat.GenerateKeyPair()
+		if err != nil {
+			log.Fatalln("genkey:", err)
+		}
+		fmt.Printf("Private key (client, websocket.client.key): %s\n", priv)
+		fmt.Printf("Public key  (server, websocket.server.users[].key): %s\n", pub)
+		return
+	}
+	// 生成配置模板后退出。放在 LoadAllConfig 之前 —— 这条命令存在的前提就是本机
+	// 还没有配置文件, 不能反过来要求先能加载配置。
+	if gGenConf {
+		if err := genConfig(); err != nil {
+			log.Fatalln("genconf:", err)
+		}
+		return
+	}
 	// 系统调优检查/一键应用(仅 Linux), 完成即退出。
 	if gCheckFix {
 		systune.Apply()
@@ -116,6 +156,38 @@ func main() {
 	if conf.RouterConfig == nil {
 		time.Sleep(60 * time.Second)
 		os.Exit(2)
+	}
+
+	// 直连传文件: 一次性动作, 传完就退出, 不启动代理。
+	//
+	// 放在配置加载之后(要用 websocket.client 的连接与凭证), 但在日志目录初始化之前 ——
+	// 这是个前台命令, 输出该直接打在终端上, 而不是写进日志文件。
+	if (gSend != "" || gRecv != "") && gParallel < 1 {
+		log.Fatalln("-parallel must be at least 1")
+	}
+	if gSend != "" {
+		paths := append([]string{gSend}, flag.Args()...)
+		cfg, err := pickClientConfig("send")
+		if err != nil {
+			log.Fatalln("send:", err)
+		}
+		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel); err != nil {
+			// 打洞失败也走这里: 按约定不做中继回落, 一个字节都不传, 退出码非零。
+			log.Fatalln("send:", err)
+		}
+		return
+	}
+
+	// 一次性取文件: 跟 -send 反向, 取完就退, 不启动代理。
+	if gRecv != "" {
+		cfg, err := pickClientConfig("recv")
+		if err != nil {
+			log.Fatalln("recv:", err)
+		}
+		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel); err != nil {
+			log.Fatalln("recv:", err)
+		}
+		return
 	}
 
 	cmdName := "anyproxy"
@@ -182,14 +254,14 @@ func main() {
 		go nat.NewServer(&gWebsocketListen)
 		// 服务端裸TCP端口转发入口(内网穿透)
 		go nat.StartForward(conf.RouterConfig.Websocket.Server.Forward)
+		// UDP 中继入口: 与上面的 TCP 入口同端口、各走各的, 只对 protocol: udp/both 生效。
+		go nat.StartRelayUDP(conf.RouterConfig.Websocket.Server.Forward)
 	}
-	// websocket 客户端
-	gWebsocketConn = config.IfEmptyThen(gWebsocketConn, conf.RouterConfig.Websocket.Client.Connect, "")
-	if gWebsocketConn != "" {
-		gWebsocketConn = tools.FillPort(gWebsocketConn)
-		// 订阅方裸TCP转发目标映射(端口->写死target)
-		nat.SetLocalForward(conf.RouterConfig.Websocket.Client.Forward)
-		go nat.ConnectServer(&gWebsocketConn)
+	// websocket 客户端: 可同时订阅多台 server(见 conf.Websocket.ClientList)
+	clientList := conf.RouterConfig.Websocket.ClientList()
+	for i, cfg := range clientList {
+		cfg.Connect = tools.FillPort(cfg.Connect)
+		go nat.ConnectServer(cfg, i)
 	}
 
 	// TUN 虚拟网卡全局代理
@@ -274,7 +346,7 @@ func main() {
 	if listenOff {
 		// 关闭了代理监听: 没有 grace server 阻塞主流程, 改为等退出信号,
 		// 收到后取消 TUN context 并等设备清理。websocket 后台 goroutine 随进程退出。
-		if gWebsocketListen == "" && gWebsocketConn == "" && mode != "tun" && mode != "bypass" {
+		if gWebsocketListen == "" && len(clientList) == 0 && mode != "tun" && mode != "bypass" {
 			log.Println("warning: 代理监听已关闭(listen off), 但未配置 websocket/tun, 进程将空转")
 		}
 		log.Println("代理监听已关闭(listen off), 仅运行后台服务(websocket/tun 等)")
@@ -477,4 +549,75 @@ func loadGeo() {
 			log.Printf("geo: 规则 %q 需要 geo.site 加载 geosite.dat, 当前未加载, 该规则不会命中", h.Name)
 		}
 	}
+}
+
+// genConfig 处理 -genconf: 生成一份按 -mode 裁剪的带注释配置模板。
+//
+// 输出位置取 -c(与启动时读配置用的是同一个参数, 生成完原样启动即可); 不带 -c 就写到
+// 程序目录下的 conf/router.yaml —— 那正是 GetPath 的第一优先级, 生成后不带参数直接
+// 启动就能被找到。-c - 打到标准输出, 方便先看一眼或自己重定向。
+func genConfig() error {
+	mode := gMode
+	if mode == "" {
+		mode = "proxy"
+	}
+	if !conf.ValidGenMode(mode) {
+		return fmt.Errorf("unknown -mode %q, expect %s", mode, strings.Join(conf.GenModes, "|"))
+	}
+	if gConfigFile == "-" {
+		body, err := conf.GenerateConfig(mode)
+		if err != nil {
+			return err
+		}
+		fmt.Print(body)
+		return nil
+	}
+	path, err := conf.WriteConfigTemplate(mode, gConfigFile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("genconf: generated a %s-mode config template -> %s\n", mode, path)
+	// 日志目录不存在时程序启动即退出, 顺手建出来, 免得留个必踩的坑。
+	if dir, created, lerr := conf.EnsureLogDir(); lerr != nil {
+		fmt.Printf("genconf: failed to create log directory %s: %v (create it yourself before starting, or change log.dir in the config)\n", dir, lerr)
+	} else if created {
+		fmt.Printf("genconf: created log directory %s\n", dir)
+	}
+	fmt.Println("Next steps:")
+	for i, s := range conf.GenNextSteps(mode, path) {
+		fmt.Printf("  %d. %s\n", i+1, s)
+	}
+	return nil
+}
+
+// pickClientConfig 挑一条 websocket.client 配置给 -send/-recv 用。verb 只影响提示
+// 文案("send"/"recv")。
+//
+// 多台 server 时不再默默取第一条: 目标订阅方连在哪台 server 上, 程序猜不出来
+// (对端在哪要连上去问了才知道), 默默选错的话要么白跑一趟才报错、要么(更糟)真连
+// 上了却把文件传去了错的地址段。改成把配置列出来, 交互式问一遍要用哪个——选错
+// 的成本是重跑一次命令, 比默默用错一台强。
+func pickClientConfig(verb string) (conf.WsClient, error) {
+	list := conf.RouterConfig.Websocket.ClientList()
+	if len(list) == 0 {
+		return conf.WsClient{}, errors.New("no websocket.client configured (need connect/user/email to reach the server)")
+	}
+	if len(list) == 1 {
+		return list[0], nil
+	}
+	fmt.Fprintf(os.Stderr, "%s: %d client blocks configured, choose which one to use:\n", verb, len(list))
+	for i, c := range list {
+		fmt.Fprintf(os.Stderr, "  [%d] %s  (user=%s email=%s)\n", i+1, c.Connect, c.User, c.Email)
+	}
+	fmt.Fprint(os.Stderr, "> ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return conf.WsClient{}, fmt.Errorf("read selection: %w", err)
+	}
+	line = strings.TrimSpace(line)
+	idx, err := strconv.Atoi(line)
+	if err != nil || idx < 1 || idx > len(list) {
+		return conf.WsClient{}, fmt.Errorf("invalid selection %q, expected a number from 1 to %d", line, len(list))
+	}
+	return list[idx-1], nil
 }

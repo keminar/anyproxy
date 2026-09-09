@@ -23,4 +23,10 @@ func init() {
 	if AppPath, err = filepath.Abs(filepath.Dir(os.Args[0])); err != nil {
 		panic(err)
 	}
+	// 若程序是通过软链启动的, 解析出软链指向的真实路径所在目录, 而不是软链自身所在目录
+	if exePath, everr := filepath.EvalSymlinks(os.Args[0]); everr == nil {
+		if absExePath, aerr := filepath.Abs(exePath); aerr == nil {
+			AppPath = filepath.Dir(absExePath)
+		}
+	}
 }

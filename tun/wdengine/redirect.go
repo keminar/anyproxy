@@ -283,6 +283,11 @@ func (e *Engine) isDirect(dstIP netip.Addr, dstPort uint16) bool {
 	if dstIP.IsLoopback() {
 		return true
 	}
+	// 黑洞哨兵 IP 必须进引擎(强制走代理), 不受 SkipPorts / BypassPrivate 影响。
+	// 即便用户把哨兵配成私网地址, 也仍拦截进引擎, 由转发层强制 remote+remote 出去。
+	if e.cfg.BlackholeIP.IsValid() && dstIP == e.cfg.BlackholeIP {
+		return false
+	}
 	if containsPort(e.cfg.SkipPorts, dstPort) {
 		return true
 	}

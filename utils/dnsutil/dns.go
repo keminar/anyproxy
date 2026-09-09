@@ -16,6 +16,36 @@ import (
 // Port 是 DNS 使用的 UDP 端口。
 const Port = 53
 
+// defaultBlackholeIP 是黑洞哨兵 IP 的默认值。192.0.0.0 属 IANA 特殊用途(IETF Protocol
+// Assignments), 不会是真实业务目标, 不可路由, 适合作"本地拦截、经代理才可达"的哨兵。
+const defaultBlackholeIP = "192.0.0.0"
+
+// BlackholeIP 返回配置的黑洞哨兵 IP(default.blackholeIP)。不配默认 192.0.0.0;
+// 显式配 off/none/disable 则返回空串(功能关闭)。
+func BlackholeIP() string {
+	s := ""
+	if conf.RouterConfig != nil {
+		s = strings.TrimSpace(conf.RouterConfig.Default.BlackholeIP)
+	}
+	switch strings.ToLower(s) {
+	case "":
+		return defaultBlackholeIP
+	case "off", "none", "disable":
+		return ""
+	default:
+		return s
+	}
+}
+
+// IsBlackholeIP 判断给定 IP 是否为当前生效的黑洞哨兵 IP。
+func IsBlackholeIP(ip string) bool {
+	if ip == "" {
+		return false
+	}
+	bh := BlackholeIP()
+	return bh != "" && ip == bh
+}
+
 // DNS 查询类型
 const (
 	TypeA    = 1  // IPv4 地址记录

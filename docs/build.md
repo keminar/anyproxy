@@ -81,6 +81,23 @@ CGO_ENABLED=0 GOOS=linux GOARCH=mips64le GOMIPS64=softfloat go build -trimpath -
 
 > Windows 目标额外需要把 `WinDivert.dll` + `WinDivert64.sys`（32 位系统再加 `WinDivert32.sys`）与 exe 放同目录，或用 `tun.windows.windivertDir` 指定，见 [windows-winDivert.md](windows-winDivert.md)。其它平台无额外运行时依赖。
 
+## 二进制体积
+
+linux/amd64、`CGO_ENABLED=0`、同一 Go 工具链下实测（未 strip）：
+
+| 版本 | 大小 | 相比上一版 |
+|------|------|-----------|
+| v1.9 | 11.8 MB | - |
+| v2.0 | 15.7 MB | +3.8 MB |
+| 2.1 | 19.3 MB | +3.7 MB |
+
+两次增长都对应真实新功能，不是意外膨胀：
+
+- **v1.9 → v2.0**：新增 `gvisor.dev/gvisor` 用户态 TCP/IP 协议栈，供 `mode=tun` 在 Linux/macOS 下解析 TUN 网卡流量（Windows 走 WinDivert，不受影响，增量很小）。
+- **v2.0 → 2.1**：新增 `github.com/quic-go/quic-go`（含 `golang.org/x/crypto` 等间接依赖），供 `nat` 模块的文件传输功能做 QUIC 打洞/中继。
+
+体积对功能无影响，若要瘦身，构建时加 `-ldflags "-s -w"`（去掉调试符号表/DWARF）实测可再降约 30%（如 2.1 从 19.3MB 降到 13.4MB），代价是丢失符号信息：panic 堆栈里的函数名不可读，也无法再用 `delve`/`addr2line` 定位崩溃地址；`-X` 注入的版本号等 ldflags 变量不受影响。当前 `build.sh`/`build.bat` 未加此选项。
+
 ## 相关
 
 - 运行/部署见 [deployment.md](deployment.md)、[usage.md](usage.md)。

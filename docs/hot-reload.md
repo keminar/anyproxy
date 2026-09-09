@@ -29,8 +29,8 @@ inode 变化会导致 watch 失效）。短时间多次事件用 200ms 防抖合
 | `token` | `proto/request.go` |
 | `tcpcopy.ip` / `port` / `enable` | `proto/request.go`、`proto/tcpcopy.go`（重载会重新归一 `mode: tcpcopy`） |
 | `tun.blockQUIC` | `utils/dnsutil/dns.go`（新的 DNS 查询起生效） |
-| `websocket.server.user` / `pass` / `allowIP` | `nat/conn.go`（**新接入连接**的鉴权时实时读；已连接不变） |
-| `websocket.client.user` / `pass` / `host` / `email` / `subscribe` | `nat/handler.go`（**下次重连时**生效） |
+| `websocket.server.users`（含每条的 `disable`） / `allowIP` | `nat/conn.go`（**新接入连接**的鉴权时实时读，`LookupUser` 按 user 查 `users`；已连接不变，改/停用某账号只影响它之后的新连接） |
+| `websocket.client.user` / `pass` / `host` / `email` / `subscribe`（含 `clients[]` 数组内同名字段） | `nat/handler.go` 的 `liveAuthCfg`（**下次重连时**生效；`clients[]` 按下标定位对应条目，重载后**数组顺序不要变**，否则可能读到别的 server 的账号） |
 
 ## 不支持热加载（启动时确定，需重启）
 
@@ -41,14 +41,14 @@ inode 变化会导致 watch 失效）。短时间多次事件用 200ms 防抖合
 | `mode` | 启动时选定 proxy/tunnel/tun/bypass/tcpcopy |
 | `tun.*`（除 `blockQUIC`：name/addr/mtu/autoRoute/bypassIPs/bypassPrivate/excludeProcs/inboundPorts/windivertDir/excludeNics/device） | 启动时构建 TUN / bypass |
 | `geo` / `geoip` / `geosite` | `loadGeo()` 启动时执行一次；换 `.dat` 需重启 |
-| `websocket.server.listen` / `client.connect`（**是否启动**服务端/客户端） | 启动时决定是否拉起；空↔有效的切换需重启（内部鉴权参数则是热的，见上表） |
-| `websocket.server.forward` / `client.forward` | `StartForward` / `SetLocalForward` 启动时执行一次 |
+| `websocket.server.listen` / `client.connect` / `clients[].connect`（**是否启动**/连**哪台**服务端） | 启动时决定拉起哪些连接；增删条目、改 `connect` 地址都需重启（内部鉴权参数则是热的，见上表） |
+| `websocket.server.forward` / `client.forward`（含 `clients[].forward`） | `StartForward` / `buildForward` 启动时各执行一次 |
 | `watcher` 自身 | 启动时决定是否开启监听 |
 
 ## 三个易混点
 
 1. **`listen` 是「SIGHUP 重启」而非「watcher 热加载」。** 两者是不同路径：改 `listen` 后需
    `kill -HUP <pid>` 触发平滑重启（起新进程接管监听、退旧进程），watcher 只换配置指针、不重绑端口。
-2. **websocket 的「参数」热、「是否启动」冷。** `user`/`pass`/`allowIP` 在新连接/重连时生效，但
+2. **websocket 的「参数」热、「是否启动」冷。** `users`/`allowIP` 在新连接/重连时生效，但
    `listen`/`connect` 从空改成有值不会自动拉起服务，需重启。
 3. **热加载只对新连接生效**，已在传的连接沿用建立时的配置。

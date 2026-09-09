@@ -9,10 +9,10 @@
 | `-c FILEPATH` | 配置文件路径，默认 `conf/router.yaml` | — | — |
 | `-mode` | 运行模式（互斥）：`proxy`（默认）/ `tunnel`(tunneld 服务端) / `tun`(TUN 全局代理) / `bypass`(物理网卡绕行, 仅 Linux) / `tcpcopy`(端口转发) | `mode` | 命令行 > 配置 |
 | `-ws-listen` | websocket 监听地址端口（内网穿透服务端） | `websocket.server.listen` | 命令行 > 配置 |
-| `-ws-connect` | websocket 连接地址端口（内网穿透客户端） | `websocket.client.connect` | 命令行 > 配置 |
 | `-daemon` | 后台守护进程运行（fork 子进程，父进程退出） | — | — |
 | `-debug` | 调试级别 `0/1/2/3`，越大日志越详细 | — | — |
 | `-pprof` | pprof 端口，留空关闭；浏览器访问 `http://<port>/debug/pprof/` | — | — |
+| `-genconf` | 生成一份带注释的配置模板后退出（新机器上没有配置、不知道格式时用）：内容按 `-mode` 裁剪，输出路径取 `-c`（默认**程序目录**下 `conf/router.yaml`，写 `-` 则打到标准输出）；**已存在的文件不覆盖**，同时会建出默认日志目录 | — | — |
 | `-geo-extract` | 从 `.dat` 提取类别成小文件后退出，配 `-geo-in`/`-geo-cat`/`-geo-out`（见 [geo.md](geo.md)） | — | — |
 | `-geo-in` / `-geo-cat` / `-geo-out` | geo-extract 的源 `.dat` / 类别(逗号分隔) / 输出路径 | — | — |
 | `-v` | 显示编译版本信息 | — | — |
@@ -21,6 +21,26 @@
 ## 优先级规则
 
 对于同时能在命令行与配置文件里指定的项（`listen` / `proxy` / `mode` / websocket 等），**命令行参数优先于配置文件**，配置文件优先于内置默认值。TUN 网卡名/地址只能经配置 `tun.name` / `tun.addr` 指定。
+
+## 新机器初始化配置
+
+新机器上还没有 `conf/router.yaml` 时，不用照着文档手抄，先生成一份带注释的骨架再改：
+
+```bash
+# 生成到程序目录下的 conf/router.yaml（顺带建出默认日志目录），生成完不带 -c 就能启动
+./anyproxy -genconf
+
+# 按运行模式生成（模板只保留该模式用得到的字段）：tunnel 服务端 / tun 全局代理 / tcpcopy 端口转发 …
+./anyproxy -genconf -mode tunnel
+
+# 指定输出路径
+./anyproxy -genconf -c /etc/anyproxy/router.yaml
+
+# 先看一眼不落盘
+./anyproxy -genconf -mode tun -c -
+```
+
+模板里只有本模式用得到的字段是打开的，示例规则一律注释掉，生成后直接能启动；改哪几个值会在命令输出的“接下来”里列出来。目标文件已存在时**不覆盖**，直接报错，避免手滑冲掉正在跑的配置。完整字段仍以仓库 [conf/router.yaml](../conf/router.yaml)、[configuration.md](configuration.md) 与 [config-examples.md](config-examples.md) 为准。
 
 ## 常用启动示例
 

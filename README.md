@@ -109,7 +109,14 @@ make all
 
 ## 快速开始
 
-> 本机启动、平滑重启、Docker 等常用命令示例见 [docs/quickstart.md](docs/quickstart.md)；源码编译见上文。
+新机器上没有配置文件、不知道格式时，先生成一份带注释的模板（按 `-mode` 裁剪，已存在的文件不覆盖）：
+
+```bash
+./anyproxy -genconf                 # 生成到程序目录 conf/router.yaml，顺带建出日志目录
+./anyproxy -genconf -mode tunnel    # 按模式生成；-c 指定路径，-c - 只打到屏幕
+```
+
+> 本机启动、平滑重启、Docker 等常用命令示例见 [docs/quickstart.md](docs/quickstart.md)；全部启动参数见 [docs/cli.md](docs/cli.md)；源码编译见上文。
 
 ## TUN 虚拟网卡全局代理
 

@@ -104,9 +104,29 @@ type Subscribe struct {
 // ServerForward 服务端(tunnel侧)裸TCP端口转发入口(内网穿透)。
 // 在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
 type ServerForward struct {
-	Listen string `yaml:"listen"` //裸TCP监听地址, 如 ":2222"
+	Listen string `yaml:"listen"` //监听地址, 如 ":2222"
 	Email  string `yaml:"email"`  //转发给此email的订阅方
+
+	// Protocol 入口协议: tcp(默认) / udp / both, 取值同 ClientDirect.Protocol。
+	//
+	// 两种协议在这条中继路径上**各走各的**, 不共用一条通道: TCP 仍旧经 websocket
+	// 转发, UDP 另起一条 UDP 中继(见 nat/relay_udp.go)。绝不能把 UDP 塞进 websocket
+	// —— 那是 TCP, 会给每个数据报强加重传与保序, 把 RDP 的 UDP 通道特意要绕开的
+	// 队头阻塞又请回来, 只会更卡。
+	//
+	// both 用于 RDP: mstsc 的主通道是 TCP 3389, RDP 8+ 的图形通道另用同号 UDP 3389,
+	// 只转发 TCP 等于把后者堵死。入口两个监听同号, 客户端不用改配置。
+	Protocol string `yaml:"protocol"`
 }
+
+// WantTCP 是否要起 TCP 入口(经 websocket 中继)。留空按 tcp 处理, 与旧配置一致。
+func (f ServerForward) WantTCP() bool { return protoWantTCP(f.Protocol) }
+
+// WantUDP 是否要起 UDP 中继入口。
+func (f ServerForward) WantUDP() bool { return protoWantUDP(f.Protocol) }
+
+// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
+func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol) }
 
 // ClientForward 订阅方(proxy侧)裸TCP端口转发目标。
 // 收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
@@ -116,30 +136,224 @@ type ClientForward struct {
 	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
 }
 
+// ClientDirect 订阅方(A侧)的直连入口规则: 在本机 Listen 起裸TCP监听, 进来的连接不再经
+// 服务端中转, 而是用 QUIC 直接连到 Email 对应的另一个订阅方(C), 由对方按 Port 查它
+// 自己的 client.forward[port] 决定 dial 哪个内网目标。
+//
+// 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
+// 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
+type ClientDirect struct {
+	Listen string `yaml:"listen"` //本机入口监听地址, 如 ":13389"
+	Email  string `yaml:"email"`  //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
+	Port   uint16 `yaml:"port"`   //告诉对方要用哪条 client.forward[port] 规则, 对方未映射该端口即拒绝
+
+	// Protocol 入口与落地要还原的协议: tcp(默认) / udp / both。
+	//
+	// 两种协议在 QUIC 上的承载不同, 语义才对得上: TCP 走 stream(可靠有序), UDP 走
+	// datagram(不可靠无序, RFC 9221)。不能拿 stream 扛 UDP —— 那会给 UDP 强加重传与
+	// 保序, 把队头阻塞又请回来。
+	//
+	// both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
+	// UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
+	Protocol string `yaml:"protocol"`
+}
+
+// 入口支持的协议取值。直连入口(ClientDirect)与中继入口(ServerForward)共用。
+const (
+	ProtoTCP  = "tcp"
+	ProtoUDP  = "udp"
+	ProtoBoth = "both"
+)
+
+func protoWantTCP(p string) bool { return p == "" || p == ProtoTCP || p == ProtoBoth }
+func protoWantUDP(p string) bool { return p == ProtoUDP || p == ProtoBoth }
+func protoValid(p string) bool {
+	switch p {
+	case "", ProtoTCP, ProtoUDP, ProtoBoth:
+		return true
+	}
+	return false
+}
+
+// WantTCP 是否要起 TCP 入口。留空按 tcp 处理, 保持与旧配置一致。
+func (d ClientDirect) WantTCP() bool { return protoWantTCP(d.Protocol) }
+
+// WantUDP 是否要起 UDP 入口。
+func (d ClientDirect) WantUDP() bool { return protoWantUDP(d.Protocol) }
+
+// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
+func (d ClientDirect) ValidProtocol() bool { return protoValid(d.Protocol) }
+
+// ClientReceive 订阅方与别人交换文件的目录。不配 Dir 就收发一律拒绝。
+//
+// 与 ClientForward 的区别: forward 是把流量转给本机某个**已有的服务**(sshd、RDP 等),
+// 这里则是 anyproxy 自己读写文件 —— 对端机器上不需要装 sshd/rsync 之类的东西, 这正是
+// 它存在的理由(跨 Windows 时那些服务往往没有)。
+type ClientReceive struct {
+	// Dir 两个方向共用的目录: 别人 -send 过来的文件落在这儿, 别人 -recv 时也只能从
+	// 这儿取。为空表示两个方向都不参与。
+	Dir string `yaml:"dir"`
+
+	// ReadOnly 为 true 时 Dir 只能被取走, 不接受任何人写入: 别人 -send 过来一律拒收,
+	// -recv 照常。
+	//
+	// 用来分开"交换文件"和"对外提供文件"这两种用法。后者(放一份装机包、一份备份让
+	// 几台机器自己来拿)不需要、也不该让取文件的人有写权限——但 Allow 是一份名单、
+	// 两个方向同时给, 没有这个开关就只能连写一起给出去。
+	//
+	// 拒收发生在协议层(对端会收到一句明确的拒绝), 不依赖文件系统权限: 目录本身在
+	// 操作系统层面是不是只读, anyproxy 管不着也不该假设。
+	ReadOnly bool `yaml:"readonly"`
+
+	// Allow 谁能跟这个目录打交道, 一条一个 {email, uuid}。email 只是备注/查找用(标明
+	// 这个 uuid 是谁的机器), 不是安全边界——服务端(B)从不校验它, 任何一个合法账号都能
+	// 自称任意 email; 真正的凭证是 uuid: 对端必须自带与这里配置一致的
+	// websocket.client.uuid, 才能通过直连的身份比对、或算出中继加密用的那把密钥
+	// (见 nat/file.go、nat/file_pull.go、nat/file_relay.go)。
+	//
+	// 这份名单是**双向**的: 列在这里的人既能往 Dir 里发文件(anyproxy -send), 也能取走
+	// Dir 下的任何东西(anyproxy -recv), 没法只开其中一个方向。这是有意的——两个动作是
+	// 对称的、面向的是同一批人(往往就是自己的另外几台机器), 不值得为此维护两份几乎
+	// 一样的名单; 代价是配一个人进来就等于同时把这个目录的读和写都交给了他, 所以 Dir
+	// 应该是一个专门用来交换文件的目录, 而不是随手指向什么重要位置。
+	//
+	// 为空表示谁都不接受(不像旧版语义那样"为空=不限制")——UUID 缺失时既没法做身份
+	// 比对也没法派生密钥, 没有"不限制"这个选项, 必须显式配对方。
+	Allow []AllowedSender `yaml:"allow"`
+}
+
+// AllowedSender receive.allow 的一条: 谁(email, 仅备注)可以用哪个 uuid(真正的凭证)发文件。
+type AllowedSender struct {
+	Email string `yaml:"email"`
+	UUID  string `yaml:"uuid"`
+}
+
+// Lookup 按发起方自报的 email(仅作为查找提示, 不是安全判断本身)取它对应配置的 uuid。
+// ok=false 表示这个 email 不在列表里, 调用方应直接拒绝, 不必再做任何后续验证。
+func (r ClientReceive) Lookup(email string) (uuid string, ok bool) {
+	if email == "" {
+		return "", false
+	}
+	for _, a := range r.Allow {
+		if a.Email == email {
+			return a.UUID, a.UUID != ""
+		}
+	}
+	return "", false
+}
+
+// ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
+type ServerUser struct {
+	User string `yaml:"user"` //认证用户
+	Pass string `yaml:"pass"` //密码(与 key 二选一)
+	// Key 为该账号的 Ed25519 公钥(base64), 与 Pass 二选一; 两者都配时优先用 Key。
+	// 用 anyproxy -genkey 生成密钥对: 私钥配在订阅方 client.key, 公钥配在这里。
+	//
+	// 相比密码的两个好处: 鉴权走挑战-应答, 不依赖两端时钟同步(密码方案的 token 带
+	// 时间戳, 时差超限即连不上); 服务端只存公钥, 配置泄露也无法用于登录。
+	Key     string `yaml:"key"`
+	Disable bool   `yaml:"disable"` //true 时该账号停用: 鉴权直接拒绝, 不用删配置/改密码就能临时停掉某个订阅端
+}
+
 // WsServer 服务端(tunnel侧)websocket配置。配了 server.listen 才起服务。
 type WsServer struct {
 	Listen  string          `yaml:"listen"`  //websocket 监听地址
-	User    string          `yaml:"user"`    //认证用户(校验接入的订阅方)
-	Pass    string          `yaml:"pass"`    //密码
-	AllowIP []string        `yaml:"allowIP"` //可接入的客户端IP(CIDR/单IP), 为空不限制; 按真实TCP来源判定
+	Users   []ServerUser    `yaml:"users"`   //鉴权账号数组, 每条 {user, pass, disable}, 不同订阅方各用各的账号
+	AllowIP []string        `yaml:"allowIP"` //可接入来源IP(CIDR/单IP), 为空不限制; 按真实TCP来源判定; 同时约束 websocket 订阅方接入与裸TCP转发入口(forward.listen)的来源
 	Forward []ServerForward `yaml:"forward"` //裸TCP端口转发入口(见 ServerForward)
+}
+
+// LookupUser 按订阅方发来的 user 查 users 里的账号。found=false 表示查无此人;
+// found=true 时调用方还要看返回的 ServerUser.Disable 决定是否放行(停用的账号查得到但不该通过鉴权)。
+func (s WsServer) LookupUser(user string) (ServerUser, bool) {
+	if user == "" {
+		return ServerUser{}, false
+	}
+	for _, u := range s.Users {
+		if u.User == user {
+			return u, true
+		}
+	}
+	return ServerUser{}, false
 }
 
 // WsClient 客户端(proxy侧)websocket配置。未配 connect / user / email 则不发起连接。
 type WsClient struct {
-	Connect   string          `yaml:"connect"`   //连接的 ip:端口
-	Host      string          `yaml:"host"`      //connect 的域名(Host头)
-	User      string          `yaml:"user"`      //认证用户(发给服务端)
-	Pass      string          `yaml:"pass"`      //密码
-	Email     string          `yaml:"email"`     //Email用于定位用户, 不鉴权
+	Connect string `yaml:"connect"` //连接的 ip:端口
+	Host    string `yaml:"host"`    //connect 的域名(Host头)
+	User    string `yaml:"user"`    //认证用户(发给服务端)
+	Pass    string `yaml:"pass"`    //密码(与 key 二选一)
+	Key     string `yaml:"key"`     //Ed25519 私钥(base64), 与 pass 二选一; 两者都配时优先用 key。见 ServerUser.Key
+	Email   string `yaml:"email"`   //Email用于定位用户, 不鉴权
+
+	// UUID 这份配置的身份凭证, 只在 A、C 两端之间使用, B 完全不感知(既不存也不转发,
+	// 见 nat/file.go、nat/file_relay.go)。对端要收自己发的文件, 得把这个值连同 Email
+	// 一起配进对方的 websocket.client.receive.allow。
+	//
+	// 故意不带 yaml 标签(不可在配置文件里配): 启动时自动生成一个并持久化到配置文件
+	// 同目录、同名的隐藏文件(如 router.yaml 对应 .router.uuid), 重启不会变, 不需要
+	// 也不允许手动配置; 生成后会打印在启动日志里, 方便复制去对端配置。身份按**配置
+	// 文件**分, 不是按物理机器: 同一份配置文件下的所有 client 块共用这一个; 但 -c
+	// 指向不同配置文件(哪怕在同一目录下)会各自独立生成, 不会共用。
+	UUID      string          `yaml:"-"`
 	Subscribe []Subscribe     `yaml:"subscribe"` //订阅头部信息
 	Forward   []ClientForward `yaml:"forward"`   //裸TCP端口转发目标(见 ClientForward)
+
+	// 以下两项为 QUIC 直连(A<->C 不经服务端转发数据), 见 ClientDirect。
+	// 两者互相独立: 只想被别人直连就单开 directAccept, 只想主动直连别人就单配 direct。
+	DirectAccept bool           `yaml:"directAccept"` //true 时起 QUIC 监听并把端点通告给服务端, 允许其它订阅方直连自己
+	Direct       []ClientDirect `yaml:"direct"`       //本机直连入口规则(见 ClientDirect)
+	Receive      ClientReceive  `yaml:"receive"`      //接收传来的文件(见 ClientReceive); 打洞直连(-via direct)要同时开 directAccept, 走服务端中继(-via relay)则不需要
+
+	// SendRecvOnly true 时强制这条 client 配置只用来给 -send/-recv 命令行取凭证
+	// (以及生成/持久化上面的 UUID), 常驻的 anyproxy 进程不会为它发起 websocket 连接
+	// ——哪怕下面 subscribe/forward/direct/directAccept/receive 配了其中几项也照样跳过。
+	//
+	// 这是个显式的强制开关, 不是必须品: subscribe/forward/direct/directAccept/
+	// receive.dir 全都没配的常见情况(这条 client 块本来就只是给 -send/-recv 用)不需
+	// 要手动开它——常驻进程会自动判断出"这条配置没什么可连的"而跳过, 见
+	// WantsPersistentConnect。留着这个字段是为了那种"配了其中一项、但仍然只想给
+	// -send/-recv 用"的少见场景(比如先写好 forward 打算以后再启用)。
+	SendRecvOnly bool `yaml:"sendRecvOnly"`
 }
 
 // Websocket 会话订阅通信, 按角色分 server(服务端)/ client(客户端)两块配置。
 type Websocket struct {
-	Server WsServer `yaml:"server"` //服务端(tunnel侧)
-	Client WsClient `yaml:"client"` //客户端(proxy侧)
+	Server  WsServer   `yaml:"server"`  //服务端(tunnel侧)
+	Client  WsClient   `yaml:"client"`  //客户端(proxy侧), 兼容单 server 的旧写法
+	Clients []WsClient `yaml:"clients"` //客户端(proxy侧), 同时订阅多台 server 时每台一个独立配置块
+}
+
+// ClientList 汇总要连接的 server 列表。配了 clients 用 clients; 否则退化为
+// Client 包装成的单元素列表(Client.Connect 为空则不发起连接, 返回 nil)。
+func (w Websocket) ClientList() []WsClient {
+	if len(w.Clients) > 0 {
+		return w.Clients
+	}
+	if w.Client.Connect == "" {
+		return nil
+	}
+	return []WsClient{w.Client}
+}
+
+// WantsPersistentConnect 判断这条 client 配置值不值得让常驻进程为它保持一条
+// websocket 连接。
+//
+// 与服务端 emptySubscribeAllowed(nat/conn.go) 呼应: 服务端只在 subscribe/forward/
+// direct/receive 这几种"确实有事可干"的情况下才放行空订阅, 三者都没有的连接连上去
+// 也只会被以"subscribe is empty"反复拒绝、断开、重连——不如干脆不发起, 省得常驻
+// 进程空转、服务端日志跟着刷屏。Forward 是服务端自己的配置(见 isForwardEmail), 客户
+// 端这边看不到、也判断不了, 因此不参与这里的判断, 只看客户端自己能决定的四项。
+//
+// SendRecvOnly 是显式的强制开关: 即便配了下面任意一项(比如同时想留一份 subscribe
+// 供以后用), 只要开着它就总是跳过——用于"这条配置现在只想给 -send/-recv 用"的场景,
+// 见该字段注释。
+func (w WsClient) WantsPersistentConnect() bool {
+	if w.SendRecvOnly {
+		return false
+	}
+	return len(w.Subscribe) > 0 || len(w.Forward) > 0 || len(w.Direct) > 0 ||
+		w.DirectAccept || w.Receive.Dir != ""
 }
 
 // Default 域名
@@ -149,6 +363,11 @@ type Default struct {
 	DNS       string `yaml:"dns"`       //默认的DNS服务器
 	Proxy     string `yaml:"proxy"`     //全局代理服务器
 	TCPTarget string `yaml:"tcpTarget"` //tcp默认访问策略: auto/local/remote/deny/localport
+	//黑洞哨兵IP: 系统hosts或本配置里把域名指向它(如 192.0.0.0 example.com), 达成"无代理时本地不可达(拦截)、
+	//有代理时强制走代理并由下级远程DNS解析"。不配默认 192.0.0.0; 设为 off/none/disable 关闭。命中该IP的连接
+	//强制按 target=remote + dns=remote 处理(见 proto/tunnel.go handshake), 并在 windows WinDivert 捕获阶段
+	//强制拦截进引擎(不受 bypassPrivate 影响)。
+	BlackholeIP string `yaml:"blackholeIP"`
 	//tcpTarget=localport 时，这些端口走本地直连、其余走代理。
 	//不配置则默认 21(ftp)/22(ssh)；一旦配置则完全以此为准(覆盖默认)。
 	LocalPort []int `yaml:"localPort"`
@@ -280,6 +499,17 @@ func LoadRouterConfig(configPath string) (cnf Router, err error) {
 		return
 	}
 	err = yaml.Unmarshal(data, &cnf)
+	if terr, ok := err.(*yaml.TypeError); ok {
+		// 字段类型不匹配(比如 receive.allow 还是旧版的纯 email 字符串, 解不进新的
+		// {email,uuid} 结构)不该拖累整个服务起不来: yaml.v2 对这类错误是尽力而为
+		// 解析, 出错的字段留空、其余字段正常解出, 这里只打警告, 不当成致命错误。
+		// 留空的字段按各自类型的零值语义生效(比如 receive.allow 留空 = 谁都不接受),
+		// 不是"这个功能悄悄用了旧值", 只是"这个功能没配对, 先不生效"。
+		for _, e := range terr.Errors {
+			log.Printf("config file %s has a type error (that field is left empty, rest of the config still applies): %s", configPath, e)
+		}
+		err = nil
+	}
 	if err == nil {
 		// 按当前系统把 tun.<os> 分块压平进扁平字段, 消费者无需感知分块
 		cnf.Tun.applyOS(runtime.GOOS)
@@ -287,6 +517,15 @@ func LoadRouterConfig(configPath string) (cnf Router, err error) {
 		if cnf.Mode == "tcpcopy" {
 			cnf.TcpCopy.Enable = true
 		}
+		// 没配 websocket.client(s).uuid 的话在这里补上(自动生成+持久化, 见 uuid.go),
+		// 不然订阅端每次启动身份都不一样, 对端 receive.allow 就没法配。
+		if uerr := ensureClientUUID(configPath, &cnf.Websocket); uerr != nil {
+			err = uerr
+		}
+		// 密码强度不达标的服务端账号直接停用(见 password.go), 不阻塞其余配置加载。
+		validateServerUsers(configPath, &cnf.Websocket)
+		// sendRecvOnly 配了 receive.dir 会导致这条配置永远收不到文件(见 password.go), 只提示。
+		warnSendRecvOnlyReceive(configPath, &cnf.Websocket)
 	}
 	return
 }
@@ -298,9 +537,10 @@ func GetPath(filename string) (string, error) {
 	if err != nil {
 		panic(err)
 	}
-	configPath := filepath.Join(workPath, "conf", filename)
+	// 优先程序所在目录(真实路径, 非软链), 再退回当前所在目录
+	configPath := filepath.Join(AppPath, "conf", filename)
 	if !fileExists(configPath) {
-		configPath = filepath.Join(AppPath, "conf", filename)
+		configPath = filepath.Join(workPath, "conf", filename)
 		if !fileExists(configPath) {
 			configPath = filepath.Join(AppSrcPath, "conf", filename)
 			if !fileExists(configPath) {

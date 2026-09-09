@@ -208,7 +208,7 @@ tcpcopy:
 
 服务端（公网侧）监听，订阅端（内网侧）**主动回连**。可与代理同进程。有两条转发路径，原理与字段详解见 [websocket.md](websocket.md)。
 
-> `user`/`pass` **两端必须一致**（`pass` 参与 token 校验，订阅端漏配会鉴权失败）；`email` 用于辨别/定位订阅端，本身不参与 token。
+> 服务端 `users[].user`/`pass` 要与订阅端 `client.user`/`pass` **对应一致**（`pass` 参与 token 校验，订阅端漏配会鉴权失败）；`email` 用于辨别/定位订阅端，本身不参与 token。
 
 ### 8.1 HTTP 头订阅转发（按请求头把公网请求送进内网）
 
@@ -219,8 +219,9 @@ tcpcopy:
 websocket:
   server:
     listen: :3002
-    user: someuser
-    pass: somepass
+    users:
+      - user: someuser
+        pass: SomePass1234567890
 ```
 
 ```yaml
@@ -230,7 +231,7 @@ websocket:
     connect: <服务端IP>:3002
     host: ws.example.com
     user: someuser
-    pass: somepass              # 与服务端一致（算 token，必填）
+    pass: SomePass1234567890              # 与服务端一致（算 token，必填；至少 18 位、英文字母和数字都要有）
     email: user@example.com     # 定位订阅端
     subscribe:
       - key: X-Env              # 公网请求头命中 key=val 才转发给本端
@@ -247,8 +248,9 @@ listen: off                   # 纯穿透不需要本机代理监听，可关掉
 websocket:
   server:
     listen: :3002
-    user: someuser
-    pass: somepass
+    users:
+      - user: someuser
+        pass: SomePass1234567890
     forward:
       - listen: :2222         # 公网入口端口（裸TCP监听）
         email: home@example.com # 转发给此 email 的订阅端
@@ -262,7 +264,7 @@ websocket:
     connect: <服务端IP>:3002
     host: ws.example.com
     user: someuser
-    pass: somepass
+    pass: SomePass1234567890
     email: home@example.com
     forward:
       - port: 2222            # 对应服务端入口端口
@@ -273,6 +275,154 @@ websocket:
 用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出的 `target`，未列端口拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email` 区分。
 
 > `listen: off`（或 `-l off`）关闭本机代理监听，只跑 websocket 后台，适合纯穿透。**注意**：只有「裸 TCP 转发」能这么用；websocket 的「HTTP 头订阅」路径（8.1）依赖本机代理端口，关掉后不生效。
+
+### 8.3 订阅端同时连多台服务端
+
+订阅端一个进程可同时回连多台 server，各自独立账号/转发表，用复数的 `clients` 数组（每项就是一个完整的 8.1/8.2 里 `websocket.client` 块）：
+
+```yaml
+# 订阅端：同时穿透两台不同的服务端，入口端口可以重复(各自独立转发表, 不会冲突)
+listen: off
+websocket:
+  clients:
+    - connect: <服务端A IP>:3002
+      host: ws-a.example.com   # 可选, 走 TLS 网关时用
+      user: someuser
+      pass: SomePass1234567890
+      email: home@example.com
+      forward:
+        - port: 2222
+          target: 127.0.0.1:22
+    - connect: <服务端B IP>:3002
+      user: anotheruser
+      pass: AnotherPass123456789
+      email: office@example.com
+      subscribe:                # 可选, 该台如果还要走 HTTP 头订阅路径(8.1)就配, 纯裸TCP转发(本例)不需要
+        - key: X-Env
+          val: office
+      forward:
+        - port: 2222
+          target: 192.168.1.10:3389
+```
+
+`clients` 每一项都是完整独立的 `websocket.client` 块，`host`/`subscribe`/`forward` 等字段和单块写法（8.1/8.2）用法完全一样，按各自订阅端的需要配，不用每项都写全。不配 `clients` 时行为不变（仍读单个 `client` 块），字段/常见坑详见 [websocket.md](websocket.md#同时订阅多台-server)。
+
+### 8.4 服务端多用户鉴权 + 停用某个账号
+
+`websocket.server.users` 本身就是数组，一台服务端可以接受多个订阅端、各用各的账号；给某条加 `disable: true` 就能不删配置、不改密码地临时停掉某个订阅端：
+
+```yaml
+# 服务端（公网）：接受两个订阅端，账号各不相同；office 临时停用
+websocket:
+  server:
+    listen: :3002
+    users:
+      - user: home
+        pass: HomePass1234567890
+      - user: office
+        pass: OfficePass1234567890
+        disable: true          # 临时停用, 该账号的订阅端连不上, 服务端日志会打 user office is disabled
+    forward:
+      - listen: :2222
+        email: home@example.com
+      - listen: :2223
+        email: office@example.com
+```
+
+配合 8.3 的写法，两个订阅端各自在自己的 `websocket.client.user`/`pass`（8.1/8.2 的写法）或 `clients[].user`/`pass`（8.3 的写法）里填对应账号即可；不影响 `email`（`email` 仍是独立字段，用于服务端 `forward.email` 定位订阅端，不参与鉴权）。`disable` 热加载生效，字段详见 [websocket.md](websocket.md#多用户鉴权)。
+
+### 8.5 QUIC 直连（打洞，数据不经服务端）
+
+前面几例数据都经服务端转发。这条路径把入口挪到订阅端自己机器上，两个订阅端直接打洞建 QUIC 连接，服务端只转交信令：
+
+```yaml
+# 服务端（公网，只转信令，不转数据）
+websocket:
+  server:
+    listen: :3002
+    users:
+      - user: office
+        pass: OfficePass1234567890
+      - user: home
+        pass: HomePass1234567890
+```
+
+```yaml
+# C（被连的一方，内网 RDP 所在机器）
+listen: off
+websocket:
+  client:
+    connect: <服务端IP>:3002
+    user: home
+    pass: HomePass1234567890
+    email: home@example.com
+    directAccept: true         # 允许别人直连自己；监听按需起、空闲释放，平时不占端口
+    forward:
+      - port: 3389              # 复用同一张白名单：未映射的 port 一律拒绝
+        target: 192.168.1.10:3389
+```
+
+```yaml
+# A（发起的一方，入口在自己机器上）
+listen: off
+websocket:
+  client:
+    connect: <服务端IP>:3002
+    user: office
+    pass: OfficePass1234567890
+    email: office@example.com
+    direct:
+      - listen: ":13389"        # 本机入口，mstsc 连这里
+        email: home@example.com # 直连到这个 email 的订阅端
+        port: 3389               # 用对方 forward 里的哪条规则
+        protocol: both            # tcp(默认) / udp / both；RDP 8+ 用 both
+```
+
+用法：`mstsc` 连 `127.0.0.1:13389`，实际字节走 A↔C 的 QUIC 直连，不经服务端。打洞失败就直接失败（连接被关掉，日志写明每条候选卡在哪），**没有中继回落**——要经中继就照 8.2 配 `server.forward`，两条路径互不兜底。字段与打洞机制详见 [websocket.md](websocket.md#配置字段)。
+
+### 8.6 直连收发文件（不依赖对端装 sshd/rsync）
+
+复用 8.5 的直连通道收发文件。对端只需一个目录，跨 Windows 也不用装任何服务：
+
+```yaml
+# C（放文件的一方，接着 8.5 的 C 配置加一段）
+websocket:
+  client:
+    directAccept: true
+    receive:
+      dir: D:/incoming          # 收到的文件落这里，也是允许被取走的根目录；不配 dir 则收发都拒绝
+      allow:                    # 一条一个 {email, uuid}; 留空=谁都不接受
+        - email: office@example.com
+          uuid: 3fa85f64-5717-4562-b3fc-2c963f66afa6   # 从 A 的启动日志里抄, 见下
+```
+
+`email` 只是备注/查找用，真正的凭证是 `uuid`——这份配置的身份，不能在 A 的配置文件里手动配：A 第一次启动时会自动生成并打在日志里（同时持久化到配置文件同目录、同名的隐藏文件，比如 `office.yaml` 对应 `.office.uuid`，重启不变），把这个值抄过来填在这里（`receive.allow[].uuid` 是可以手动配的字段）即可。注意是"按配置文件"而不是"按机器"：同一台机器上用 `-c` 指向不同配置文件会各自生成独立的 uuid，不会共用。
+
+**`allow` 是双向的**：填在这里的人既能往 `dir` 发文件，也能取走 `dir` 下的东西。所以 `dir` 要指一个专门用来交换文件的目录，别随手指向什么重要位置。
+
+两个方向都不用常驻进程，一条命令跑完就退出：
+
+```bash
+# 推给对方（人在 A 上操作，把 A 的文件送到 C）
+anyproxy -c conf/office.yaml -send D:/photos -to home@example.com
+
+# 从对方取（人也在 A 上操作，C 那边不需要有人；路径相对 C 的 receive.dir）
+anyproxy -c conf/office.yaml -recv home@example.com:photos -to D:/pulled
+anyproxy -c conf/office.yaml -recv home@example.com:photos/2024.zip -to D:/pulled
+```
+
+打洞不成功就报错、一个字节都不传（退出码非零），脚本里 `anyproxy -send ... && echo ok` 直接可用。设计细节（分块校验、断点占位、重名不覆盖等）详见 [websocket.md](websocket.md#配置字段)。
+
+**打洞走不通时**（双方都在严格 NAT/CGNAT 后面，比如同一个运营商大内网互相看不见），不用改任何配置——C 不需要开 `directAccept`，`receive` 原样复用——只在命令上加一个参数，两个方向都认：
+
+```bash
+anyproxy -c conf/office.yaml -send D:/photos -to home@example.com -via relay
+anyproxy -c conf/office.yaml -recv home@example.com:photos -to D:/pulled -via relay
+```
+
+数据经过 B 转发，但同样是端到端加密的：`receive.allow` 里配的 `uuid` 被直接当作这次传输的加密密钥的派生来源，B 转发的是密文，看不到文件内容；换来的是不依赖打洞——只要 A、C 都连着同一个 B 就能传，代价是吞吐受 B 带宽限制。详见 [websocket.md](websocket.md#配置字段)。
+
+注意 `-recv -via relay`（经中继**取**文件）要求服务端 B 也升级到本版本，否则会明确报错；`-recv -via direct` 不受影响，B 一行都不用动。
 
 ---
 

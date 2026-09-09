@@ -26,6 +26,8 @@ const sniffTimeout = 200 * time.Millisecond
 // 客户端若在此期间放弃预连接(关闭)，Read 立即返回错误，上层据此提前结束。
 const sniffTimeoutHTTP = 5 * time.Second
 
+const sniffMaxHeader = 16 << 10
+
 // ForwardTCP 处理来自TUN虚拟网卡(用户态协议栈)的原始TCP流量。
 // 目标地址已由用户态协议栈解析得到，这里直接复用 tunnel 的路由/代理逻辑
 // (direct/tunnel/socks5/host规则) 进行转发，逻辑上等价于 tcpStream 的原始转发路径，
@@ -42,6 +44,7 @@ func ForwardTCP(ctx context.Context, id uint, clientConn net.Conn, srcIP, dstIP 
 		DstIP:   dstIP,
 		DstPort: dstPort,
 		TUN:     true,
+		Raw:     true, // 原始字节透传, http 上级代理须走 CONNECT 隧道
 	}
 	s := &tunnel{req: req}
 	// 不走 newTunnel，来源IP由协议栈提供
@@ -131,14 +134,32 @@ func sniffClientHead(clientConn net.Conn, dstPort uint16) (head []byte, dstName 
 		timeout = sniffTimeoutHTTP
 	}
 	_ = clientConn.SetReadDeadline(time.Now().Add(timeout))
-	// 4K 足以容纳绝大多数含PQ密钥交换的 TLS ClientHello
-	buf := make([]byte, 4096)
-	n, err := clientConn.Read(buf)
+	// 分片的 TLS ClientHello 可能超过一次 Read；在同一个 deadline 内持续拼接，
+	// 直到解析出域名、达到上限或超时。
+	buf := make([]byte, 4<<10)
+	var err error
+	for len(head) < sniffMaxHeader {
+		var n int
+		readBuf := buf
+		if remain := sniffMaxHeader - len(head); remain < len(readBuf) {
+			readBuf = readBuf[:remain]
+		}
+		n, err = clientConn.Read(readBuf)
+		if n > 0 {
+			head = append(head, buf[:n]...)
+			dstName = sniffDomain(head)
+			// HTTP/TLS 解析出域名后即可停止；其它协议没有可靠的“首包完整”
+			// 标记，继续读到原有 deadline，再按 IP 回退，避免把分片 TLS 误判。
+			if dstName != "" {
+				break
+			}
+			continue
+		}
+		break
+	}
 	// 清除读超时，恢复正常读
 	_ = clientConn.SetReadDeadline(time.Time{})
-	if n > 0 {
-		head = buf[:n]
-		dstName = sniffDomain(head)
+	if len(head) > 0 {
 		return head, dstName, false
 	}
 	// 未读到数据: 超时(静默连接/服务器先说话)按无域名继续；
@@ -149,7 +170,7 @@ func sniffClientHead(clientConn net.Conn, dstPort uint16) (head []byte, dstName 
 		}
 		return nil, "", true
 	}
-	return
+	return nil, "", false
 }
 
 // transferConn 在客户端连接(协议栈)与后端连接之间做双向拷贝。
