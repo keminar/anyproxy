@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/keminar/anyproxy/config"
@@ -59,7 +60,10 @@ func splitRecvSpec(recv string) (email, remotePath string, err error) {
 //
 // to 是本地存放目录, 与 -send 的 -to 共用同一个命令行参数、按场景解释成不同的东西:
 // -send 时是"发给谁", -recv 时是"存哪儿"。留空则存到当前目录。
-func RecvFiles(cfg conf.WsClient, recv, to, via string) error {
+//
+// parallel 与 SendFiles 同一个参数、同一个阈值判断(见 planChunks): 单个文件够大时
+// 按 e.Size(清单里已经有, 不用额外问一次)切块, 各开一条独立连接并行取。
+func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	if cfg.Connect == "" {
 		return fmt.Errorf("websocket.client.connect is empty, cannot reach the server")
 	}
@@ -160,13 +164,17 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string) error {
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(entries), e.Name)
 		p := newProgress(prefix, e.Size)
 
-		conn, err := openPull()
-		if err != nil {
-			p.done()
-			return fmt.Errorf("%s: %w", e.Name, err)
+		var saved string
+		var err error
+		if chunks := planChunks(e.Size, parallel); chunks != nil {
+			saved, err = recvParallel(openPull, dir, e, from, remote, logf, chunks, p)
+		} else {
+			var conn fileConn
+			if conn, err = openPull(); err == nil {
+				saved, err = pullFile(conn, dir, e, from, remote, logf, p.update)
+				conn.Close()
+			}
 		}
-		saved, err := pullFile(conn, dir, e, from, remote, logf, p.update)
-		conn.Close()
 		p.done()
 		if err != nil {
 			// 与 -send 一致: 中途出错就停下并报错退出, 不跳过继续取剩下的 —— 半份
@@ -179,4 +187,55 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string) error {
 	}
 	fmt.Fprintf(os.Stderr, "done: %d file(s), %s\n", len(entries), humanBytes(gotBytes))
 	return nil
+}
+
+// recvParallel 把一个文件按 chunks 描述的区间拆成多条独立连接并行取, 是 pullFile 的
+// 分块版编排。每一块各自调 openPull 要一条新连接——它对 direct/relay 一视同仁, 不用
+// 在这里再分 via。失败语义与 sendParallel 对称: 任意一块出错就让整份文件报错。
+func recvParallel(openPull func() (fileConn, error), dir string, e filePullEntry, from, remote string,
+	logf func(string, ...interface{}), chunks []chunkRange, p *progress) (string, error) {
+	tid, err := newTransferID()
+	if err != nil {
+		return "", fmt.Errorf("generate transfer id: %w", err)
+	}
+	cp := newChunkProgress(len(chunks), p)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	var saved string
+	for i, c := range chunks {
+		wg.Add(1)
+		go func(i int, c chunkRange) {
+			defer wg.Done()
+			conn, err := openPull()
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, i, len(chunks), c.offset, c.length,
+				func(sent int64) { cp.update(i, sent) })
+			conn.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			if s != "" {
+				saved = s
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return saved, nil
 }

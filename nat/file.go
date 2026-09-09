@@ -1,16 +1,19 @@
 package nat
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/keminar/anyproxy/utils/conf"
@@ -65,17 +68,32 @@ type fileAuth struct {
 	UUID  string `json:"uuid"`  // 真正的凭证: 必须与查到的那条一致
 }
 
-// fileHead 一条 stream 传一个文件, 这是它的首部。
+// fileHead 一条 stream 传一个文件(或文件的一个分块), 这是它的首部。
+//
+// TransferID 为空是今天的"整份文件"语义, Size 就是文件总大小、Offset 恒为 0 ——
+// 单文件分块并行传输(见 file_send.go/file_recv.go 的 parallel 参数)才会填后面
+// 四个字段: 同一个 TransferID 标记"这些连接属于同一次传输", ChunkIndex/ChunkCount
+// 标记这是第几块/一共几块, Offset 是这一块在整份文件里的起始字节。Size 此时是**这一
+// 块**的字节数, 不是整份文件的大小——每条连接只关心自己要发/收多少字节, 不需要知道
+// 别的块传到哪了。
 type fileHead struct {
-	Name string `json:"name"` //相对路径, 一律用 / 分隔
-	Size int64  `json:"size"`
-	Mode uint32 `json:"mode"` //仅取权限位, Windows 收端会忽略
+	Name       string `json:"name"` //相对路径, 一律用 / 分隔
+	Size       int64  `json:"size"`
+	Mode       uint32 `json:"mode"` //仅取权限位, Windows 收端会忽略
+	TransferID string `json:"tid,omitempty"`
+	ChunkIndex int    `json:"ci,omitempty"`
+	ChunkCount int    `json:"cc,omitempty"`
+	Offset     int64  `json:"off,omitempty"`
 }
 
 // fileTrailer 数据发完之后才发的校验信息。
 //
 // 放在后面而不是首部, 是为了让发送端边读边算: 摘要写在首部的话, 发送前必须把整个
 // 文件先完整读一遍算出摘要, 大文件等于白读一遍。
+//
+// SHA256 校验的是**这条连接上刚发的这些字节**: 不分块时就是整份文件的摘要; 分块时
+// 是这一块的摘要, 不是整份文件的——按块校验才能一边收一边算, 不用等所有块都到齐再
+// 重新读一遍整份文件。
 type fileTrailer struct {
 	SHA256 string `json:"sha256"`
 }
@@ -199,6 +217,15 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 		reply(fileReply{Err: "negative file size"})
 		return
 	}
+
+	// TransferID 非空说明这不是整份文件, 是分块并行传输(见 file_send.go 的 parallel
+	// 参数)里的一块, 转交单独的落盘逻辑——多条连接要写同一个目标文件的不同字节区间,
+	// 不能像下面这样每条连接各开各的 .part。
+	if head.TransferID != "" {
+		recvFileChunk(conn, dir, remote, logf, head, reply)
+		return
+	}
+
 	dest, err := safeJoin(dir, head.Name)
 	if err != nil {
 		reply(fileReply{Err: fmt.Sprintf("rejected name %q: %v", head.Name, err)})
@@ -232,6 +259,183 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 
 	rel, _ := filepath.Rel(dir, saved)
 	logf("file from %s: saved %s (%s in %s)", remote, rel, humanBytes(head.Size), time.Since(start).Round(time.Millisecond))
+	reply(fileReply{Saved: filepath.ToSlash(rel)})
+}
+
+// ---------- 分块并行传输的落盘(接收端) ----------
+//
+// 一份分块传输对应多条独立连接、并发到达, 都要写同一个目标文件的不同字节区间——
+// 这是 writeIncoming 那套"一条连接从头写到尾"的模型处理不了的, 需要一份跨连接共享
+// 的状态, 按 TransferID 关联起来。
+
+const (
+	// chunkAssemblyIdleTimeout 一份分块传输多久没有任何一块进展就判定发送方已经
+	// 中断(崩溃/网络彻底断开), 回收残留的 .part 与内存状态。常规传输不会撞上这个
+	// 值——它只兜底真正卡死不会再有后续块到达的情形。
+	chunkAssemblyIdleTimeout = 5 * time.Minute
+	chunkAssemblyReapEvery   = 30 * time.Second
+)
+
+// chunkAssembly 一次分块传输在接收端的运行时状态, 按 TransferID 索引, 所有块共享。
+type chunkAssembly struct {
+	mu        sync.Mutex
+	f         *os.File
+	final     string // 最终落盘名(第一块到达时就定下, 所有块共用, 不重复判重名)
+	part      string
+	total     int
+	remaining int
+	seen      map[int]bool
+	err       error // 目前为止任意一块出的错, 先到先得——后面的块不会覆盖它
+	touched   time.Time
+}
+
+// chunkAssemblies 接收端的分块传输注册表。key 是 TransferID。
+var chunkAssemblies = struct {
+	mu sync.Mutex
+	m  map[string]*chunkAssembly
+}{m: map[string]*chunkAssembly{}}
+
+var chunkReaperOnce sync.Once
+
+// getOrCreateAssembly 取或建一份分块传输的运行时状态。只有第一个到达的块真正建
+// 文件、判重名——后到的块复用同一份结果, 保证一次传输里所有块落到同一个文件名下。
+func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly, error) {
+	chunkReaperOnce.Do(func() { go reapChunkAssemblies() })
+
+	chunkAssemblies.mu.Lock()
+	defer chunkAssemblies.mu.Unlock()
+	if a, ok := chunkAssemblies.m[tid]; ok {
+		return a, nil
+	}
+	dest, err := safeJoin(dir, head.Name)
+	if err != nil {
+		return nil, fmt.Errorf("rejected name %q: %w", head.Name, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return nil, fmt.Errorf("mkdir: %w", err)
+	}
+	final := uniquePath(dest)
+	part := final + filePartSuffix
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, filePerm(head.Mode))
+	if err != nil {
+		return nil, fmt.Errorf("create: %w", err)
+	}
+	a := &chunkAssembly{
+		f: f, final: final, part: part,
+		total: head.ChunkCount, remaining: head.ChunkCount,
+		seen: make(map[int]bool, head.ChunkCount), touched: time.Now(),
+	}
+	chunkAssemblies.m[tid] = a
+	return a, nil
+}
+
+// reapChunkAssemblies 周期性收掉长期没有任何一块进展的分块传输, 防止发送方中途
+// 崩溃时残留的 .part 文件和内存状态在长驻进程(收文件的守护进程)里一直攒着不释放。
+// -send/-recv 这类一次性进程本身很快退出, 用不上这个也不会泄漏, 但复用同一份代码
+// 更简单, 不必单独判断"是不是长驻进程"。
+func reapChunkAssemblies() {
+	for range time.Tick(chunkAssemblyReapEvery) {
+		now := time.Now()
+		var dead []*chunkAssembly
+		chunkAssemblies.mu.Lock()
+		for tid, a := range chunkAssemblies.m {
+			a.mu.Lock()
+			idle := now.Sub(a.touched) > chunkAssemblyIdleTimeout
+			a.mu.Unlock()
+			if idle {
+				delete(chunkAssemblies.m, tid)
+				dead = append(dead, a)
+			}
+		}
+		chunkAssemblies.mu.Unlock()
+		for _, a := range dead {
+			a.f.Close()
+			os.Remove(a.part)
+			log.Printf("nat file: transfer to %s idle, dropped (%d/%d chunks arrived)", a.final, a.total-a.remaining, a.total)
+		}
+	}
+}
+
+// recvFileChunk 落盘分块并行传输里的一块。remaining 归零(不论成败)的那一块负责
+// 收尾: 全部成功就把 .part 改名成最终文件名, 任意一块出过错就整份删掉——和
+// writeIncoming 的"校验不过就删除"是同一个原则, 只是判断依据从一条连接扩成了这次
+// 传输的所有块。
+func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...interface{}), head fileHead, reply func(fileReply)) {
+	if head.ChunkCount < 2 || head.ChunkIndex < 0 || head.ChunkIndex >= head.ChunkCount {
+		reply(fileReply{Err: "malformed chunk header"})
+		return
+	}
+	a, err := getOrCreateAssembly(head.TransferID, head, dir)
+	if err != nil {
+		reply(fileReply{Err: err.Error()})
+		return
+	}
+
+	a.mu.Lock()
+	dup := a.seen[head.ChunkIndex]
+	if !dup {
+		a.seen[head.ChunkIndex] = true
+	}
+	a.touched = time.Now()
+	a.mu.Unlock()
+
+	var chunkErr error
+	switch {
+	case dup:
+		chunkErr = fmt.Errorf("duplicate chunk %d", head.ChunkIndex)
+	default:
+		h := sha256.New()
+		n, werr := copyN(io.MultiWriter(io.NewOffsetWriter(a.f, head.Offset), h), conn, head.Size)
+		switch {
+		case werr != nil:
+			chunkErr = fmt.Errorf("receive chunk %d: %w", head.ChunkIndex, werr)
+		case n != head.Size:
+			chunkErr = fmt.Errorf("chunk %d truncated: got %d of %d bytes", head.ChunkIndex, n, head.Size)
+		default:
+			var tr fileTrailer
+			if err := readFrame(conn, &tr, fileFrameMax); err != nil {
+				chunkErr = fmt.Errorf("no checksum for chunk %d: %w", head.ChunkIndex, err)
+			} else if sum := hex.EncodeToString(h.Sum(nil)); tr.SHA256 != sum {
+				chunkErr = fmt.Errorf("chunk %d checksum mismatch (got %s, sender says %s)", head.ChunkIndex, short(sum), short(tr.SHA256))
+			}
+		}
+	}
+
+	a.mu.Lock()
+	if chunkErr != nil && a.err == nil {
+		a.err = chunkErr
+	}
+	a.remaining--
+	finishing := a.remaining <= 0
+	finalErr := a.err
+	a.touched = time.Now()
+	a.mu.Unlock()
+
+	if finishing {
+		chunkAssemblies.mu.Lock()
+		delete(chunkAssemblies.m, head.TransferID)
+		chunkAssemblies.mu.Unlock()
+
+		closeErr := a.f.Close()
+		if finalErr == nil && closeErr != nil {
+			finalErr = fmt.Errorf("close: %w", closeErr)
+		}
+		if finalErr != nil {
+			os.Remove(a.part)
+		} else if err := os.Rename(a.part, a.final); err != nil {
+			os.Remove(a.part)
+			finalErr = fmt.Errorf("rename: %w", err)
+		} else {
+			rel, _ := filepath.Rel(dir, a.final)
+			logf("file from %s: saved %s (%d chunks)", remote, filepath.ToSlash(rel), a.total)
+		}
+	}
+
+	if finalErr != nil {
+		reply(fileReply{Err: finalErr.Error()})
+		return
+	}
+	rel, _ := filepath.Rel(dir, a.final)
 	reply(fileReply{Saved: filepath.ToSlash(rel)})
 }
 
@@ -414,6 +618,65 @@ func collectFiles(paths []string) ([]fileItem, error) {
 	return out, nil
 }
 
+// ---------- 单文件分块并行传输 ----------
+//
+// 只切一个大文件, 不做多文件并发(那是另一件事, 用户明确不要, 怕多个文件抢同一份
+// 带宽反而拖慢每一个)。切块只在文件足够大时才划算: 块太小时握手/首部这些固定开销
+// 占比会明显起来, 并行反而更慢。
+
+const (
+	// chunkMinSize 单块最小体积。小于两倍这个数的文件不切块——切出来的块比这还小,
+	// 并行的收益盖不住多开几条连接的开销。
+	chunkMinSize = 4 << 20 // 4MiB
+
+	// transferIDSize 分块传输 ID 的随机字节数, 只用来在接收端把同一次传输的多个块
+	// 对上号, 不是秘密, 不需要跟 relay 那套加密 salt 一样的强度。
+	transferIDSize = 8
+)
+
+// chunkRange 一个分块在文件里的位置。
+type chunkRange struct {
+	offset int64
+	length int64
+}
+
+// planChunks 把一个 size 字节的文件切成不超过 want 块, 每块至少 chunkMinSize
+// (最后一块除外, 它兜底拿余数, 可能比 chunkMinSize 大)。want<=1 或文件不够大时
+// 返回 nil, 调用方应退回不切块的单连接路径。
+func planChunks(size int64, want int) []chunkRange {
+	if want <= 1 || size < 2*chunkMinSize {
+		return nil
+	}
+	n := int64(want)
+	if max := size / chunkMinSize; n > max {
+		n = max
+	}
+	if n <= 1 {
+		return nil
+	}
+	base := size / n
+	out := make([]chunkRange, 0, n)
+	var off int64
+	for i := int64(0); i < n; i++ {
+		length := base
+		if i == n-1 {
+			length = size - off // 最后一块拿余数, 避免整除不尽时漏字节
+		}
+		out = append(out, chunkRange{offset: off, length: length})
+		off += length
+	}
+	return out
+}
+
+// newTransferID 生成一次分块传输的关联 ID, 十六进制编码后放进 fileHead/filePullReq。
+func newTransferID() (string, error) {
+	var b [transferIDSize]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
 // sendFile 在已建立的直连上发一个文件, 返回收端存成的名字。先写一段 fileAuth 声明
 // 自己是谁(见 fileAuth 的注释), 对端凭它核对 client.receive.allow。
 //
@@ -421,18 +684,42 @@ func collectFiles(paths []string) ([]fileItem, error) {
 // 时这份凭证本身就没有意义, 对端要么直接拒绝要么比对出一个巧合的假阳性/假阴性,
 // 不如在本地就地拒绝, 不打开这条 stream。
 func (d *directPeer) sendFile(sess *directSession, it fileItem, onProgress func(sent int64)) (string, error) {
-	if !conf.IsValidUUID(d.cfg.UUID) {
-		return "", errors.New("websocket.client.uuid is empty or not a valid uuid, refusing to send")
-	}
-	stream, err := d.openHeadedStream(sess, directStreamFile, "", directFilePort)
+	stream, err := d.openFileStream(sess)
 	if err != nil {
 		return "", err
 	}
+	return sendFileOver(stream, it, onProgress)
+}
+
+// sendFileChunk 是 sendFile 的分块版: 单独开一条流发文件里的 [offset, offset+length)
+// 这一段, 供单文件并行分块传输用(见 file_send.go 的 parallel 参数)。除了多传
+// offset/length/tid/chunkIdx/chunkCount, 与 sendFile 完全一样——每个分块各自开一条
+// 独立的 QUIC stream, 复用同一个 sess 不用重新打洞。
+func (d *directPeer) sendFileChunk(sess *directSession, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(sent int64)) (string, error) {
+	stream, err := d.openFileStream(sess)
+	if err != nil {
+		return "", err
+	}
+	return sendFileOverRange(stream, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+}
+
+// openFileStream 开一条文件传输流并写好身份声明, 是 sendFile/sendFileChunk 共用的
+// 前半段(见 fileAuth 的注释)。发之前先校验自己的 uuid 格式: 为空或不是合法 uuid
+// (比如 .uuid 状态文件被手改坏了)时这份凭证本身就没有意义, 对端要么直接拒绝要么
+// 比对出一个巧合的假阳性/假阴性, 不如在本地就地拒绝, 不打开这条 stream。
+func (d *directPeer) openFileStream(sess *directSession) (*quic.Stream, error) {
+	if !conf.IsValidUUID(d.cfg.UUID) {
+		return nil, errors.New("websocket.client.uuid is empty or not a valid uuid, refusing to send")
+	}
+	stream, err := d.openHeadedStream(sess, directStreamFile, "", directFilePort)
+	if err != nil {
+		return nil, err
+	}
 	if err := writeFrame(stream, fileAuth{Email: d.cfg.Email, UUID: d.cfg.UUID}); err != nil {
 		stream.Close()
-		return "", fmt.Errorf("send auth: %w", err)
+		return nil, fmt.Errorf("send auth: %w", err)
 	}
-	return sendFileOver(stream, it, onProgress)
+	return stream, nil
 }
 
 // openPullStream 在已建立的直连上开一条取件流, 并写好身份声明。与 sendFile 的前半段
@@ -453,10 +740,22 @@ func (d *directPeer) openPullStream(sess *directSession) (*quic.Stream, error) {
 	return stream, nil
 }
 
-// sendFileOver 发送一个文件的核心逻辑, 不关心 conn 底下是 QUIC stream 还是中继消息
-// 通道; 用完即关——直连路径关的是那条 stream, 中继路径关的是 msgPipe(会触发发一个
-// 收尾信号给对端)。
+// sendFileOver 发送一整个文件, 是 sendFileOverRange 在"不分块"时的薄包装——
+// offset=0、length=文件全长、TransferID 为空, 语义与今天完全一样。
 func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (string, error) {
+	return sendFileOverRange(conn, it, 0, it.size, "", 0, 1, onProgress)
+}
+
+// sendFileOverRange 发送一个文件的核心逻辑, 不关心 conn 底下是 QUIC stream 还是中继
+// 消息通道; 用完即关——直连路径关的是那条 stream, 中继路径关的是 msgPipe(会触发发
+// 一个收尾信号给对端)。
+//
+// offset/length 圈定这次要发文件里的哪一段: 不分块传输时 offset=0、length=整份文件
+// 大小; 分块并行传输时(见 file_send.go 的 parallel 参数)每个分块各自打开一条独立
+// 连接, 用各自的 offset/length 调这个函数, tid/chunkIdx/chunkCount 让接收端知道这些
+// 连接属于同一次传输、该拼在文件的哪个位置。每条连接各自 os.Open 一份文件描述符再
+// Seek, 不共享同一个 *os.File——多个 goroutine 共用一个 fd 各自 Seek 会相互踩踏。
+func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(sent int64)) (string, error) {
 	defer conn.Close()
 
 	f, err := os.Open(it.path)
@@ -464,8 +763,16 @@ func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (stri
 		return "", err
 	}
 	defer f.Close()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return "", fmt.Errorf("seek to %d: %w", offset, err)
+		}
+	}
 
-	if err := writeFrame(conn, fileHead{Name: it.name, Size: it.size, Mode: it.mode}); err != nil {
+	if err := writeFrame(conn, fileHead{
+		Name: it.name, Size: length, Mode: it.mode,
+		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset,
+	}); err != nil {
 		return "", fmt.Errorf("send head: %w", err)
 	}
 
@@ -473,13 +780,13 @@ func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (stri
 	// 边发边算摘要: 摘要放在尾部就是为了这个, 不用为了算它先把文件读一遍。
 	src := io.TeeReader(&progressReader{r: f, on: onProgress}, h)
 	buf := make([]byte, fileCopyBuf)
-	sent, err := io.CopyBuffer(conn, io.LimitReader(src, it.size), buf)
+	sent, err := io.CopyBuffer(conn, io.LimitReader(src, length), buf)
 	if err != nil {
 		return "", fmt.Errorf("send body: %w", err)
 	}
-	if sent != it.size {
+	if sent != length {
 		// 传输途中文件被改小了。继续发下去收端只会校验失败, 不如当场说清楚。
-		return "", fmt.Errorf("file shrank while sending: sent %d of %d bytes", sent, it.size)
+		return "", fmt.Errorf("file shrank while sending: sent %d of %d bytes", sent, length)
 	}
 	if err := writeFrame(conn, fileTrailer{SHA256: hex.EncodeToString(h.Sum(nil))}); err != nil {
 		return "", fmt.Errorf("send checksum: %w", err)

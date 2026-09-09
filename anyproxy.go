@@ -57,6 +57,7 @@ var (
 	gSendTo          string
 	gSendVia         string
 	gRecv            string
+	gParallel        int
 )
 
 func init() {
@@ -87,6 +88,7 @@ func init() {
 	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path) or \"relay\" (through the server B, no punching needed); both are end-to-end encrypted")
 
 	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
+	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
 
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
 	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
@@ -160,13 +162,16 @@ func main() {
 	//
 	// 放在配置加载之后(要用 websocket.client 的连接与凭证), 但在日志目录初始化之前 ——
 	// 这是个前台命令, 输出该直接打在终端上, 而不是写进日志文件。
+	if (gSend != "" || gRecv != "") && gParallel < 1 {
+		log.Fatalln("-parallel must be at least 1")
+	}
 	if gSend != "" {
 		paths := append([]string{gSend}, flag.Args()...)
 		cfg, err := pickClientConfig("send")
 		if err != nil {
 			log.Fatalln("send:", err)
 		}
-		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia); err != nil {
+		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel); err != nil {
 			// 打洞失败也走这里: 按约定不做中继回落, 一个字节都不传, 退出码非零。
 			log.Fatalln("send:", err)
 		}
@@ -179,7 +184,7 @@ func main() {
 		if err != nil {
 			log.Fatalln("recv:", err)
 		}
-		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia); err != nil {
+		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel); err != nil {
 			log.Fatalln("recv:", err)
 		}
 		return

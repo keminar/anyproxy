@@ -545,3 +545,14 @@ func sendFileViaRelay(client *Client, toEmail string, it fileItem, onProgress fu
 	// sendFileOver 用完即关(defer conn.Close()), 这里不必再收尾。
 	return sendFileOver(secured, it, onProgress)
 }
+
+// sendFileChunkViaRelay 是 sendFileViaRelay 的分块版, 供单文件并行分块传输用(见
+// file_send.go 的 parallel 参数)。每一块各自调一次 openRelayConn——协议本身早就
+// 支持"随时开一条新的加密会话"(每次都是独立的 salt/密钥), 不需要为分块单独改握手。
+func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+	secured, _, err := openRelayConn(client, toEmail, "")
+	if err != nil {
+		return "", err
+	}
+	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+}

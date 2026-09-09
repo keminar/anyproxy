@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -795,5 +796,225 @@ func TestShortSum(t *testing.T) {
 	}
 	if got := short("abc"); got != "abc" {
 		t.Fatalf("a short string should pass through, got %q", got)
+	}
+}
+
+// ---------- 单文件分块并行传输 ----------
+
+func TestPlanChunks(t *testing.T) {
+	// want<=1 或文件太小: 不切块, 退回单连接路径。
+	if got := planChunks(10*chunkMinSize, 1); got != nil {
+		t.Fatalf("want=1 should not split, got %v", got)
+	}
+	if got := planChunks(2*chunkMinSize-1, 4); got != nil {
+		t.Fatalf("a file just under 2*chunkMinSize should not split, got %v", got)
+	}
+
+	// 正好两倍最小块: 切两块。
+	chunks := planChunks(2*chunkMinSize, 4)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
+	}
+
+	// want 超过文件能切出的块数时按能切多少切多少, 不会切出小于 chunkMinSize 的块
+	// (最后一块拿余数除外)。
+	size := int64(5*chunkMinSize) + 777
+	chunks = planChunks(size, 8)
+	if len(chunks) != 5 {
+		t.Fatalf("expected 5 chunks (capped by chunkMinSize), got %d: %v", len(chunks), chunks)
+	}
+
+	// 分块必须首尾相接、覆盖整个文件, 不重叠、不漏字节, 最后一块拿余数。
+	var off int64
+	var total int64
+	for i, c := range chunks {
+		if c.offset != off {
+			t.Fatalf("chunk %d starts at %d, want %d", i, c.offset, off)
+		}
+		if i < len(chunks)-1 && c.length < chunkMinSize {
+			t.Fatalf("chunk %d is smaller than chunkMinSize: %d", i, c.length)
+		}
+		off += c.length
+		total += c.length
+	}
+	if total != size {
+		t.Fatalf("chunks cover %d bytes, want %d", total, size)
+	}
+}
+
+// 端到端: 一个大文件切 3 块, 各开一条独立的 QUIC stream 并行发, 落盘后内容必须和
+// 源文件逐字节一致——并行本身不能引入任何数据错误(乱序落盘、块与块之间接不上等)。
+func TestChunkedFileTransferDirect(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	// 凑一个不对齐 chunkMinSize 的大小, 顺带盖住"最后一块拿余数"。
+	body := make([]byte, 5*chunkMinSize+777)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "chunked.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	c := newAcceptPeer(t, nil)
+	c.cfg.Receive = conf.ClientReceive{Dir: recvDir, Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
+	a := newDialPeer(t)
+	a.cfg.Email, a.cfg.UUID = "a@example.com", testUUIDA
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	const token = "test-token-chunk"
+	c.tokens.put(token, directFilePort)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+	chunks := planChunks(it.size, 3)
+	if len(chunks) < 2 {
+		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	}
+
+	p := newProgress("test", it.size)
+	sendChunk := func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+		return a.sendFileChunk(sess, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	}
+	saved, err := sendParallel(it, chunks, sendChunk, p)
+	if err != nil {
+		t.Fatalf("chunked send: %v", err)
+	}
+	if saved != "chunked.bin" {
+		t.Fatalf("peer saved it as %q", saved)
+	}
+
+	got, err := os.ReadFile(filepath.Join(recvDir, "chunked.bin"))
+	if err != nil {
+		t.Fatalf("read received: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("received %d bytes, content differs from the %d sent", len(got), len(body))
+	}
+	if _, err := os.Stat(filepath.Join(recvDir, "chunked.bin"+filePartSuffix)); !os.IsNotExist(err) {
+		t.Fatal("the .part file was left behind")
+	}
+}
+
+// corruptOnceConn 在正文第一次 Write 时(而不是首部帧那次)翻转一个字节, 模拟"这一块
+// 在传输途中出了错"——用来验证分块传输里一块校验失败会让整份传输报错、且不留下半截
+// 或内容错误的文件。
+type corruptOnceConn struct {
+	fileConn
+	calls int
+}
+
+func (c *corruptOnceConn) Write(b []byte) (int, error) {
+	c.calls++
+	if c.calls == 2 && len(b) > 0 { // 第 1 次 Write 是 fileHead 帧, 第 2 次才是正文。
+		mutated := append([]byte(nil), b...)
+		mutated[0] ^= 0xFF
+		return c.fileConn.Write(mutated)
+	}
+	return c.fileConn.Write(b)
+}
+
+func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := make([]byte, 4*chunkMinSize)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "bad.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	c := newAcceptPeer(t, nil)
+	c.cfg.Receive = conf.ClientReceive{Dir: recvDir, Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
+	a := newDialPeer(t)
+	a.cfg.Email, a.cfg.UUID = "a@example.com", testUUIDA
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	const token = "test-token-bad-chunk"
+	c.tokens.put(token, directFilePort)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+	chunks := planChunks(it.size, 4)
+	if len(chunks) < 2 {
+		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	}
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for i, ch := range chunks {
+		wg.Add(1)
+		go func(i int, ch chunkRange) {
+			defer wg.Done()
+			stream, err := a.openFileStream(sess)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			var conn fileConn = stream
+			if i == 1 { // 只破坏中间那一块, 其余块本身都是完整正确的。
+				conn = &corruptOnceConn{fileConn: stream}
+			}
+			if _, err := sendFileOverRange(conn, it, ch.offset, ch.length, tid, i, len(chunks), nil); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(i, ch)
+	}
+	wg.Wait()
+
+	if firstErr == nil {
+		t.Fatal("a corrupted chunk should fail the whole transfer, got no error")
+	}
+
+	dest := filepath.Join(recvDir, "bad.bin")
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatal("a failed chunked transfer must not leave the final file behind")
+	}
+	if _, err := os.Stat(dest + filePartSuffix); !os.IsNotExist(err) {
+		t.Fatal("a failed chunked transfer must not leave the .part file behind")
 	}
 }

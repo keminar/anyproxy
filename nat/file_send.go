@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -70,7 +71,12 @@ func splitSendTo(to string) (email, subdir string, err error) {
 //   - ViaRelay: 不打洞, 只要 A、C 都连着同一个 B 就能传, 不需要对端开
 //     directAccept。代价是数据经过 B(信令与直连一样鉴权发起方身份, 但字节本身
 //     B 是能看到的, 不像直连那样端到端加密), 且吞吐受 B 的带宽限制。
-func SendFiles(cfg conf.WsClient, to string, paths []string, via string) error {
+//
+// parallel 大于 1 且单个文件够大(见 chunkMinSize)时, 把这一个文件切成最多 parallel
+// 块、各开一条独立连接并行传——只切单个大文件, 不会让多个文件同时传输(那样反而可能
+// 拖长每一个文件的耗时, 见 planChunks 的阈值判断)。parallel<=1 或文件不够大时走原来
+// 的单连接路径, 行为与之前完全一样。
+func SendFiles(cfg conf.WsClient, to string, paths []string, via string, parallel int) error {
 	if cfg.Connect == "" {
 		return fmt.Errorf("websocket.client.connect is empty, cannot reach the server")
 	}
@@ -111,14 +117,16 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string) error {
 
 	// send 按 via 分派到两种取得"可写文件通道"的方式, 拿到之后发送循环是共用的——
 	// sendFile(直连)/sendFileViaRelay(中继)内部都调用同一个 sendFileOver, 首部/
-	// 校验/落盘协议完全一样, 两条路径只是"字节怎么送到对面"不同。
+	// 校验/落盘协议完全一样, 两条路径只是"字节怎么送到对面"不同。sendChunk 是它们
+	// 的分块版, 同样两条路径共用一份编排(sendFileParallel)。
 	var send func(it fileItem, onProgress func(int64)) (string, error)
+	var sendChunk func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error)
 	// quicStats 直连路径才有: 传完打一行 QUIC 收发统计, 用来判断"传得慢"是链路丢包
 	// 还是本端的问题(见 nat/direct_stats.go 的判读说明)。
 	var quicStats *directStats
 	switch via {
 	case ViaDirect:
-		// 一次直连, 所有文件共用 —— 每个文件占一条 stream, 不必反复打洞。
+		// 一次直连, 所有文件共用 —— 每个文件(或每一块)占一条 stream, 不必反复打洞。
 		rule := conf.ClientDirect{Email: toEmail, Port: directFilePort}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
@@ -128,9 +136,15 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string) error {
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
 			return sender.peer.sendFile(sess, it, onProgress)
 		}
+		sendChunk = func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+			return sender.peer.sendFileChunk(sess, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+		}
 	case ViaRelay:
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
 			return sendFileViaRelay(sender.client, toEmail, it, onProgress)
+		}
+		sendChunk = func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+			return sendFileChunkViaRelay(sender.client, toEmail, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
 		}
 	}
 
@@ -139,7 +153,13 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string) error {
 		start := time.Now()
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(items), it.name)
 		p := newProgress(prefix, it.size)
-		saved, err := send(it, p.update)
+		var saved string
+		var err error
+		if chunks := planChunks(it.size, parallel); chunks != nil {
+			saved, err = sendParallel(it, chunks, sendChunk, p)
+		} else {
+			saved, err = send(it, p.update)
+		}
 		p.done()
 		if err != nil {
 			return fmt.Errorf("%s: %w", it.name, err)
@@ -251,6 +271,76 @@ func dialSender(cfg conf.WsClient, tag string) (*oneShotSender, error) {
 	}()
 	go s.client.localReadPump()
 	return s, nil
+}
+
+// ---------- 单文件分块并行发送 ----------
+
+// sendParallel 把一个文件按 chunks 描述的区间拆成多条独立连接并行发, 是 send 闭包
+// 的分块版编排, direct/relay 两条路径共用(区别只在传进来的 sendChunk 怎么开连接)。
+// 与非分块路径同一个失败语义: 任意一块出错就让整份文件报错, 不重试、不跳过。
+func sendParallel(it fileItem, chunks []chunkRange,
+	sendChunk func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error),
+	p *progress) (string, error) {
+	tid, err := newTransferID()
+	if err != nil {
+		return "", fmt.Errorf("generate transfer id: %w", err)
+	}
+	cp := newChunkProgress(len(chunks), p)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	var saved string
+	for i, c := range chunks {
+		wg.Add(1)
+		go func(i int, c chunkRange) {
+			defer wg.Done()
+			s, err := sendChunk(it, c.offset, c.length, tid, i, len(chunks), func(sent int64) { cp.update(i, sent) })
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				return
+			}
+			if s != "" {
+				saved = s
+			}
+		}(i, c)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return saved, nil
+}
+
+// chunkProgress 把多个并行分块各自的进度回调聚合成一份整份文件的进度, 复用
+// progress 已有的节流展示逻辑(见 progress.update), 不重复实现一遍。取件方向
+// (file_recv.go)的分块编排也用它, 两边不必各写一份聚合代码。
+type chunkProgress struct {
+	mu   sync.Mutex
+	each []int64
+	p    *progress
+}
+
+func newChunkProgress(n int, p *progress) *chunkProgress {
+	return &chunkProgress{each: make([]int64, n), p: p}
+}
+
+func (c *chunkProgress) update(i int, sent int64) {
+	// progress.update 本身不是并发安全的(设计上只有一个文件的一条连接会调它)——
+	// 分块并行时多个块各自的 goroutine 都会跑到这里, 所以锁要一直拿到调完 p.update
+	// 为止, 不能算完 total 就先放开, 不然多个块的 update 调用还是会互相踩。
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.each[i] = sent
+	var total int64
+	for _, n := range c.each {
+		total += n
+	}
+	c.p.update(total)
 }
 
 // ---------- 进度输出 ----------

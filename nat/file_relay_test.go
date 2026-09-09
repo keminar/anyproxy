@@ -159,6 +159,59 @@ func TestFileRelayLargeFileCrossesWindow(t *testing.T) {
 	}
 }
 
+// 单文件分块并行传输在中继路径下的端到端: 每一块各开一次 openRelayConn(各自独立的
+// salt/密钥), 并行发, C 端按 TransferID 把它们拼回同一个文件。
+func TestChunkedFileTransferRelay(t *testing.T) {
+	connect := fileRelayTestServer(t, []conf.ServerUser{
+		{User: "a", Pass: testPassA},
+		{User: "c", Pass: testPassC},
+	})
+
+	recvDir := t.TempDir()
+	_ = fileRelayTestClient(t, connect, "c", testPassC, "c@example.com", "",
+		conf.ClientReceive{Dir: recvDir, Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}})
+	a := fileRelayTestClient(t, connect, "a", testPassA, "a@example.com", testUUIDA, conf.ClientReceive{})
+
+	srcDir := t.TempDir()
+	body := make([]byte, 5*chunkMinSize+777) // 不对齐 chunkMinSize, 顺带盖住"最后一块拿余数"
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "chunked-relay.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+	chunks := planChunks(it.size, 3)
+	if len(chunks) < 2 {
+		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	}
+
+	p := newProgress("test", it.size)
+	sendChunk := func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	}
+	saved, err := sendParallel(it, chunks, sendChunk, p)
+	if err != nil {
+		t.Fatalf("chunked send via relay: %v", err)
+	}
+	if saved != "chunked-relay.bin" {
+		t.Fatalf("peer saved it as %q", saved)
+	}
+
+	got, err := os.ReadFile(filepath.Join(recvDir, "chunked-relay.bin"))
+	if err != nil {
+		t.Fatalf("read received: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("received %d bytes, content differs from the %d sent", len(got), len(body))
+	}
+}
+
 // receive.allow 在中继路径下依然有效——这是选"复用已认证 websocket"这套设计而不是
 // "新开公网转发端口"的全部理由。B 完全不知道、也不需要知道 uuid 是什么(见
 // nat/relay_crypto.go); 这里故意让发送方自报一个不在 allow 列表里的 email, 验证
@@ -476,7 +529,7 @@ func TestSendFilesRejectsUnknownVia(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "x.txt")
 	os.WriteFile(src, []byte("hi"), 0o644)
 	cfg := conf.WsClient{Connect: "127.0.0.1:1", User: "a", Pass: testPassA, Email: "a@example.com"}
-	err := SendFiles(cfg, "c@example.com", []string{src}, "sideways")
+	err := SendFiles(cfg, "c@example.com", []string{src}, "sideways", 1)
 	if err == nil || !strings.Contains(err.Error(), "-via") {
 		t.Fatalf("want a clear -via error, got %v", err)
 	}
@@ -488,7 +541,7 @@ func TestSendFilesRejectsEscapingSubdir(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "x.txt")
 	os.WriteFile(src, []byte("hi"), 0o644)
 	cfg := conf.WsClient{Connect: "127.0.0.1:1", User: "a", Pass: testPassA, Email: "a@example.com"}
-	err := SendFiles(cfg, "c@example.com:../../etc", []string{src}, ViaDirect)
+	err := SendFiles(cfg, "c@example.com:../../etc", []string{src}, ViaDirect, 1)
 	if err == nil || !strings.Contains(err.Error(), "escapes the receive directory") {
 		t.Fatalf("want a clear escape error, got %v", err)
 	}
@@ -512,7 +565,7 @@ func TestSendFilesToSubdir(t *testing.T) {
 	}
 
 	cfg := conf.WsClient{Connect: connect, User: "a", Pass: testPassA, Email: "a@example.com", UUID: testUUIDA}
-	if err := SendFiles(cfg, "c@example.com:/aaa/", []string{src}, ViaRelay); err != nil {
+	if err := SendFiles(cfg, "c@example.com:/aaa/", []string{src}, ViaRelay, 1); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -554,7 +607,7 @@ func TestRecvFilesRelayEndToEnd(t *testing.T) {
 	localDir := t.TempDir()
 	cfgA := conf.WsClient{Connect: connect, User: "a", Pass: testPassA,
 		Email: "a@example.com", UUID: testUUIDA}
-	if err := RecvFiles(cfgA, "c@example.com:backup", localDir, ViaRelay); err != nil {
+	if err := RecvFiles(cfgA, "c@example.com:backup", localDir, ViaRelay, 1); err != nil {
 		t.Fatalf("recv: %v", err)
 	}
 
@@ -590,7 +643,7 @@ func TestFileRelayReadOnlyServesButRefusesWrites(t *testing.T) {
 
 	// 取: 照常。
 	localDir := t.TempDir()
-	if err := RecvFiles(cfgA, "c@example.com:pkg.tar", localDir, ViaRelay); err != nil {
+	if err := RecvFiles(cfgA, "c@example.com:pkg.tar", localDir, ViaRelay, 1); err != nil {
 		t.Fatalf("a read-only directory must still serve files: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(localDir, "pkg.tar")); string(got) != "payload" {
@@ -602,7 +655,7 @@ func TestFileRelayReadOnlyServesButRefusesWrites(t *testing.T) {
 	if err := os.WriteFile(src, []byte("nope"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	err := SendFiles(cfgA, "c@example.com", []string{src}, ViaRelay)
+	err := SendFiles(cfgA, "c@example.com", []string{src}, ViaRelay, 1)
 	if err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("want a read-only refusal, got %v", err)
 	}
@@ -629,7 +682,7 @@ func TestRecvFilesRelayRejectsStranger(t *testing.T) {
 	localDir := t.TempDir()
 	cfgA := conf.WsClient{Connect: connect, User: "a", Pass: testPassA,
 		Email: "a@example.com", UUID: testUUIDStranger}
-	err := RecvFiles(cfgA, "c@example.com:secret.txt", localDir, ViaRelay)
+	err := RecvFiles(cfgA, "c@example.com:secret.txt", localDir, ViaRelay, 1)
 	if err == nil {
 		t.Fatal("a peer that is not in receive.allow must not be able to fetch anything")
 	}

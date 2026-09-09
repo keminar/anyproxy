@@ -290,6 +290,56 @@ anyproxy -send bigfile.zip -to home@example.com -via relay
 
 **千兆链路上的吞吐（仅 `direct`；`relay` 受 B 的带宽限制，不受这个影响）**：QUIC 接收窗口已按千兆调过（单流 32MB / 连接 64MB）。quic-go 的默认值（单流 6MB）是按网页流量定的，吞吐上限约等于 `窗口 / RTT`，6MB 在 50ms RTT 下只剩约 960Mbps、100ms 下掉到约 480Mbps，跨省传大文件正好撞上。Linux 上还要保证 UDP 收包缓冲够大（`anyproxy -check` 会检查 `net.core.rmem_max`），否则 quic-go 会打一行 "failed to sufficiently increase receive buffer size" 并跑不满。
 
+#### 单个大文件切块并行传输：`-parallel N`
+
+默认每个文件只占一条连接（`direct` 下是一条 QUIC stream，`relay` 下是一次中继会话），这在单条连接吞吐已经打满链路时够用，但受限于单流拥塞窗口爬升、中继流控窗口这些"单条连接"自身的天花板时就不够了。`-parallel N`（默认 1）让**单个**大文件按字节区间切成最多 `N` 块，各开一条独立连接并行传，两条路径（`-via direct`/`-via relay`）和两个方向（`-send`/`-recv`）都支持：
+
+```bash
+anyproxy -send bigfile.zip -to home@example.com -parallel 4
+anyproxy -recv home@example.com:backup/bigfile.zip -to /data/in -parallel 4
+```
+
+- **只切单个文件，不做多文件并发**。批量 `-send`/`-recv` 多个文件时仍然一个接一个传——切块并行的目的是让单个大文件更快用满带宽,不是让多个文件抢同一份带宽（那样反而会拖长每一个文件的耗时）。
+- **文件太小不会被切**：低于 8MiB 的文件永远走单连接路径，`-parallel` 的值被忽略，切块的握手/首部开销在小文件上不划算。
+- **失败语义与不切块时一致**：任意一块传输失败（网络错误、校验不过）就让整份文件报错、`.part` 文件被清理，不会留下一个只传对了几块的半成品，也不会自动重试。
+- **`-via relay` 下每一块各自协商一次加密会话**（各自独立的随机 salt、独立派生的 AES-256-GCM 密钥），协议本身早就支持"随时开一条新的加密会话"，不需要为切块单独改握手。
+
+##### `-parallel` 未必总能提速：先搞清楚瓶颈在哪
+
+**分块用的是同一条底层连接**——`direct` 下 N 个分块是同一条 QUIC 连接上的 N 条 stream，`relay` 下是同一条 websocket（同一条 TCP 连接）上的 N 个中继会话。QUIC/TCP 的拥塞控制（congestion control）都是按**连接**算的，不是按 stream/会话算的，也就是说这 N 条并发路径共用同一个拥塞窗口、在网络设备眼里是**同一个五元组**（同一对源/目的 IP+端口）。如果瓶颈是运营商按流限速、或者链路本身拥塞丢包，`-parallel` 在这种同连接复用的实现下大概率没用——运营商看到的还是"一条流"，不会因为应用层多开了几条 stream 就分配更多带宽。
+
+`-parallel` 真正能帮上忙的场景，是单条 stream/中继会话自身的流控窗口（不是拥塞窗口）先于网络带宽打满——比如高延迟长距离链路上单流的窗口不够大、或者瓶颈其实是 CPU（哈希计算、加解密）而不是网络。这两种情况开多条并发路径能实打实提速；如果瓶颈是运营商跨网互联质量差或者按流/按账号限速，开再多条也没用。
+
+**用之前先用 `iperf3` 诊断一下，别凭感觉猜**（假设 A 传得慢，C 是收数据的那台，两台要能相互访问）：
+
+```bash
+# 1. 在 C 上起服务端(默认 5201 端口, 注意防火墙放行)
+iperf3 -s
+
+# 2. 在 A 上先测单流基线, 换算成 KB/s 跟你实际观察到的速度对一下
+iperf3 -c <C的IP> -t 20
+
+# 3. 再测多流并发(TCP), 4 条独立连接, 看 [SUM] 那一行的总吞吐
+iperf3 -c <C的IP> -P 4 -t 20
+
+# 4. UDP 模式(QUIC 走的是 UDP, 这组更贴近实际情况; -b 指定目标速率, 因为
+#    UDP 本身没有拥塞控制, iperf3 会按你给的速率硬发, 看 Lost/Total Datagrams 的丢包率)
+iperf3 -u -b 500M -c <C的IP> -t 20
+iperf3 -u -b 500M -c <C的IP> -P 4 -t 20
+
+# 5. 可选: 加 -R 反向测一遍, 排除单向拥塞(比如电信->联通和联通->电信的
+#    瓶颈链路往往不是同一条)
+iperf3 -c <C的IP> -P 4 -t 20 -R
+```
+
+看结果：
+
+| 现象 | 结论 |
+|---|---|
+| 单流慢，多流（`-P 4`）的 `[SUM]` 明显比单流高很多 | 是按流限速/单流窗口撑不满，`-parallel` 值得用 |
+| 单流慢，多流 `[SUM]` 也差不多、丢包率高 | 链路本身拥塞（常见于运营商跨网互联质量问题），`-parallel` 收益有限 |
+| TCP 结果还行，UDP 明显更差 | 运营商可能单独限制了 UDP，这种情况即使改造成多条独立 QUIC 连接也未必顶得上去，可以考虑改用 `-via relay`（走 TCP 的 websocket）绕开 |
+
 ### TCP 与 UDP：两种协议在 QUIC 上的承载不同
 
 `protocol` 决定入口与落地要还原哪种协议，两者在 QUIC 上走不同机制，语义才对得上：
@@ -545,7 +595,7 @@ websocket:
 |------|--------|
 | `-ws-listen` | `websocket.server.listen` |
 | `-genkey` | 生成一对鉴权密钥并退出（私钥填 `websocket.client.key`，公钥填 `websocket.server.users[].key`） |
-| `-send PATH -to EMAIL [-via direct\|relay]` | 把文件/目录发给另一个订阅端并退出，`-via` 默认 `direct`（见"文件传输"） |
+| `-send PATH -to EMAIL [-via direct\|relay] [-parallel N]` | 把文件/目录发给另一个订阅端并退出，`-via` 默认 `direct`，`-parallel` 默认 1（见"文件传输"） |
 
 > 订阅端(客户端)**没有命令行参数**，`connect`/`user`/`pass`/`key`/`email`/`subscribe`/`forward` 都只能写在配置文件里；同时订阅多台 server 也只能用 `websocket.clients[]`。所以裸 TCP 转发（依赖 `forward`）和订阅端相关配置只能用配置文件。
 

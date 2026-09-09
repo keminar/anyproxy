@@ -55,6 +55,18 @@ type filePullReq struct {
 	// 与 Path 分开是必需的 —— 取单个文件时 Path="backup/db.sql" 而 Name="db.sql",
 	// 取整个目录时两者才一致。C 不需要记住上一条流里的根目录是什么, 每条流都自足。
 	Name string `json:"name"`
+
+	// 以下四个字段只在单文件分块并行取件时才非零(见 file_recv.go 的 parallel 参数)。
+	// A 从清单(Size)已经知道文件大小, 由它规划切几块、每块的范围, C 只管照单发货,
+	// 不需要额外一次往返来问。语义与 fileHead 里的同名字段一致, 见那边的注释。
+	TransferID string `json:"tid,omitempty"`
+	ChunkIndex int    `json:"ci,omitempty"`
+	ChunkCount int    `json:"cc,omitempty"`
+	Offset     int64  `json:"off,omitempty"`
+	// Length 是这一块要发的字节数。放在请求帧里而不是让 C 自己按 Offset 推算到
+	// 文件末尾, 是因为"到文件末尾"只对最后一块成立——其余块的长度必须由 A 显式
+	// 告诉 C, C 不知道整份切分方案。
+	Length int64 `json:"length,omitempty"`
 }
 
 // filePullResp C 的应答, 排在任何数据之前。Err 非空表示这次取件到此为止。
@@ -174,7 +186,14 @@ func servePull(conn fileConn, cfg conf.ClientReceive, fromEmail, remote string, 
 		}
 		it := fileItem{path: src, name: name, size: info.Size(), mode: uint32(info.Mode().Perm())}
 		start := time.Now()
-		saved, err := sendFileOver(conn, it, nil)
+		var saved string
+		if req.TransferID != "" {
+			// 分块取件(见 file_recv.go 的 parallel 参数): A 已经规划好了范围, 这里
+			// 照单发货, 不重新判断切不切块——那是取件方的决定, C 只管配合。
+			saved, err = sendFileOverRange(conn, it, req.Offset, req.Length, req.TransferID, req.ChunkIndex, req.ChunkCount, nil)
+		} else {
+			saved, err = sendFileOver(conn, it, nil)
+		}
 		if err != nil {
 			logf("pull from %s: sending %s failed: %v", remote, req.Path, err)
 			return
@@ -273,6 +292,39 @@ func pullFile(conn fileConn, dir string, e filePullEntry, from, remote string,
 	}
 	// recvFileOver 不返回结果(daemon 场景只记日志), 结果从它的 onDone 回调里接。
 	// 它的每一条返回路径都先走 reply(), 所以这个回调一定会被调到一次。
+	var got fileReply
+	recvFileOver(src, dir, from, remote, logf, func(r fileReply) { got = r })
+	if got.Err != "" {
+		return "", errors.New(got.Err)
+	}
+	return got.Saved, nil
+}
+
+// pullFileChunk 是 pullFile 的分块版, 在一条独立的流/中继连接上只取文件的
+// [offset, offset+length) 这一段, 供单文件并行分块取件用(见 file_recv.go 的
+// parallel 参数)。落盘走的还是 recvFileOver——它已经会按 TransferID 转给
+// recvFileChunk 做跨连接的拼接, 这里不用重复那套逻辑。
+func pullFileChunk(conn fileConn, dir string, e filePullEntry, from, remote string,
+	logf func(string, ...interface{}), tid string, chunkIdx, chunkCount int, offset, length int64, onProgress func(int64)) (string, error) {
+	req := filePullReq{
+		Op: filePullGet, Path: e.Path, Name: e.Name,
+		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset, Length: length,
+	}
+	if err := writeFrame(conn, req); err != nil {
+		return "", fmt.Errorf("send get request: %w", err)
+	}
+	var resp filePullResp
+	if err := readPullFrame(conn, &resp); err != nil {
+		return "", err
+	}
+	if resp.Err != "" {
+		return "", errors.New(resp.Err)
+	}
+
+	var src fileConn = conn
+	if onProgress != nil {
+		src = &progressConn{fileConn: conn, size: length, on: onProgress}
+	}
 	var got fileReply
 	recvFileOver(src, dir, from, remote, logf, func(r fileReply) { got = r })
 	if got.Err != "" {

@@ -58,7 +58,7 @@ func Eable() bool {
 	if !serverStart {
 		return false
 	}
-	if len(ServerHub.clients) == 0 {
+	if ServerHub.ClientCount() == 0 {
 		return false
 	}
 	return true
@@ -167,7 +167,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	conn.WriteMessage(websocket.TextMessage, []byte("ok"))
 
-	clientNum := len(hub.clients)
+	clientNum := hub.ClientCount()
 	// 注册连接
 	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Email: user.Email, Subscribe: subscribe}
 	client.hub.register <- client
