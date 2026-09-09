@@ -100,7 +100,7 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 		return sess, stream, nil
 	}
 	// 连接可能已被对端关掉、空闲回收掉或超时老化, 丢弃后完整重建一次。
-	d.dropSession(r.Email, sess)
+	d.dropSession(r.Email, sess, r.Port)
 	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Email, err)
 	sess, err = d.ensureSession(r)
 	if err != nil {
@@ -116,7 +116,7 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 // ensureSession 取一条**已认证**的 QUIC 连接: 有就复用, 没有就走一遍信令 + 拨号 + 鉴权。
 // TCP 与 UDP 两条通路共用它。
 func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) {
-	if sess := d.session(r.Email); sess != nil {
+	if sess := d.session(r.Email, r.Port); sess != nil {
 		return sess, nil
 	}
 	// A 侧也需要自己的 socket: QUIC 从它拨出去, 它的端点还要报给服务端, 好让 C 朝它
@@ -135,12 +135,12 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	if err != nil {
 		return nil, err
 	}
-	sess, err := d.connectPeer(tr, r.Email, winner.Addr, offer.Fingerprint)
+	sess, err := d.connectPeer(tr, r.Email, winner.Addr, offer.Fingerprint, r.Port)
 	if err != nil {
 		return nil, err
 	}
 	if err := d.authenticateSession(sess, token, r.Port); err != nil {
-		d.dropSession(r.Email, sess)
+		d.dropSession(r.Email, sess, r.Port)
 		return nil, err
 	}
 	// 回程 datagram 的分发依赖这条 goroutine, TCP-only 的连接上它只是空转等关闭。
@@ -288,7 +288,7 @@ func firstUsableCandidate(cands []directCandidate) *directCandidate {
 
 // connectPeer 按服务端给的端点与指纹建立 QUIC 连接并登记复用。信令之外的部分独立成
 // 一个方法, 便于不经 websocket 直接测试数据路径。
-func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprint string) (*directSession, error) {
+func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprint string, port ...uint16) (*directSession, error) {
 	// udp 而不是 udp6: socket 是双栈的, IPv4 与 IPv6 候选都可能胜出。
 	udpAddr, err := net.ResolveUDPAddr("udp", peerAddr)
 	if err != nil {
@@ -296,14 +296,15 @@ func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprin
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), directDialWait)
 	defer cancel()
-	stats := &directStats{}
+	stats := &directStats{logf: d.logf}
 	conn, err := tr.Dial(ctx, udpAddr, directClientTLS(fingerprint), directQUICConfigWithStats(stats))
 	if err != nil {
 		return nil, fmt.Errorf("quic dial %s: %w", peerAddr, err)
 	}
 	d.logf("quic connected to email %s at %s", email, peerAddr)
 	sess := &directSession{conn: conn, addr: peerAddr, stats: stats}
-	d.putSession(email, sess)
+	// Token 鉴权绑定到端口；按 email+port 复用，避免已鉴权连接跨端口访问。
+	d.putSession(email, sess, port...)
 	return sess, nil
 }
 
@@ -342,15 +343,22 @@ func (d *directPeer) onOffer(msg *Message) {
 	}
 }
 
-func (d *directPeer) session(email string) *directSession {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.sessions[email]
+func sessionKey(email string, port ...uint16) string {
+	if len(port) == 0 {
+		return email // compatibility for tests and legacy internal callers
+	}
+	return fmt.Sprintf("%s#%d", email, port[0])
 }
 
-func (d *directPeer) putSession(email string, s *directSession) {
+func (d *directPeer) session(email string, port ...uint16) *directSession {
 	d.mu.Lock()
-	d.sessions[email] = s
+	defer d.mu.Unlock()
+	return d.sessions[sessionKey(email, port...)]
+}
+
+func (d *directPeer) putSession(email string, s *directSession, port ...uint16) {
+	d.mu.Lock()
+	d.sessions[sessionKey(email, port...)] = s
 	d.mu.Unlock()
 }
 
@@ -413,10 +421,11 @@ func (d *directPeer) logUDPTraffic() {
 }
 
 // dropSession 仅在当前记录仍是这条失效连接时删除, 避免把别的 goroutine 刚建好的新连接误删。
-func (d *directPeer) dropSession(email string, stale *directSession) {
+func (d *directPeer) dropSession(email string, stale *directSession, port ...uint16) {
 	d.mu.Lock()
-	if d.sessions[email] == stale {
-		delete(d.sessions, email)
+	key := sessionKey(email, port...)
+	if d.sessions[key] == stale {
+		delete(d.sessions, key)
 	}
 	d.mu.Unlock()
 	if stale != nil && stale.conn != nil {

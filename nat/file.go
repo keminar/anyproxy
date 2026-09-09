@@ -297,6 +297,22 @@ var chunkAssemblies = struct {
 
 var chunkReaperOnce sync.Once
 
+// abortChunkAssembly abandons an incomplete transfer immediately. This is needed by
+// one-shot -recv when one of the parallel connections fails: the process exits before
+// the background reaper can reclaim the partial file.
+func abortChunkAssembly(tid string) {
+	chunkAssemblies.mu.Lock()
+	a := chunkAssemblies.m[tid]
+	if a != nil {
+		delete(chunkAssemblies.m, tid)
+	}
+	chunkAssemblies.mu.Unlock()
+	if a != nil {
+		_ = a.f.Close()
+		_ = os.Remove(a.part)
+	}
+}
+
 // getOrCreateAssembly 取或建一份分块传输的运行时状态。只有第一个到达的块真正建
 // 文件、判重名——后到的块复用同一份结果, 保证一次传输里所有块落到同一个文件名下。
 func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly, error) {
@@ -548,6 +564,11 @@ func uniquePath(p string) string {
 		return p
 	}
 	ext := filepath.Ext(p)
+	// 纯数字的".1"多半是版本号(如 anyproxy-amd64-v2.1)而不是后缀名 ——
+	// 非 Windows 下的可执行文件常见这种命名, 按后缀名拆分会把序号插进版本号中间。
+	if isNumericExt(ext) {
+		ext = ""
+	}
 	base := strings.TrimSuffix(p, ext)
 	for i := 1; i < 10000; i++ {
 		cand := fmt.Sprintf("%s (%d)%s", base, i, ext)
@@ -557,6 +578,19 @@ func uniquePath(p string) string {
 	}
 	// 一万个重名还没排开就别较劲了, 让调用方按原名去写(多半会失败并如实报错)。
 	return p
+}
+
+// isNumericExt 形如 ".1"、".22" 的"后缀"通篇是数字, 真实文件后缀几乎不会这样, 一般是版本号。
+func isNumericExt(ext string) bool {
+	if len(ext) < 2 {
+		return false
+	}
+	for _, r := range ext[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------- 发送端(A) ----------

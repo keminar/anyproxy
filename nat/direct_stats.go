@@ -35,7 +35,16 @@ type directStats struct {
 	sRTT   time.Duration
 	cwnd   int
 	inFlt  int
+
+	// logf 非空时, 在 -debug 下按 statsLogInterval 打点 cwnd/inflight, 用来看清一次
+	// 传输里拥塞窗口是"从头到尾没涨过"还是"涨到一半又掉了下去"——只有 summary() 那
+	// 一个终值区分不了这两种情况, 而它们对应的排查方向完全不同(见上面的判读方法)。
+	logf    func(string, ...interface{})
+	lastLog time.Time
 }
+
+// statsLogInterval 拥塞窗口打点间隔。1 个 RTT 打一次太密, 拉到 1s 够看出趋势又不刷屏。
+const statsLogInterval = time.Second
 
 // AddProducer 实现 qlogwriter.Trace。每条连接可能有多个 producer, 共用同一份计数。
 func (s *directStats) AddProducer() qlogwriter.Recorder { return &directStatsRecorder{stats: s} }
@@ -74,7 +83,17 @@ func (r *directStatsRecorder) RecordEvent(e qlogwriter.Event) {
 		if ev.BytesInFlight != 0 {
 			r.stats.inFlt = ev.BytesInFlight
 		}
+		var due bool
+		if r.stats.logf != nil && time.Since(r.stats.lastLog) >= statsLogInterval {
+			r.stats.lastLog = time.Now()
+			due = true
+		}
+		sent, lost, cwnd, inFlt := r.stats.sent, r.stats.lost, r.stats.cwnd, r.stats.inFlt
 		r.stats.mu.Unlock()
+		if due {
+			r.stats.logf("quic cwnd=%s inflight=%s sent=%dpkt lost=%dpkt",
+				humanBytes(int64(cwnd)), humanBytes(int64(inFlt)), sent, lost)
+		}
 	}
 }
 

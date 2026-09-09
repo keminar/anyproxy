@@ -15,13 +15,13 @@ import (
 	"time"
 )
 
-//ConnHandler connection handler definition
+// ConnHandler connection handler definition
 type ConnHandler func(ctx context.Context, conn *net.TCPConn) error
 
-//ErrReloadClose reload graceful
+// ErrReloadClose reload graceful
 var ErrReloadClose = errors.New("reload graceful")
 
-//TermTimeout 平滑重启主进程保持秒数
+// TermTimeout 平滑重启主进程保持秒数
 var TermTimeout = 10
 
 // Server embedded http.Server
@@ -273,8 +273,12 @@ func sameTCPAddr(a, b *net.TCPAddr) bool {
 	if a.Port != b.Port {
 		return false
 	}
-	if a.IP == nil || a.IP.IsUnspecified() || b.IP == nil || b.IP.IsUnspecified() {
-		return true
+	// 通配地址与具体地址语义不同（:port 会额外暴露其它接口），不能仅因端口
+	// 相同就复用旧 fd；只有两边同为通配，或两边明确 IP 相等时才算相同。
+	aWild := a.IP == nil || a.IP.IsUnspecified()
+	bWild := b.IP == nil || b.IP.IsUnspecified()
+	if aWild || bWild {
+		return aWild && bWild
 	}
 	return a.IP.Equal(b.IP)
 }

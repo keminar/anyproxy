@@ -91,6 +91,14 @@ func TestUniquePath(t *testing.T) {
 	if b, _ := os.ReadFile(p); string(b) != "old" {
 		t.Fatalf("the existing file was touched: %q", b)
 	}
+
+	// 非 Windows 下的可执行文件常带版本号(如 v2.1), 末尾的".1"是版本号不是后缀名,
+	// 序号要加在整个文件名后面, 不能拆进版本号中间。
+	vp := filepath.Join(dir, "anyproxy-amd64-v2.1")
+	os.WriteFile(vp, []byte("old"), 0o644)
+	if got := uniquePath(vp); got != filepath.Join(dir, "anyproxy-amd64-v2.1 (1)") {
+		t.Fatalf("got %q, want %q", got, "anyproxy-amd64-v2.1 (1)")
+	}
 }
 
 func TestCollectFiles(t *testing.T) {

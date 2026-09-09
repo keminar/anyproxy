@@ -235,6 +235,9 @@ func recvParallel(openPull func() (fileConn, error), dir string, e filePullEntry
 	}
 	wg.Wait()
 	if firstErr != nil {
+		// 其它分块可能已经在接收端创建了 assembly；主动取消并清理，
+		// 否则一次性 -recv 进程退出前不会等到后台 reaper 执行。
+		abortChunkAssembly(tid)
 		return "", firstErr
 	}
 	return saved, nil
