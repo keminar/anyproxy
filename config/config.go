@@ -20,7 +20,7 @@ var ProxyPort uint16
 
 // ProxyCmdline 命令行 -p 指定的全局代理原始值(空表示未指定)。
 // 它是「固定」的, 优先级高于配置文件的 default.proxy; 未指定 -p 时请求侧实时读取
-// conf.RouterConfig.Default.Proxy, 从而让 default.proxy 支持热加载。
+// conf.RouterConfig().Default.Proxy, 从而让 default.proxy 支持热加载。
 var ProxyCmdline string
 
 // TimeFormat 格式化时间

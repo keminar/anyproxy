@@ -24,8 +24,8 @@ const defaultBlackholeIP = "192.0.0.0"
 // 显式配 off/none/disable 则返回空串(功能关闭)。
 func BlackholeIP() string {
 	s := ""
-	if conf.RouterConfig != nil {
-		s = strings.TrimSpace(conf.RouterConfig.Default.BlackholeIP)
+	if conf.RouterConfig() != nil {
+		s = strings.TrimSpace(conf.RouterConfig().Default.BlackholeIP)
 	}
 	switch strings.ToLower(s) {
 	case "":
@@ -196,11 +196,11 @@ func BuildEmpty(query []byte) []byte {
 // MatchHostDNS 在 hosts 配置中查找域名的 IP 映射。
 // 返回: IP(如匹配到ip配置), deny(如target为deny), matched(是否匹配到任何规则)。
 func MatchHostDNS(domain string) (ip string, deny bool, matched bool) {
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		return
 	}
-	defMatch := conf.RouterConfig.Default.Match
-	for _, h := range conf.RouterConfig.Hosts {
+	defMatch := conf.RouterConfig().Default.Match
+	for _, h := range conf.RouterConfig().Hosts {
 		if h.Matched(domain, defMatch) {
 			return h.IP, h.Target == "deny", true
 		}
@@ -217,10 +217,10 @@ func MatchHostDNS(domain string) (ip string, deny bool, matched bool) {
 // 一个 IP 可对应多个域名(CDN/共用IP)，反查不唯一、不能作为安全判定依据。
 // deny 域名在 DNS 层已返回 NXDOMAIN、客户端拿不到 IP，天然发不出 QUIC，无需在此处理。
 func HostBlocksUDP(dstIP string) bool {
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		return false
 	}
-	for _, h := range conf.RouterConfig.Hosts {
+	for _, h := range conf.RouterConfig().Hosts {
 		if h.IP != "" && h.IP == dstIP {
 			return true
 		}
@@ -230,10 +230,10 @@ func HostBlocksUDP(dstIP string) bool {
 
 // BlockQUICEnabled 返回是否启用 QUIC(UDP443) 阻断, 不配置默认 true。
 func BlockQUICEnabled() bool {
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		return false
 	}
-	b := conf.RouterConfig.Tun.BlockQUIC
+	b := conf.RouterConfig().Tun.BlockQUIC
 	return b == nil || *b
 }
 

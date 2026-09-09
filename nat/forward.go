@@ -46,7 +46,7 @@ func isForwardEmail(email string) bool {
 	if email == "" {
 		return false
 	}
-	for _, r := range conf.RouterConfig.Websocket.Server.Forward {
+	for _, r := range conf.RouterConfig().Websocket.Server.Forward {
 		if r.Listen != "" && r.Email == email {
 			return true
 		}

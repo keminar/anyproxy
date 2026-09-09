@@ -153,7 +153,7 @@ func main() {
 	conf.LoadAllConfig(gConfigFile)
 
 	// 检查配置是否存在
-	if conf.RouterConfig == nil {
+	if conf.RouterConfig() == nil {
 		time.Sleep(60 * time.Second)
 		os.Exit(2)
 	}
@@ -192,7 +192,7 @@ func main() {
 
 	cmdName := "anyproxy"
 	defLogDir := fmt.Sprintf("%s%s%s%s", conf.AppPath, string(os.PathSeparator), "logs", string(os.PathSeparator))
-	logDir := config.IfEmptyThen(conf.RouterConfig.Log.Dir, defLogDir, "")
+	logDir := config.IfEmptyThen(conf.RouterConfig().Log.Dir, defLogDir, "")
 	if _, err := os.Stat(logDir); err != nil {
 		log.Println(err)
 		time.Sleep(60 * time.Second)
@@ -204,7 +204,7 @@ func main() {
 	// 是否后台运行
 	daemon.Daemonize(envRunMode, fd)
 
-	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig.Listen, ":3000")
+	gListenAddrPort = config.IfEmptyThen(gListenAddrPort, conf.RouterConfig().Listen, ":3000")
 	// listen 显式设为 off/none/- 时不起代理监听, 仅跑 websocket/tun 等后台服务
 	// (典型: 纯 websocket 裸TCP穿透, 不需要本机代理端口)。
 	listenOff := isListenOff(gListenAddrPort)
@@ -227,7 +227,7 @@ func main() {
 	// 未指定 -p 时请求侧实时读取 default.proxy, 使其支持热加载。
 	config.ProxyCmdline = gProxyServerSpec
 	// 启动时按「-p > default.proxy」解析首个代理, 供 tun_windows 排除捕获与日志用
-	config.SetProxyServer(config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig.Default.Proxy, ""))
+	config.SetProxyServer(config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig().Default.Proxy, ""))
 
 	// 加载 geoip/geosite 数据集(配了才加载, 供 hosts 的 geoip:/geosite: 匹配)
 	loadGeo()
@@ -248,17 +248,17 @@ func main() {
 	}
 
 	// websocket 服务端
-	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig.Websocket.Server.Listen, "")
+	gWebsocketListen = config.IfEmptyThen(gWebsocketListen, conf.RouterConfig().Websocket.Server.Listen, "")
 	if gWebsocketListen != "" {
 		gWebsocketListen = tools.FillPort(gWebsocketListen)
 		go nat.NewServer(&gWebsocketListen)
 		// 服务端裸TCP端口转发入口(内网穿透)
-		go nat.StartForward(conf.RouterConfig.Websocket.Server.Forward)
+		go nat.StartForward(conf.RouterConfig().Websocket.Server.Forward)
 		// UDP 中继入口: 与上面的 TCP 入口同端口、各走各的, 只对 protocol: udp/both 生效。
-		go nat.StartRelayUDP(conf.RouterConfig.Websocket.Server.Forward)
+		go nat.StartRelayUDP(conf.RouterConfig().Websocket.Server.Forward)
 	}
 	// websocket 客户端: 可同时订阅多台 server(见 conf.Websocket.ClientList)
-	clientList := conf.RouterConfig.Websocket.ClientList()
+	clientList := conf.RouterConfig().Websocket.ClientList()
 	for i, cfg := range clientList {
 		cfg.Connect = tools.FillPort(cfg.Connect)
 		go nat.ConnectServer(cfg, i)
@@ -270,28 +270,28 @@ func main() {
 	tunCtx, tunCancel := context.WithCancel(context.Background())
 	var tunWG sync.WaitGroup
 	// 解析运行模式: 命令行 -mode > 配置 mode > proxy
-	mode := config.IfEmptyThen(gMode, conf.RouterConfig.Mode, "proxy")
+	mode := config.IfEmptyThen(gMode, conf.RouterConfig().Mode, "proxy")
 	switch mode {
 	case "tun":
 		// autoRoute 不配置时默认 true(自动加路由); 显式设 false 才关闭
 		autoRoute := true
-		if conf.RouterConfig.Tun.AutoRoute != nil {
-			autoRoute = *conf.RouterConfig.Tun.AutoRoute
+		if conf.RouterConfig().Tun.AutoRoute != nil {
+			autoRoute = *conf.RouterConfig().Tun.AutoRoute
 		}
 		tunCfg := tun.Config{
-			Name:         conf.RouterConfig.Tun.Name,
-			Addr:         conf.RouterConfig.Tun.Addr,
-			MTU:          conf.RouterConfig.Tun.MTU,
+			Name:         conf.RouterConfig().Tun.Name,
+			Addr:         conf.RouterConfig().Tun.Addr,
+			MTU:          conf.RouterConfig().Tun.MTU,
 			AutoRoute:    autoRoute,
-			ExcludeProcs: conf.RouterConfig.Tun.ExcludeProcs,
-			InboundPorts: conf.RouterConfig.Tun.InboundPorts,
-			WindivertDir: conf.RouterConfig.Tun.WindivertDir,
+			ExcludeProcs: conf.RouterConfig().Tun.ExcludeProcs,
+			InboundPorts: conf.RouterConfig().Tun.InboundPorts,
+			WindivertDir: conf.RouterConfig().Tun.WindivertDir,
 			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
 			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
-			BypassIPs: withProxyBypassIPs(conf.RouterConfig.Tun.BypassIPs),
+			BypassIPs: withProxyBypassIPs(conf.RouterConfig().Tun.BypassIPs),
 			// 仅 Windows(WinDivert): 私网/LAN/链路本地一律直连。不配默认 true(与
 			// linux/darwin 直连子网不进 TUN 的行为一致); 显式 false 才让私网 80/443 进引擎
-			BypassPrivate: conf.RouterConfig.Tun.BypassPrivate == nil || *conf.RouterConfig.Tun.BypassPrivate,
+			BypassPrivate: conf.RouterConfig().Tun.BypassPrivate == nil || *conf.RouterConfig().Tun.BypassPrivate,
 		}
 		tunWG.Add(1)
 		go func() {
@@ -305,8 +305,8 @@ func main() {
 		// macOS/Windows 已移除该模式(见 tun/bypass_other.go)。
 		// bypass 复用 tun.linux 块的 excludeNics/device(applyOS 已把 tun.linux 压平进 Tun)
 		if err := tun.InitBypassOnly(tun.BypassConfig{
-			ExcludeNics: conf.RouterConfig.Tun.ExcludeNics,
-			Device:      conf.RouterConfig.Tun.Device,
+			ExcludeNics: conf.RouterConfig().Tun.ExcludeNics,
+			Device:      conf.RouterConfig().Tun.Device,
 		}); err != nil {
 			log.Printf("mode=bypass unsupported: %v; fallback proxy", err)
 			mode = "proxy"
@@ -325,7 +325,7 @@ func main() {
 		// 端口转发: 不接管全局流量, 每个连接改投到 tcpcopy.ip:port(见 proto/request.go)。
 		// 命令行 -mode tcpcopy 时配置里可能没有 mode 字段, 这里补上归一(配置文件写 mode:
 		// tcpcopy 时已在 LoadRouterConfig 归一)。
-		conf.RouterConfig.TcpCopy.Enable = true
+		conf.RouterConfig().TcpCopy.Enable = true
 	default:
 		log.Printf("unknown mode %q, expect proxy|tunnel|tun|bypass|tcpcopy, fallback proxy\n", mode)
 		mode = "proxy"
@@ -335,8 +335,8 @@ func main() {
 	// tcp4  仅监听使用IPv4
 	// tcp6  仅监听使用IPv6
 	network := "tcp"
-	if conf.RouterConfig.Network != "" {
-		network = conf.RouterConfig.Network
+	if conf.RouterConfig().Network != "" {
+		network = conf.RouterConfig().Network
 	}
 	// tunnel 为服务端(tunneld); proxy/tun/bypass 均为客户端
 	handler := proto.ClientHandler
@@ -486,7 +486,7 @@ func withProxyBypassIPs(base []string) []string {
 	// 全局代理(命令行 -p / default.proxy 解析后的服务器地址)
 	add(config.ProxyServer)
 	// 各 host 的自定义代理
-	for _, h := range conf.RouterConfig.Hosts {
+	for _, h := range conf.RouterConfig().Hosts {
 		p := strings.TrimSpace(h.Proxy)
 		if p == "" {
 			continue
@@ -519,7 +519,7 @@ func withProxyBypassIPs(base []string) []string {
 // 若 hosts 用了 geoip:/geosite: 但对应数据没配/没加载, 该规则永不命中, 给出提示。
 func loadGeo() {
 	// 顶层 geoip / geosite: 一个文件可多类别(cats 空=.dat 全部类别), 同文件只解析一次
-	for _, gf := range conf.RouterConfig.GeoIP {
+	for _, gf := range conf.RouterConfig().GeoIP {
 		path := strings.TrimSpace(gf.File)
 		if path == "" {
 			continue
@@ -528,7 +528,7 @@ func loadGeo() {
 			log.Printf("geo: 加载 geoip <- %s 失败: %v", path, err)
 		}
 	}
-	for _, gf := range conf.RouterConfig.GeoSite {
+	for _, gf := range conf.RouterConfig().GeoSite {
 		path := strings.TrimSpace(gf.File)
 		if path == "" {
 			continue
@@ -541,7 +541,7 @@ func loadGeo() {
 		log.Printf("geo: loaded geoip categories=%d, geosite categories=%d", ic, sc)
 	}
 	// 用了 geoip:/geosite: 规则但数据未就绪时提示
-	for _, h := range conf.RouterConfig.Hosts {
+	for _, h := range conf.RouterConfig().Hosts {
 		if strings.HasPrefix(h.Name, "geoip:") && !geo.HasIP() {
 			log.Printf("geo: 规则 %q 需要 geo.ip 加载 geoip.dat, 当前未加载, 该规则不会命中", h.Name)
 		}
@@ -598,7 +598,7 @@ func genConfig() error {
 // 上了却把文件传去了错的地址段。改成把配置列出来, 交互式问一遍要用哪个——选错
 // 的成本是重跑一次命令, 比默默用错一台强。
 func pickClientConfig(verb string) (conf.WsClient, error) {
-	list := conf.RouterConfig.Websocket.ClientList()
+	list := conf.RouterConfig().Websocket.ClientList()
 	if len(list) == 0 {
 		return conf.WsClient{}, errors.New("no websocket.client configured (need connect/user/email to reach the server)")
 	}

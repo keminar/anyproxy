@@ -15,7 +15,7 @@ func newTestGuard() *loopGuard {
 
 // 闸门未到(total < minActive)时恒放行, 不做占比计算。
 func TestLoopGuardGateClosed(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}})
 	g := newTestGuard()
 	// 造 50 个都在同一目标, 但未达闸门 100
 	for i := 0; i < 50; i++ {
@@ -28,7 +28,7 @@ func TestLoopGuardGateClosed(t *testing.T) {
 
 // 闸门开启且单目标占比超阈值时判为环路; 首次 tripped=true, 之后 false(不刷屏)。
 func TestLoopGuardTrip(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}})
 	g := newTestGuard()
 	// 总 100: a:80 占 85(85%>=80%), 其余 15 分散
 	for i := 0; i < 85; i++ {
@@ -53,7 +53,7 @@ func TestLoopGuardTrip(t *testing.T) {
 
 // 未占大头的目标即便闸门开启也放行。
 func TestLoopGuardMinorityAllowed(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}})
 	g := newTestGuard()
 	for i := 0; i < 95; i++ {
 		g.enter("a:80")
@@ -73,7 +73,7 @@ func TestLoopGuardMinorityAllowed(t *testing.T) {
 
 // drain 后 total 回落到闸门下, 自动恢复放行, 且 noted 被清除。
 func TestLoopGuardRecover(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{MinActive: 100, Ratio: 80}})
 	g := newTestGuard()
 	for i := 0; i < 100; i++ {
 		g.enter("a:80")
@@ -95,7 +95,7 @@ func TestLoopGuardRecover(t *testing.T) {
 
 // minActive<0 关闭熔断器, 恒放行。
 func TestLoopGuardDisabled(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{MinActive: -1}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{MinActive: -1}})
 	g := newTestGuard()
 	for i := 0; i < 10000; i++ {
 		g.enter("a:80")
@@ -107,7 +107,7 @@ func TestLoopGuardDisabled(t *testing.T) {
 
 // MinActive==0 / Ratio==0 使用内置默认(默认开启)。
 func TestLoopGuardDefaults(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{}})
 	g := newTestGuard()
 	// 造满足默认闸门(200)且默认占比(80%)的场景
 	for i := 0; i < loopGuardDefaultMinActive; i++ {
@@ -120,7 +120,7 @@ func TestLoopGuardDefaults(t *testing.T) {
 
 // key 为空的 enter/leave 被忽略(如 tcpcopy 未经 handshake)。
 func TestLoopGuardEmptyKey(t *testing.T) {
-	conf.RouterConfig = &conf.Router{LoopGuard: conf.LoopGuard{MinActive: 1, Ratio: 80}}
+	conf.SetRouterConfig(&conf.Router{LoopGuard: conf.LoopGuard{MinActive: 1, Ratio: 80}})
 	g := newTestGuard()
 	g.enter("")
 	g.leave("")

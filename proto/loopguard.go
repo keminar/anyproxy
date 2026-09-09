@@ -36,7 +36,7 @@ var guard = &loopGuard{
 
 // loopGuardConf 解析配置。minActive<0 表示关闭。
 func loopGuardConf() (minActive, ratio int) {
-	c := conf.RouterConfig.LoopGuard
+	c := conf.RouterConfig().LoopGuard
 	minActive = c.MinActive
 	if minActive == 0 {
 		minActive = loopGuardDefaultMinActive

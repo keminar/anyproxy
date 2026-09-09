@@ -50,11 +50,11 @@ func TestIPInCIDR(t *testing.T) {
 // (转发目标/直连/接收文件三者之一)时才该被放行, 三者都没有的纯陪跑连接必须拒绝
 // ——不然服务端也没法把它路由给任何请求方, 白占一个 hub 位置。
 func TestEmptySubscribeAllowed(t *testing.T) {
-	old := conf.RouterConfig
-	t.Cleanup(func() { conf.RouterConfig = old })
-	conf.RouterConfig = &conf.Router{Websocket: conf.Websocket{Server: conf.WsServer{
+	old := conf.RouterConfig()
+	t.Cleanup(func() { conf.SetRouterConfig(old) })
+	conf.SetRouterConfig(&conf.Router{Websocket: conf.Websocket{Server: conf.WsServer{
 		Forward: []conf.ServerForward{{Listen: ":2222", Email: "forward-target@example.com"}},
-	}}}
+	}}})
 
 	cases := []struct {
 		name       string

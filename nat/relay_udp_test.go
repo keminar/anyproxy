@@ -59,9 +59,9 @@ func echoUDP(t *testing.T, prefix string) string {
 // 这里直接把它的效果手工做出来, 好把数据面单独测干净。
 func relayPair(t *testing.T, target string) (*udpRelay, *udpUplink) {
 	t.Helper()
-	old := conf.RouterConfig
-	t.Cleanup(func() { conf.RouterConfig = old })
-	conf.RouterConfig = &conf.Router{}
+	old := conf.RouterConfig()
+	t.Cleanup(func() { conf.SetRouterConfig(old) })
+	conf.SetRouterConfig(&conf.Router{})
 
 	relay, err := newUDPRelay(conf.ServerForward{Listen: "127.0.0.1:0", Email: "c@example.com", Protocol: conf.ProtoBoth})
 	if err != nil {
@@ -171,9 +171,9 @@ func TestRelayUDPSeparatesClients(t *testing.T) {
 // 没有正确 token 的注册包必须被拒: 端点是对方现场报的, 不核对凭证的话谁都能把自己
 // 注册成上行, 把别人的流量整条接走。
 func TestRelayUDPRejectsBadToken(t *testing.T) {
-	old := conf.RouterConfig
-	t.Cleanup(func() { conf.RouterConfig = old })
-	conf.RouterConfig = &conf.Router{}
+	old := conf.RouterConfig()
+	t.Cleanup(func() { conf.SetRouterConfig(old) })
+	conf.SetRouterConfig(&conf.Router{})
 
 	relay, err := newUDPRelay(conf.ServerForward{Listen: "127.0.0.1:0", Email: "c@example.com"})
 	if err != nil {
@@ -201,9 +201,9 @@ func TestRelayUDPRejectsBadToken(t *testing.T) {
 // 上行还没建好时进来的数据报要先存着, 上行一注册就补发 —— 否则握手的头几个包全丢,
 // 客户端只能等自己重试。
 func TestRelayUDPFlushesPending(t *testing.T) {
-	old := conf.RouterConfig
-	t.Cleanup(func() { conf.RouterConfig = old })
-	conf.RouterConfig = &conf.Router{}
+	old := conf.RouterConfig()
+	t.Cleanup(func() { conf.SetRouterConfig(old) })
+	conf.SetRouterConfig(&conf.Router{})
 
 	relay, err := newUDPRelay(conf.ServerForward{Listen: "127.0.0.1:0", Email: "c@example.com"})
 	if err != nil {

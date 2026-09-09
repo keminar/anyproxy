@@ -32,8 +32,8 @@ func (that *tcpCopy) response() error {
 		return errors.New(ip + " is not allowed")
 	}
 	var err error
-	that.req.DstIP = conf.RouterConfig.TcpCopy.IP
-	that.req.DstPort = conf.RouterConfig.TcpCopy.Port
+	that.req.DstIP = conf.RouterConfig().TcpCopy.IP
+	that.req.DstPort = conf.RouterConfig().TcpCopy.Port
 
 	network, connAddr := tunnel.buildAddress("", that.req.DstIP, that.req.DstPort, true)
 	if connAddr == "" {

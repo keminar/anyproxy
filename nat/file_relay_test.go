@@ -26,14 +26,14 @@ const (
 // httptest.Server 上, 不经 NewServer(那个会阻塞在 http.ListenAndServe 上)。
 func fileRelayTestServer(t *testing.T, users []conf.ServerUser) string {
 	t.Helper()
-	oldCfg := conf.RouterConfig
+	oldCfg := conf.RouterConfig()
 	oldHub, oldBridge, oldStart := ServerHub, ServerBridge, serverStart
 	t.Cleanup(func() {
-		conf.RouterConfig = oldCfg
+		conf.SetRouterConfig(oldCfg)
 		ServerHub, ServerBridge, serverStart = oldHub, oldBridge, oldStart
 	})
-	conf.RouterConfig = &conf.Router{}
-	conf.RouterConfig.Websocket.Server.Users = users
+	conf.SetRouterConfig(&conf.Router{})
+	conf.RouterConfig().Websocket.Server.Users = users
 
 	ServerHub = newHub()
 	go ServerHub.run()

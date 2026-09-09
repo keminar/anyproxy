@@ -28,7 +28,7 @@ import (
 // 每台各自一份, 替代原来假设"只连一台"的包级全局单例(ClientHub/LocalBridge/tempDelay)。
 type wsClientConn struct {
 	cfg       conf.WsClient
-	liveIndex int // 在 conf.RouterConfig.Websocket.ClientList() 里的下标, 用于热加载重新取值, 见 liveAuthCfg
+	liveIndex int // 在 conf.RouterConfig().Websocket.ClientList() 里的下标, 用于热加载重新取值, 见 liveAuthCfg
 	hub       *Hub
 	bridge    *BridgeHub
 	forward   map[uint16]string
@@ -44,7 +44,7 @@ type wsClientConn struct {
 // 字符串匹配(地址会被 FillPort/去掉 ws:// 前缀改写, 直接比较不可靠)。
 func (w *wsClientConn) liveAuthCfg() conf.WsClient {
 	cfg := w.cfg
-	list := conf.RouterConfig.Websocket.ClientList()
+	list := conf.RouterConfig().Websocket.ClientList()
 	if w.liveIndex < 0 || w.liveIndex >= len(list) {
 		return cfg // 条目在热加载后消失(如数组变短), 用启动时的快照兜底
 	}

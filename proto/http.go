@@ -196,10 +196,10 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 
 func firstLineHost(host string) string {
 	host = strings.ReplaceAll(host, ":", ".")
-	if val, ok := conf.RouterConfig.FirstLine.Custom[host]; ok {
+	if val, ok := conf.RouterConfig().FirstLine.Custom[host]; ok {
 		return val
 	}
-	if conf.RouterConfig.FirstLine.Host == "off" {
+	if conf.RouterConfig().FirstLine.Host == "off" {
 		return "off"
 	}
 	return "on"

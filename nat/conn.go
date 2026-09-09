@@ -127,7 +127,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	// 先查账号再验凭据: 走哪套鉴权(密码还是密钥)由这个账号自己的配置决定, 而时钟检查
 	// 只对密码方案有意义 —— 密钥方案存在的理由正是不依赖时钟, 不能放在分支前一刀切。
-	su, found := conf.RouterConfig.Websocket.Server.LookupUser(user.User)
+	su, found := conf.RouterConfig().Websocket.Server.LookupUser(user.User)
 	if !found || su.Disable {
 		if found {
 			log.Printf("serveWs client email %s ignore, user %s is disabled\n", user.Email, user.User)
@@ -213,7 +213,7 @@ func emptySubscribeAllowed(user AuthMessage) (reason string, ok bool) {
 // serverIPAllowed 判断接入 websocket 服务端的客户端 IP 是否在 server.allowIP 内。
 // 为空则不限制; loopback(本机自连) 始终放行; 支持 CIDR 与单 IP。
 func serverIPAllowed(ip string) bool {
-	allows := conf.RouterConfig.Websocket.Server.AllowIP
+	allows := conf.RouterConfig().Websocket.Server.AllowIP
 	if len(allows) == 0 {
 		return true
 	}

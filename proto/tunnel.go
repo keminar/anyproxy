@@ -361,7 +361,7 @@ var defaultLocalPorts = []int{21, 22}
 // isLocalTCPPort 判断端口在 localport 模式下是否走本地直连。
 // 未配置 default.localPort 时用默认的 21/22；一旦配置则完全以配置为准(覆盖而非追加)。
 func isLocalTCPPort(port uint16) bool {
-	ports := conf.RouterConfig.Default.LocalPort
+	ports := conf.RouterConfig().Default.LocalPort
 	if len(ports) == 0 {
 		ports = defaultLocalPorts
 	}
@@ -375,8 +375,8 @@ func isLocalTCPPort(port uint16) bool {
 
 // 查询配置
 func findHost(dstName, dstIP string) conf.Host {
-	defMatch := conf.RouterConfig.Default.Match
-	for _, h := range conf.RouterConfig.Hosts {
+	defMatch := conf.RouterConfig().Default.Match
+	for _, h := range conf.RouterConfig().Hosts {
 		if h.Matched(dstName, defMatch) || h.Matched(dstIP, defMatch) {
 			return h
 		}
@@ -425,9 +425,9 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	}
 	var confTarget string
 	if proto == protoTCP {
-		confTarget = getString(host.Target, conf.RouterConfig.Default.TCPTarget, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig().Default.TCPTarget, "auto")
 	} else {
-		confTarget = getString(host.Target, conf.RouterConfig.Default.Target, "auto")
+		confTarget = getString(host.Target, conf.RouterConfig().Default.Target, "auto")
 	}
 	// routeTag: 未命中带 target 的 host 规则(host.Target 为空)即走了 default, 标出本次按哪类
 	// 默认分流及其策略值(tcp 用 default.tcpTarget, http/https 用 default.target)。不单独占一行,
@@ -449,7 +449,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 			confTarget = "remote"
 		}
 	}
-	confDNS := getString(host.DNS, conf.RouterConfig.Default.DNS, "local")
+	confDNS := getString(host.DNS, conf.RouterConfig().Default.DNS, "local")
 
 	// tcp 请求，如果是解析的IP被禁（代理端也无法telnet），不知道域名又无法使用远程dns解析，只能手动换ip
 	// 如golang.org 解析为180.97.235.30 不通，配置改为 216.239.37.1就行
@@ -529,7 +529,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 	// 误伤(local 应始终直连)。proxyServer 保持空, 下方走 else 分支直连。
 	if confTarget != "local" {
 		// 全局代理实时取值以支持热加载: 命令行 -p(固定) 优先于配置 default.proxy(可热改)。
-		globalSpec := config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig.Default.Proxy, "")
+		globalSpec := config.IfEmptyThen(config.ProxyCmdline, conf.RouterConfig().Default.Proxy, "")
 		proxyConfigured := host.Proxy != "" || globalSpec != ""
 		// localFallback: 链路上出现过 " local" 后缀, 代理都不通时「显式允许」走本地直连。
 		localFallback := false
@@ -865,7 +865,7 @@ func (s *tunnel) isAllowed(allows []string) (string, bool) {
 		return "", true
 	}
 
-	allows = append(allows, conf.RouterConfig.AllowIP...)
+	allows = append(allows, conf.RouterConfig().AllowIP...)
 	if len(allows) == 0 {
 		return "", true
 	}

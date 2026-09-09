@@ -23,9 +23,9 @@ func TestBlackholeIP(t *testing.T) {
 	}
 	for _, c := range cases {
 		if c.cfg == "\x00nil" {
-			conf.RouterConfig = nil
+			conf.SetRouterConfig(nil)
 		} else {
-			conf.RouterConfig = &conf.Router{Default: conf.Default{BlackholeIP: c.cfg}}
+			conf.SetRouterConfig(&conf.Router{Default: conf.Default{BlackholeIP: c.cfg}})
 		}
 		if got := BlackholeIP(); got != c.want {
 			t.Fatalf("%s: BlackholeIP()=%q, want %q", c.name, got, c.want)
@@ -35,7 +35,7 @@ func TestBlackholeIP(t *testing.T) {
 
 // IsBlackholeIP: 命中当前生效哨兵为 true; 空串/未命中/关闭时为 false。
 func TestIsBlackholeIP(t *testing.T) {
-	conf.RouterConfig = &conf.Router{} // 默认 192.0.0.0
+	conf.SetRouterConfig(&conf.Router{}) // 默认 192.0.0.0
 	if !IsBlackholeIP("192.0.0.0") {
 		t.Fatal("192.0.0.0 should be blackhole by default")
 	}
@@ -46,12 +46,12 @@ func TestIsBlackholeIP(t *testing.T) {
 		t.Fatal("empty ip is never blackhole")
 	}
 
-	conf.RouterConfig = &conf.Router{Default: conf.Default{BlackholeIP: "off"}}
+	conf.SetRouterConfig(&conf.Router{Default: conf.Default{BlackholeIP: "off"}})
 	if IsBlackholeIP("192.0.0.0") {
 		t.Fatal("disabled: 192.0.0.0 should not be blackhole")
 	}
 
-	conf.RouterConfig = &conf.Router{Default: conf.Default{BlackholeIP: "10.9.9.9"}}
+	conf.SetRouterConfig(&conf.Router{Default: conf.Default{BlackholeIP: "10.9.9.9"}})
 	if !IsBlackholeIP("10.9.9.9") {
 		t.Fatal("custom blackhole 10.9.9.9 should match")
 	}

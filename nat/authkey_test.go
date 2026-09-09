@@ -74,10 +74,10 @@ func TestAuthKeyBadEncoding(t *testing.T) {
 // 各自的分支。
 func authHandshakeRaw(t *testing.T, su conf.ServerUser, client func(*websocket.Conn) error) error {
 	t.Helper()
-	old := conf.RouterConfig
-	t.Cleanup(func() { conf.RouterConfig = old })
-	conf.RouterConfig = &conf.Router{}
-	conf.RouterConfig.Websocket.Server.Users = []conf.ServerUser{su}
+	old := conf.RouterConfig()
+	t.Cleanup(func() { conf.SetRouterConfig(old) })
+	conf.SetRouterConfig(&conf.Router{})
+	conf.RouterConfig().Websocket.Server.Users = []conf.ServerUser{su}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
@@ -89,7 +89,7 @@ func authHandshakeRaw(t *testing.T, su conf.ServerUser, client func(*websocket.C
 		if err := c.ReadJSON(&msg); err != nil {
 			return
 		}
-		found, _ := conf.RouterConfig.Websocket.Server.LookupUser(msg.User)
+		found, _ := conf.RouterConfig().Websocket.Server.LookupUser(msg.User)
 		if err := authClient(c, msg, found); err != nil {
 			return
 		}
