@@ -225,20 +225,25 @@ websocket:
     allowIP:
     #  - 172.17.0.0/16
     # 端口转发入口(内网穿透): 在 listen 端口收连接, 转给该 email 的订阅方
-    # protocol: tcp(默认) / udp / both。两种协议各走各的通道, 不共用:
+    # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://。两种协议各走各的
+    # 通道, 不共用:
     #   tcp -> 经 websocket 转发(原有)
     #   udp -> 另起一条 UDP 中继, 全程还是 UDP(见 docs/websocket.md)
     # both 适合 RDP: 主通道 TCP 3389 + RDP 8+ 图形通道 UDP 3389, 两个监听同端口
     forward:
-      # - listen: ":2222"
+      # - listen: "both://:2222"
       #   email: someone@example.com
-      #   protocol: both
   # ===== 客户端(proxy侧) =====
   client:
     # ip 端口
     connect:
     # connect 域名(Host头)
     host:
+    # 经由的上游 HTTP/SOCKS5 代理, scheme://host:port(socks5:// 或 http://)。用于
+    # connect 是内网/回环地址、不能直连的场景: 先连对方已经暴露的代理端口, 由它
+    # CONNECT/SOCKS5 到对方本机没暴露的 websocket.server, 对方就只用暴露一个端口
+    # (见 docs/websocket.md "只暴露一个端口")。不配则和以前一样直连 connect
+    #proxy: http://<server公网IP>:3000
     # 用户名(发给服务端)
     user:
     # 密码(与 key 二选一), 要求至少 18 位、英文字母和数字都要有; 但这条强度校验只在
@@ -266,13 +271,34 @@ websocket:
     # ===== QUIC 直连(数据不经服务端, 详见 docs/websocket.md 路径 C) =====
     # 允许别的订阅方直连本机(监听按需起, 平时不占端口); 落地目标仍受上面 forward 白名单约束
     directAccept: false
-    # 本机直连入口: 在 listen 起监听, 连接直接送给 email 对应的订阅方, 由对方按 port 查它的 forward
-    # protocol: tcp(默认) / udp / both; both 适合 RDP(主通道 TCP 3389 + Enhanced RDP 的 UDP 3389)
+    # 本机直连入口: 在 listen 起监听, 连接直接送给 email 对应的订阅方, 由对方按 forwardPort 查它的 forward
+    # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://; both 适合 RDP
+    # (主通道 TCP 3389 + Enhanced RDP 的 UDP 3389)
     direct:
-      # - listen: ":13389"
+      # - listen: "both://:13389"
       #   email: someone@example.com
-      #   port: 3389
-      #   protocol: both
+      #   forwardPort: 3389  # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个端口就拒绝(白名单), 别人不能靠瞎填端口探到对方的其它转发目标
+    # directEncrypt: false  # true 时本机作为发起方(A)发出的打洞控制包(PUNCH/PONG)都额外加一层加密,
+    #                       # 防运营商设备按明文特征串识别丢包; 纯 opt-in, 不开完全不变。按本机一次性开关
+    #                       # (不是按上面每条 direct 规则单独配), 对 direct[] 与 -send/-recv 文件传输同时生效。
+    #                       # 开启前要求本机 uuid 已生成、且对端 email 指向的机器已在其
+    #                       # websocket.client.receive.allow 配好本机 uuid, 否则打洞直接失败报错,
+    #                       # 不会静默退化成明文
+    # directPortmap: false  # true 时直连候选收集才会去尝试 UPnP/PCP/NAT-PMP 端口映射; 默认不试。
+    #                       # 命中率低(多数路由器默认关闭或不支持)又要等三个协议各自的超时,
+    #                       # 多数机器上开了也只是白等一两秒。只能救对称 NAT, 救不了 CGNAT;
+    #                       # 确认自己路由器支持、且怀疑自己是对称 NAT 时再打开
+    # 直连默认吃 quic-go 对 UDP 的批量收发/ECN 优化; 极少数机器上(常见于某些网卡
+    # 驱动/虚拟网卡)这条优化本身会导致丢包、拥塞窗口涨不起来, 症状是直连传输明显
+    # 偏慢且丢包率异常高(排查: 加 -debug 2 若反而更快更干净就是这个问题)。不配则
+    # 跟随命令行 -direct-plain-udp 的全局默认值; 一台机器配了多条 client 分别走不同
+    # 网络路径时, 可以只给撞上问题的这一条显式配 true, 不影响其它路径
+    #directPlainUdp: false
+    # 手工补充本机的局域网/内网 IP(不带端口), 打洞/QUIC 拨号竞速时额外拼上当前 QUIC
+    # 端口当一条候选。不做网卡自动扫描——一台机器常有多张网卡, 真正有用的那个网段
+    # 用户自己一眼就知道。不可达的地址跟其它候选一样超时静默落选, 无副作用
+    #directLanAddrs:
+    #  - 192.168.1.10
     # 与别人交换文件的目录。本机不需要装 sshd/rsync 之类的服务 —— anyproxy 自己收发。
     # 两个方向共用这一份配置:
     #   收: 对端跑 anyproxy -send, 文件落到 dir 下
@@ -297,7 +323,7 @@ websocket:
     # 其中一项、但现在仍只想给 -send/-recv 用"这种少见场景用的显式开关。
     sendRecvOnly: false
   # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
-  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/directAccept/direct/receive/sendRecvOnly; uuid 不可配, 自动生成)
+  # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/directAccept/direct/directPlainUdp/receive/sendRecvOnly; uuid 不可配, 自动生成)
   # clients:
   #   - connect:
   #     user:

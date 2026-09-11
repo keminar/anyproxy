@@ -92,6 +92,12 @@ type directPeer struct {
 	fingerprint string
 	tokens      *directTokenStore
 
+	// crypto 打洞会话的加密上下文, 按 token 索引。A、C 两种角色共用同一份: 打洞发生
+	// 在 QUIC 连接建立之前, 此时还没有 directSession 可以挂; 且一个 directPeer 上
+	// 可能同时有多个并发的打洞会话(不同 email/port 的 direct[] 规则, 或同时被多个
+	// A 打洞), 按 token 分表天然支持并发隔离。见 nat/direct_crypto.go。
+	crypto *directCryptoTable
+
 	// A 侧(direct[] 入口)
 	mu       sync.Mutex
 	offers   map[uint]chan DirectOffer // 按请求ID等待服务端回 offer
@@ -126,18 +132,31 @@ func (d *directPeer) ensureTransport() (*quic.Transport, error) {
 		return nil, fmt.Errorf("listen udp: %w", err)
 	}
 	var pc net.PacketConn = conn
-	// debug 级别下包一层收包观察者: 进程收到的每个 datagram 都打一行(限速), 用来
-	// 回答"对端的 punch 到底有没有到本进程" —— 被 quic-go 当 QUIC 吞掉的包
-	// drainNonQUIC 看不见, 只能在 socket 层看。非 debug 路径保持原生
-	// *net.UDPConn, quic-go 的批量收发优化不受影响。
-	if config.DebugLevel >= config.LevelDebug {
+	// 两种情况都会让 quic-go 探测不到底下是 *net.UDPConn, 从而放弃它给真实 UDPConn
+	// 走的那条批量收发/ECN 快速路径, 退回最朴素的逐包 ReadFrom/WriteTo:
+	//   - debug 级别: 包一层收包观察者, 进程收到的每个 datagram 都打一行(限速),
+	//     用来回答"对端的 punch 到底有没有到本进程"——被 quic-go 当 QUIC 吞掉的包
+	//     drainNonQUIC 看不见, 只能在 socket 层看。
+	//   - directPlainUDP(d.cfg): 见 config.DirectPlainUDP 的注释——在部分机器上
+	//     (实测至少一台 Windows)那条"快速路径"本身才是问题根源(丢包、拥塞窗口涨不
+	//     起来), 关掉它反而更快更干净。跟 debug 的区别是不逐包打日志, 可以放心长期
+	//     开着; 每条 websocket.client 各自的 directPlainUdp 配置可以覆盖命令行的
+	//     全局默认值(不是所有网卡/路径都会撞上这个问题)。
+	// 两条都不触发时保持原生 *net.UDPConn, quic-go 的批量收发优化不受影响。
+	switch {
+	case config.DebugLevel >= config.LevelDebug:
 		// quic-go 无法在被包装的 conn 上设置收包缓冲(它只认 *net.UDPConn), 这里自己
-		// 补设, 否则 debug 模式下运行在 OS 默认小缓冲上, 高 BDP 链路(如 RTT 160ms 的
-		// 国际链路)容易在收包侧丢包。大小与 quic-go 的期望值对齐, 超限由 OS 裁剪。
+		// 补设, 否则运行在 OS 默认小缓冲上, 高 BDP 链路(如 RTT 160ms 的国际链路)
+		// 容易在收包侧丢包。大小与 quic-go 的期望值对齐, 超限由 OS 裁剪。
 		if err := conn.SetReadBuffer(udpReadBufferSize); err != nil {
 			d.logf("set udp read buffer: %v", err)
 		}
 		pc = &observeConn{PacketConn: conn, d: d}
+	case directPlainUDP(d.cfg):
+		if err := conn.SetReadBuffer(udpReadBufferSize); err != nil {
+			d.logf("set udp read buffer: %v", err)
+		}
+		pc = &plainPacketConn{PacketConn: conn}
 	}
 	tr := &quic.Transport{Conn: pc}
 	d.udpConn = conn
@@ -147,6 +166,16 @@ func (d *directPeer) ensureTransport() (*quic.Transport, error) {
 	// ReadNonQUICPacket。不读就会一直堆在内部队列里。
 	go d.drainNonQUIC(tr)
 	return tr, nil
+}
+
+// directPlainUDP 解出这条 websocket.client 连接是否该绕开 quic-go 的 UDP 快速路径
+// (见 config.DirectPlainUDP 的注释)。cfg.DirectPlainUDP 显式配置优先, 不配(nil)才
+// 落到命令行 -direct-plain-udp 的全局默认值——单条连接遇到问题不该拖累其它路径。
+func directPlainUDP(cfg conf.WsClient) bool {
+	if cfg.DirectPlainUDP != nil {
+		return *cfg.DirectPlainUDP
+	}
+	return config.DirectPlainUDP
 }
 
 // setMyCandidates 记下最近一次收集到的本机候选。
@@ -306,6 +335,7 @@ func newDirectPeer(tag string, cfg conf.WsClient, forward map[uint16]string) *di
 		cfg:      cfg,
 		forward:  forward,
 		tokens:   newDirectTokenStore(),
+		crypto:   newDirectCryptoTable(),
 		offers:   make(map[uint]chan DirectOffer),
 		sessions: make(map[string]*directSession),
 	}

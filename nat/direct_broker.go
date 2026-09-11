@@ -84,8 +84,11 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 
 	// 用 B 自己的 ID 与 C 通信: A 那侧的 ID 是各 A 自行采番的, 不同 A 会撞号。
 	id := b.track(c, msg.ID, req.Email)
+	// Email 用 c.Email(B 自己认证过的身份), 不是 req 里的字段——A 没法在这里伪造成
+	// 别的 email, C 才能放心拿它去查 receive.allow 派生打洞加密密钥(见 DirectPunch
+	// 的字段注释)。
 	punch := DirectPunch{PeerAddrs: reqCands, PeerAddr: firstAddr(reqCands),
-		Token: req.Token, Port: req.Port}
+		Token: req.Token, Port: req.Port, Email: c.Email, Encrypt: req.Encrypt}
 	body, err := encodeDirect(punch)
 	if err != nil {
 		b.take(id)

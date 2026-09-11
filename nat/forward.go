@@ -96,18 +96,18 @@ func StartForward(rules []conf.ServerForward) {
 			continue
 		}
 		if !r.ValidProtocol() {
-			log.Printf("nat forward %s has unknown protocol %q, skipped", r.Listen, r.Protocol)
+			log.Printf("nat forward %s has unknown protocol %q, skipped", r.Listen, r.Protocol())
 			continue
 		}
 		if !r.WantTCP() {
-			continue // protocol: udp, 只起 UDP 中继(见 nat/relay_udp_server.go)
+			continue // udp://, 只起 UDP 中继(见 nat/relay_udp_server.go)
 		}
 		go listenForward(r)
 	}
 }
 
 func listenForward(r conf.ServerForward) {
-	ln, err := net.Listen("tcp", r.Listen)
+	ln, err := net.Listen("tcp", r.Addr())
 	if err != nil {
 		log.Printf("nat forward listen %s err: %v", r.Listen, err)
 		return
@@ -153,7 +153,7 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 
 	id := forwardInc.ID()
 	// 服务端入口端口: 从监听地址解析, 供订阅方查固定 target
-	port := listenPort(r.Listen)
+	port := listenPort(r.Addr())
 	src := conn.RemoteAddr()
 	start := time.Now()
 	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d)", src, r.Email, port))

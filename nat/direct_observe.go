@@ -81,3 +81,14 @@ func (o *observeConn) note(n int, addr net.Addr, pkt []byte) {
 	}
 	o.d.logf("recv %d bytes from %s (%s)%s", n, addr, kind, extra)
 }
+
+// plainPacketConn 纯转发, 不做任何记录——存在的唯一理由是它的静态类型不是
+// *net.UDPConn, 借此让 quic-go 探测不到底下的真实类型, 从而放弃给 *net.UDPConn 走的
+// 那条批量收发/ECN 快速路径(见 config.DirectPlainUDP 的注释)。
+//
+// 跟 observeConn 是两回事: observeConn 达到同样的"隐藏真实类型"效果, 是为了在此之上
+// 加一层逐包日志(debug 排查用); 这里单纯只要"隐藏"这一个效果, 不想为此背上逐包过一次
+// 日志限流判断的开销, 所以没有直接复用 observeConn。
+type plainPacketConn struct {
+	net.PacketConn
+}

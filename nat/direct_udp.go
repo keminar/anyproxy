@@ -235,7 +235,7 @@ type directUDPEntry struct {
 
 // listenUDPEntry 起 UDP 入口。与 TCP 入口一样, 只在进程启动时起一次。
 func (d *directPeer) listenUDPEntry(r conf.ClientDirect) {
-	addr, err := net.ResolveUDPAddr("udp", r.Listen)
+	addr, err := net.ResolveUDPAddr("udp", r.Addr())
 	if err != nil {
 		d.logf("direct udp entry %s: resolve failed: %v", r.Listen, err)
 		return
@@ -253,7 +253,7 @@ func (d *directPeer) listenUDPEntry(r conf.ClientDirect) {
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: make(map[uint32]time.Time),
 	}
-	d.logf("direct udp entry listening on %s -> email %s (port %d)", r.Listen, r.Email, r.Port)
+	d.logf("direct udp entry listening on %s -> email %s (port %d)", r.Listen, r.Email, r.ForwardPort)
 	go e.run()
 }
 
@@ -280,7 +280,7 @@ func (e *directUDPEntry) pump(getSession func() (*directSession, error)) {
 		}
 		// UDP 没有"连接"可计数, 靠每个包刷新使用时间, 否则正在跑 UDP 的连接会被空闲回收误杀。
 		sess.touch()
-		if err := sendDatagram(sess.conn, sessionID, e.rule.Port, buf[:n]); err != nil {
+		if err := sendDatagram(sess.conn, sessionID, e.rule.ForwardPort, buf[:n]); err != nil {
 			e.peer.logf("direct udp entry %s: send failed: %v", e.rule.Listen, err)
 			continue
 		}

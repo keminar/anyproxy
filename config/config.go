@@ -29,6 +29,29 @@ var TimeFormat string = "2006-01-02 15:04:05"
 // DebugLevel 调试级别
 var DebugLevel int
 
+// DirectPlainUDP 直连(nat.directPeer)拨号/监听时, 强制把 UDP socket 包成一个只暴露
+// net.PacketConn 接口的哑封装, 让 quic-go 探测不到底下是 *net.UDPConn, 从而放弃它给
+// 真实 UDPConn 走的那条"批量收发+ECN"快速路径, 退回最朴素的逐包 ReadFrom/WriteTo。
+//
+// 为什么会有人想主动关掉一个"优化": 实测过至少一台 Windows 机器上, 这条快速路径反而
+// 是问题根源——开着它丢包 1.7%、拥塞窗口涨不起来(卡在初始值附近, 几百 KB/s), 关掉后
+// 0 丢包、窗口正常涨到几百 KB 到 MB 级(见 nat/direct.go 的 ensureTransport 与
+// nat/direct_observe.go 的 observeConn)。多半是这台机器的网卡驱动/虚拟网卡跟 quic-go
+// 那条路径依赖的系统调用(读取 ECN 标记等)有兼容问题, 把本该干净到达的包弄丢或搞乱,
+// quic-go 又把这当成真实网络拥塞处理, 于是拥塞窗口一直起不来。
+//
+// 独立于 DebugLevel: -debug 2 原本也会顺带关掉这条快速路径(observeConn 只暴露
+// net.PacketConn), 但那是为了逐包打日志排查"打洞包到底有没有到", 副作用是每个包都要
+// 过一次日志限流判断外加不定期真正写一行 stderr——量大时这本身就是笔不小的开销, 不适合
+// 当成日常"就是要关掉快速路径"的开关用。这个开关只做"关掉快速路径"这一件事, 不打印
+// 每包日志, 可以放心跟正常使用一起长期开着。
+//
+// 这是全局默认值(命令行 -direct-plain-udp), 每条 websocket.client 可以用配置文件
+// 里的 directPlainUdp 单独覆盖(见 conf.WsClient.DirectPlainUDP、nat.directPlainUDP)——
+// 问题通常是某张网卡驱动的锅, 一台机器上配了多条走不同网络路径的连接时, 不该为了
+// 绕开一条路径上的问题而牺牲其它路径本来正常的快速路径。
+var DirectPlainUDP bool
+
 // ListenPort 监听端口
 var ListenPort uint16
 

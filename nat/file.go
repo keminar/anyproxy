@@ -280,7 +280,7 @@ const (
 type chunkAssembly struct {
 	mu        sync.Mutex
 	f         *os.File
-	final     string // 最终落盘名(第一块到达时就定下, 所有块共用, 不重复判重名)
+	final     string // 最终落盘名, 第一块到达时就用 claimName 原子占好(占位文件已在磁盘上), 所有块共用
 	part      string
 	total     int
 	remaining int
@@ -310,6 +310,7 @@ func abortChunkAssembly(tid string) {
 	if a != nil {
 		_ = a.f.Close()
 		_ = os.Remove(a.part)
+		_ = os.Remove(a.final) // claimName 原子占的位, 传输没完成也要一并收掉
 	}
 }
 
@@ -330,10 +331,24 @@ func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly,
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
 	}
-	final := uniquePath(dest)
-	part := final + filePartSuffix
+	// final 在第一块到达时就原子认领下来(见 claimName), 而不是等所有块都收完才决定:
+	// 每条并行连接各自收完自己那一块就要独立回复对端"Saved"(不能等其他块), 所以这个
+	// 名字必须从一开始就是确定、且不会被并发的另一次同名传输抢走的。
+	final, err := claimName(dest)
+	if err != nil {
+		return nil, err
+	}
+	// part 带上这次传输自己的 TransferID, 不能只用 final+".part": 发送端异常退出
+	// (比如传到一半 Ctrl+C)时, 接收端这个 goroutine 在检测到连接真的断了之前还会
+	// 占着旧的 .part 继续等——没有读超时是故意的(见 recvFileOver 的注释), 靠的是
+	// QUIC 空闲超时兜底, 但这意味着旧连接的清理和新一次重传可能在时间上重叠。
+	// 如果新旧两次都写同名的 xxx.part, 新的这次收完文件、改名时会因为旧 goroutine
+	// 还占着那个文件而报 "being used by another process"(哪怕数据本身完全收对了)。
+	// 每次传输用自己的 TransferID 单独占一个 .part 文件名, 这类撞名从根上就不会发生。
+	part := final + "." + tid + filePartSuffix
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, filePerm(head.Mode))
 	if err != nil {
+		os.Remove(final) // final 已经被 claimName 原子占位了, 这里失败要把占位一起收掉
 		return nil, fmt.Errorf("create: %w", err)
 	}
 	a := &chunkAssembly{
@@ -367,6 +382,7 @@ func reapChunkAssemblies() {
 		for _, a := range dead {
 			a.f.Close()
 			os.Remove(a.part)
+			os.Remove(a.final) // claimName 原子占的位, 传输没完成也要一并收掉
 			log.Printf("nat file: transfer to %s idle, dropped (%d/%d chunks arrived)", a.final, a.total-a.remaining, a.total)
 		}
 	}
@@ -437,10 +453,19 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 			finalErr = fmt.Errorf("close: %w", closeErr)
 		}
 		if finalErr != nil {
+			// 这里的 finalErr 是某一块的传输/校验错误, 落盘内容确实不完整或对不上,
+			// 删掉是对的(与下面"改名失败不删 part"不是一回事——那种情况下字节已经
+			// 收全, 只是改名这一步被卡住)。a.final 是 claimName 在第一块到达时就
+			// 占下的空占位文件, 传输失败了也要一并收掉, 不然会留下一个看着像"传完
+			// 了"、其实是空的文件。
 			os.Remove(a.part)
-		} else if err := os.Rename(a.part, a.final); err != nil {
-			os.Remove(a.part)
-			finalErr = fmt.Errorf("rename: %w", err)
+			os.Remove(a.final)
+		} else if err := renameWithRetry(a.part, a.final); err != nil {
+			// 所有块都收全校验也都过了, 只是改名被卡住(常见于杀毒软件扫描刚落盘的
+			// 可执行文件): 把空占位文件收掉(留着会被误认成"传完了但是空文件"), 但
+			// 不删 part——数据都在那, 删掉等于逼一次全量重传。
+			os.Remove(a.final)
+			finalErr = fmt.Errorf("rename: %w (data kept at %s)", err, a.part)
 		} else {
 			rel, _ := filepath.Rel(dir, a.final)
 			logf("file from %s: saved %s (%d chunks)", remote, filepath.ToSlash(rel), a.total)
@@ -460,8 +485,20 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 // 先写 .part 再改名: 中断留下的是一眼能看出没传完的文件。改名时若目标已存在, 自动
 // 换一个名字而不是覆盖 —— 覆盖会悄无声息地毁掉收方已有的数据, 这个代价太大, 而多
 // 出一个 "x (1).zip" 只是有点碍眼。
+//
+// part 名字带一段随机 token, 不能只用 dest+".part": 发送端异常退出(比如传到一半
+// Ctrl+C)时, 收端这个 goroutine 在检测到连接真的断了之前还占着旧的 .part 继续
+// 等——没有读超时是故意的(见 recvFileOver 的注释), 靠 QUIC 空闲超时兜底, 但这意味
+// 着旧连接的清理和新一次重传可能在时间上重叠。如果新旧两次都写同名的 xxx.part,
+// 新的这次收完文件、改名时会因为旧 goroutine 还占着那个文件而报
+// "being used by another process"(哪怕数据本身完全收对了)。每次调用生成自己的
+// token, 这类撞名从根上就不会发生。
 func writeIncoming(dest string, r io.Reader, head fileHead) (string, string, error) {
-	part := dest + filePartSuffix
+	tok, err := newTransferID()
+	if err != nil {
+		return "", "", fmt.Errorf("part name: %w", err)
+	}
+	part := dest + "." + tok + filePartSuffix
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, filePerm(head.Mode))
 	if err != nil {
 		return "", "", fmt.Errorf("create: %w", err)
@@ -482,12 +519,45 @@ func writeIncoming(dest string, r io.Reader, head fileHead) (string, string, err
 		return "", "", fmt.Errorf("truncated: got %d of %d bytes", n, head.Size)
 	}
 
-	final := uniquePath(dest)
-	if err := os.Rename(part, final); err != nil {
-		os.Remove(part)
-		return "", "", fmt.Errorf("rename: %w", err)
+	// claimName 而不是"先 Stat 探测、这里再 Rename": 两步分开在两个独立进程之间不
+	// 是原子的, 见 claimName 的注释——并发给同一个目标名字发送同名文件时会导致后一个
+	// 悄悄覆盖前一个已经回复过"Saved"的文件。
+	final, err := claimName(dest)
+	if err != nil {
+		// 不删 part: 字节已经完整落盘, 删掉等于让对方一份传完的文件白传一遍。
+		return "", "", fmt.Errorf("%w (data kept at %s)", err, part)
+	}
+	if err := renameWithRetry(part, final); err != nil {
+		// final 只是 claimName 留下的空占位文件, 收掉它——留着会被误认成"传完了但是
+		// 空文件"。不删 part: 字节已经完整落盘且摘要还没来得及核对, 删掉等于让对方
+		// 一份传完的文件白传一遍。留着让人凭 part 名字自己认领, 比逼一次几十 MB/几
+		// 分钟的重传划算得多。
+		os.Remove(final)
+		return "", "", fmt.Errorf("rename: %w (data kept at %s)", err, part)
 	}
 	return final, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// renameWithRetry 重试版 os.Rename。Windows 上杀毒软件常对刚落盘的可执行文件做
+// 实时扫描, 会在我们 Close() 之后、改名之前把这个文件再打开一下, 扫描完才放手,
+// 这段时间里 Rename 会报 "being used by another process"(ERROR_SHARING_VIOLATION),
+// 文件本身没问题, 等扫描完就能改名成功。用指数退避拉到十几秒总时长——扫一个几十
+// MB 的可执行文件不是瞬间的事, 等太短会在文件传得越大时越容易撞上; 反正只在最后
+// 这一步偶发, 多等几秒换来不用整份重传划算。非 Windows 平台不会遇到这个问题, 但
+// 重试本身无害, 不必用构建标签区分。
+func renameWithRetry(oldpath, newpath string) error {
+	var err error
+	delay := 100 * time.Millisecond
+	for i := 0; i < 8; i++ {
+		if i > 0 {
+			time.Sleep(delay)
+			delay *= 2
+		}
+		if err = os.Rename(oldpath, newpath); err == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // copyN 读满 n 字节。用自带缓冲而不是 io.CopyN: 后者内部是 32KB, 千兆下系统调用偏多。
@@ -558,26 +628,60 @@ func safeJoin(dir, name string) (string, error) {
 	return absDest, nil
 }
 
-// uniquePath 目标已存在时换一个不冲突的名字: x.zip -> x (1).zip -> x (2).zip。
-func uniquePath(p string) string {
-	if _, err := os.Stat(p); os.IsNotExist(err) {
-		return p
+// claimName 原子地"认领"一个尚未被占用的文件名: 目标已存在就换下一个候选,
+// x.zip -> x (1).zip -> x (2).zip -> ...。
+//
+// 不能用"先 os.Stat 探测存不存在、调用方再另外一步 Rename"这种两步走的做法——那两
+// 步之间不是原子的。两个独立进程/goroutine 并发给同一个目标名字发送同名文件时,
+// 双方都可能在探测那一刻看到"不存在", 都选中同一个名字、都去 Rename, 而 os.Rename
+// 对已存在的目标是直接覆盖(Go 在 Windows 上特意用 MOVEFILE_REPLACE_EXISTING 抹平了
+// 跟 POSIX rename 的差异, 两边行为一致), 后一个会悄悄吃掉前一个刚落盘、且已经回复
+// 过对端"Saved"的文件——回复变成了假话, 数据也丢了。这不是 Windows 特有的问题,
+// Linux/macOS 上同样会撞上。
+//
+// 用 O_CREATE|O_EXCL 建一个 0 字节占位文件来"认领"名字: 这一步本身就是原子的
+// (POSIX open(2) 与 Windows CreateFile(CREATE_NEW) 都保证), 抢到的人才能继续, 抢
+// 不到(已存在)就跟旧版一样换下一个候选名字重试。调用方应该尽快把真正的内容
+// rename 过去覆盖这个占位文件——覆盖自己刚建的占位文件是安全的, 不会有别的调用也
+// 认领到同一个名字; 如果调用方最终没有完成这次覆盖(比如后续步骤失败), 记得把这个
+// 占位文件删掉, 不然会留下一个看着像"传完了"、其实是空的文件。
+func claimName(dest string) (string, error) {
+	claim := func(p string) (bool, error) {
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			if os.IsExist(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, f.Close()
 	}
-	ext := filepath.Ext(p)
+	if ok, err := claim(dest); err != nil {
+		return "", fmt.Errorf("claim %s: %w", dest, err)
+	} else if ok {
+		return dest, nil
+	}
+
+	ext := filepath.Ext(dest)
 	// 纯数字的".1"多半是版本号(如 anyproxy-amd64-v2.1)而不是后缀名 ——
 	// 非 Windows 下的可执行文件常见这种命名, 按后缀名拆分会把序号插进版本号中间。
 	if isNumericExt(ext) {
 		ext = ""
 	}
-	base := strings.TrimSuffix(p, ext)
+	base := strings.TrimSuffix(dest, ext)
 	for i := 1; i < 10000; i++ {
 		cand := fmt.Sprintf("%s (%d)%s", base, i, ext)
-		if _, err := os.Stat(cand); os.IsNotExist(err) {
-			return cand
+		ok, err := claim(cand)
+		if err != nil {
+			return "", fmt.Errorf("claim %s: %w", cand, err)
+		}
+		if ok {
+			return cand, nil
 		}
 	}
-	// 一万个重名还没排开就别较劲了, 让调用方按原名去写(多半会失败并如实报错)。
-	return p
+	// 一万个重名还没排开就别较劲了, 如实报错——跟旧版"退回原名字让调用方写、多半会
+	// 失败"的效果一样, 但不用再让调用方自己判断"这到底是不是真的认领到了"。
+	return "", fmt.Errorf("too many files named like %s, giving up", filepath.Base(dest))
 }
 
 // isNumericExt 形如 ".1"、".22" 的"后缀"通篇是数字, 真实文件后缀几乎不会这样, 一般是版本号。

@@ -89,15 +89,24 @@ func TestFileRelayEndToEnd(t *testing.T) {
 	}
 
 	var lastProgress int64
-	saved, err := sendFileViaRelay(a.client, "c@example.com", items[0], func(n int64) { lastProgress = n })
+	saved, err := sendFileViaRelay(a.client, "c@example.com", items[0], func(n int64) {
+		if n < lastProgress {
+			t.Fatalf("progress went backwards: %d -> %d", lastProgress, n)
+		}
+		lastProgress = n
+	})
 	if err != nil {
 		t.Fatalf("send via relay: %v", err)
 	}
 	if saved != "relay.bin" {
 		t.Fatalf("peer saved it as %q", saved)
 	}
-	if lastProgress != int64(len(body)) {
-		t.Fatalf("progress ended at %d, want %d", lastProgress, len(body))
+	// 进度现在挂在对端 ACK 上(见 nat/file_relay.go 的 sendFileViaRelay), 不再是
+	// 精确的本地读盘计数: ACK 按 relayAckEvery(1MB) 门槛触发, 文件体最后不满 1MB
+	// 的尾巴通常等不到下一次确认就传完了, 所以只要求落在合理区间, 不要求精确等于
+	// len(body)——下界给足容忍度(90%), 上界放宽一点余量(AEAD 分帧 + 文件头尾开销)。
+	if want := int64(len(body)); lastProgress < want*9/10 || lastProgress > want+4096 {
+		t.Fatalf("progress ended at %d, want roughly close to %d", lastProgress, want)
 	}
 	got, err := os.ReadFile(filepath.Join(recvDir, "relay.bin"))
 	if err != nil {

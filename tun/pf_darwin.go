@@ -36,7 +36,7 @@ func setupInboundPF(dev, gw string, ports []int) {
 		return
 	}
 	if dev == "" || gw == "" {
-		log.Printf("inboundPF: 缺物理网卡(dev=%q)或网关(gw=%q), 跳过; 入站服务回包可能被 TUN 吸走", dev, gw)
+		log.Printf("inboundPF: missing physical NIC (dev=%q) or gateway (gw=%q), skipping; inbound service reply packets may be pulled into TUN", dev, gw)
 		return
 	}
 
@@ -47,7 +47,7 @@ func setupInboundPF(dev, gw string, ports []int) {
 
 	// 先以引用计数方式启用 pf(拿 token 便于退出时精确释放, 不动别人的规则)
 	if tok, err := pfEnable(); err != nil {
-		log.Printf("inboundPF: 启用 pf 失败: %v; 若 pf 已开则仍尝试加载 anchor", err)
+		log.Printf("inboundPF: failed to enable pf: %v; still trying to load anchor in case pf is already on", err)
 	} else {
 		pfEnableToken = tok
 	}
@@ -56,10 +56,10 @@ func setupInboundPF(dev, gw string, ports []int) {
 	cmd := exec.Command("pfctl", "-a", pfAnchor, "-f", "-")
 	cmd.Stdin = strings.NewReader(rule)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("inboundPF: 加载 anchor 失败: %v: %s", err, strings.TrimSpace(string(out)))
+		log.Printf("inboundPF: failed to load anchor: %v: %s", err, strings.TrimSpace(string(out)))
 		return
 	}
-	log.Printf("inboundPF: 已放行入站端口 %s 的回包(pf reply-to via %s %s); 验证: sudo pfctl -a %s -sr",
+	log.Printf("inboundPF: allowed reply packets for inbound port(s) %s (pf reply-to via %s %s); verify: sudo pfctl -a %s -sr",
 		strings.Join(portList, ","), dev, gw, pfAnchor)
 }
 

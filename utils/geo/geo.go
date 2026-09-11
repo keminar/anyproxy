@@ -94,6 +94,18 @@ func eachField(b []byte, fn func(f wireField)) bool {
 	return true
 }
 
+// wantSet 把类别名列表转为小写集合; cats 为空返回 nil, 表示不过滤(取全部类别)。
+func wantSet(cats []string) map[string]bool {
+	if len(cats) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(cats))
+	for _, c := range cats {
+		m[strings.ToLower(c)] = true
+	}
+	return m
+}
+
 // entryCode 取一个 Entry(GeoIP/GeoSite) 的 country_code(字段1, string)。
 func entryCode(entry []byte) string {
 	var code string
@@ -113,13 +125,116 @@ type ipMatcher struct {
 	cats map[string][]ipRange // 小写类别 -> 按 start 排序的区间
 }
 
+// siteCat 是解析/合并阶段的临时结构(逐个域名一个 map key), 加载完成后
+// 会被压缩进 compiledSite, 不会常驻内存。
 type siteCat struct {
 	suffix map[string]struct{} // 后缀(根域及其子域)
 	full   map[string]struct{} // 精确
 }
 
+// domainEntry 是 domainIndex.buf 里一段域名字节的位置。
+type domainEntry struct {
+	off uint32
+	len uint16
+}
+
+// domainIndex 把一批域名压缩存储: 所有域名字符拼成一块 buf(不重复分配 string),
+// entries 按域名内容升序排列、记录每个域名在 buf 里的偏移, 查询用二分查找。
+// 相比 map[string]struct{}(每个域名一份独立 string + hash 表槽位开销), 省去了
+// 逐域名的固定开销, 只保留域名字符本身占用的内存。
+type domainIndex struct {
+	buf     []byte
+	entries []domainEntry // 按 buf[off:off+len] 的字节内容升序
+}
+
+// compareBytesString 按字节比较 b 与 s, 不做任何内存分配。
+func compareBytesString(b []byte, s string) int {
+	n := len(b)
+	if len(s) < n {
+		n = len(s)
+	}
+	for i := 0; i < n; i++ {
+		if b[i] != s[i] {
+			if b[i] < s[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(b) < len(s):
+		return -1
+	case len(b) > len(s):
+		return 1
+	default:
+		return 0
+	}
+}
+
+// contains 二分查找 target 是否在索引中。
+func (idx domainIndex) contains(target string) bool {
+	lo, hi := 0, len(idx.entries)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		e := idx.entries[mid]
+		c := compareBytesString(idx.buf[e.off:int(e.off)+int(e.len)], target)
+		switch {
+		case c < 0:
+			lo = mid + 1
+		case c > 0:
+			hi = mid
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// buildDomainIndex 把一个域名集合编译成排好序的 domainIndex。
+func buildDomainIndex(set map[string]struct{}) domainIndex {
+	if len(set) == 0 {
+		return domainIndex{}
+	}
+	list := make([]string, 0, len(set))
+	size := 0
+	for s := range set {
+		list = append(list, s)
+		size += len(s)
+	}
+	sort.Strings(list)
+	buf := make([]byte, 0, size)
+	entries := make([]domainEntry, 0, len(list))
+	for _, s := range list {
+		off := len(buf)
+		buf = append(buf, s...)
+		entries = append(entries, domainEntry{off: uint32(off), len: uint16(len(s))})
+	}
+	return domainIndex{buf: buf, entries: entries}
+}
+
+// mergeIndex 把 add 合入 old, 返回新的 domainIndex(old 不会被修改)。
+func mergeIndex(old domainIndex, add map[string]struct{}) domainIndex {
+	if len(add) == 0 {
+		return old
+	}
+	set := make(map[string]struct{}, len(old.entries)+len(add))
+	for _, e := range old.entries {
+		set[string(old.buf[e.off:int(e.off)+int(e.len)])] = struct{}{}
+	}
+	for s := range add {
+		set[s] = struct{}{}
+	}
+	return buildDomainIndex(set)
+}
+
+// compiledSite 是最终常驻内存、供 match() 只读查询的结构。
+type compiledSite struct {
+	suffix domainIndex
+	full   domainIndex
+}
+
 type siteMatcher struct {
-	cats map[string]*siteCat
+	cats map[string]*compiledSite
 }
 
 func (m *ipMatcher) match(cat string, ip netip.Addr) bool {
@@ -141,11 +256,11 @@ func (m *siteMatcher) match(cat, domain string) bool {
 		return false
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-	if _, ok := c.full[domain]; ok {
+	if c.full.contains(domain) {
 		return true
 	}
 	for s := domain; ; {
-		if _, ok := c.suffix[s]; ok {
+		if c.suffix.contains(s) {
 			return true
 		}
 		i := strings.IndexByte(s, '.')
@@ -185,14 +300,16 @@ func prefixRange(p netip.Prefix) ipRange {
 // ---- .dat(protobuf) 解析 ----
 
 // datIPCats 解析 GeoIPList -> 小写类别 -> CIDR 区间。
-func datIPCats(data []byte) (map[string][]ipRange, error) {
+// cats 非空时只解码所需类别, 其余条目仅取 country_code 判断后跳过, 不展开其 IP 列表(节省内存)。
+func datIPCats(data []byte, cats []string) (map[string][]ipRange, error) {
+	want := wantSet(cats)
 	out := map[string][]ipRange{}
 	if !eachField(data, func(f wireField) {
 		if f.num != 1 || f.wire != 2 {
 			return
 		}
 		code := strings.ToLower(entryCode(f.data))
-		if code == "" {
+		if code == "" || (want != nil && !want[code]) {
 			return
 		}
 		eachField(f.data, func(g wireField) {
@@ -231,14 +348,16 @@ func parseCIDR(b []byte) (ipRange, bool) {
 }
 
 // datSiteCats 解析 GeoSiteList -> 小写类别 -> siteCat(只留 Domain/Full)。
-func datSiteCats(data []byte) (map[string]*siteCat, error) {
+// cats 非空时只解码所需类别, 其余条目仅取 country_code 判断后跳过, 不展开其域名列表(节省内存)。
+func datSiteCats(data []byte, cats []string) (map[string]*siteCat, error) {
+	want := wantSet(cats)
 	out := map[string]*siteCat{}
 	if !eachField(data, func(f wireField) {
 		if f.num != 1 || f.wire != 2 {
 			return
 		}
 		code := strings.ToLower(entryCode(f.data))
-		if code == "" {
+		if code == "" || (want != nil && !want[code]) {
 			return
 		}
 		c := out[code]
@@ -366,7 +485,7 @@ func LoadIPFile(path string, cats []string) error {
 	}
 	toMerge := map[string][]ipRange{}
 	if isDat(path) {
-		all, err := datIPCats(data)
+		all, err := datIPCats(data, cats)
 		if err != nil {
 			return err
 		}
@@ -420,7 +539,7 @@ func LoadSiteFile(path string, cats []string) error {
 	}
 	toMerge := map[string]*siteCat{}
 	if isDat(path) {
-		all, err := datSiteCats(data)
+		all, err := datSiteCats(data, cats)
 		if err != nil {
 			return err
 		}
@@ -454,20 +573,16 @@ func LoadSiteFile(path string, cats []string) error {
 	mu.Lock()
 	defer mu.Unlock()
 	if siteM == nil {
-		siteM = &siteMatcher{cats: map[string]*siteCat{}}
+		siteM = &siteMatcher{cats: map[string]*compiledSite{}}
 	}
 	for k, sc := range toMerge {
 		dst := siteM.cats[k]
 		if dst == nil {
-			dst = newSiteCat()
+			dst = &compiledSite{}
 			siteM.cats[k] = dst
 		}
-		for s := range sc.suffix {
-			dst.suffix[s] = struct{}{}
-		}
-		for s := range sc.full {
-			dst.full[s] = struct{}{}
-		}
+		dst.suffix = mergeIndex(dst.suffix, sc.suffix)
+		dst.full = mergeIndex(dst.full, sc.full)
 	}
 	return nil
 }

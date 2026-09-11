@@ -113,6 +113,13 @@ func (d *directPeer) onPunch(msg *Message) {
 		reply(DirectReady{Err: "directAccept is not enabled on this peer"})
 		return
 	}
+	// 加密准备放在起监听之前: 满足不了(A 的 uuid 没配进 receive.allow)就直接拒绝,
+	// 不用白起一次监听。isInitiator=false: 按 p.Email 去 receive.allow 查 A 的 uuid。
+	if errMsg := d.prepareDirectCrypto(p.Token, p.Encrypt, false, p.Email); errMsg != "" {
+		d.logf("punch from email %s: %s", p.Email, errMsg)
+		reply(DirectReady{Err: errMsg})
+		return
+	}
 	// 按需起监听: 没起过就现起, 起着就复用。
 	if err := d.ensureAccept(); err != nil {
 		reply(DirectReady{Err: fmt.Sprintf("cannot start quic listener: %v", err)})
@@ -130,8 +137,8 @@ func (d *directPeer) onPunch(msg *Message) {
 	d.tokens.put(p.Token, p.Port)
 	// 朝对端的**所有**候选一起打, 不等回执: C 这侧不需要知道哪条更快(择优是 A 做的),
 	// 只需要把每条路上的返回通道都开出来。等回执会白白拖住 ready, 让 A 多等近一秒。
-	d.punchOnly(peerCands)
-	d.logf("my candidates %v, punching toward %v for port %d", myCands, peerCands, p.Port)
+	d.punchOnly(p.Token, peerCands)
+	d.logf("my candidates %v, punching toward %v for port %d, encrypt=%v", myCands, peerCands, p.Port, p.Encrypt)
 	reply(DirectReady{Candidates: myCands, Endpoint: firstAddr(myCands), Fingerprint: d.fingerprint})
 }
 

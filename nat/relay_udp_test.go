@@ -63,7 +63,7 @@ func relayPair(t *testing.T, target string) (*udpRelay, *udpUplink) {
 	t.Cleanup(func() { conf.SetRouterConfig(old) })
 	conf.SetRouterConfig(&conf.Router{})
 
-	relay, err := newUDPRelay(conf.ServerForward{Listen: "127.0.0.1:0", Email: "c@example.com", Protocol: conf.ProtoBoth})
+	relay, err := newUDPRelay(conf.ServerForward{Listen: "both://127.0.0.1:0", Email: "c@example.com"})
 	if err != nil {
 		t.Fatalf("new relay: %v", err)
 	}

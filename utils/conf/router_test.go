@@ -190,6 +190,138 @@ tun:
 	}
 }
 
+// TestWsClientDirectPlainUDP 确认 directPlainUdp 是三态的: 不配时 nil(消费者据此
+// 落到命令行 -direct-plain-udp 的全局默认值, 见 nat.directPlainUDP), 显式 true/false
+// 都要能如实解出来, 不能被 YAML 的零值搞丢——那样就没法用它覆盖全局默认了。
+func TestWsClientDirectPlainUDP(t *testing.T) {
+	cases := map[string]*bool{
+		`client:
+  connect: a:1
+`: nil,
+		`client:
+  connect: a:1
+  directPlainUdp: true
+`: boolPtr(true),
+		`client:
+  connect: a:1
+  directPlainUdp: false
+`: boolPtr(false),
+	}
+	for y, want := range cases {
+		var w struct {
+			Client WsClient `yaml:"client"`
+		}
+		if err := yaml.Unmarshal([]byte(y), &w); err != nil {
+			t.Fatalf("unmarshal %q: %v", y, err)
+		}
+		got := w.Client.DirectPlainUDP
+		switch {
+		case want == nil && got != nil:
+			t.Fatalf("%q: got %v, want nil", y, *got)
+		case want != nil && got == nil:
+			t.Fatalf("%q: got nil, want %v", y, *want)
+		case want != nil && got != nil && *want != *got:
+			t.Fatalf("%q: got %v, want %v", y, *got, *want)
+		}
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// TestListenProtocolPrefix 覆盖 listen 字段的协议前缀解析(ClientDirect/ServerForward
+// 共用同一套 splitListenScheme/protoWantTCP/protoWantUDP/protoValid): 不写前缀按
+// tcp 处理(向后兼容旧配置写法), tcp://、udp://、both:// 各自决定要不要起 TCP/UDP
+// 入口, 写了不认识的前缀要能被 ValidProtocol() 识别出来而不是静默当 tcp。
+func TestListenProtocolPrefix(t *testing.T) {
+	cases := []struct {
+		listen    string
+		wantAddr  string
+		wantProto string
+		wantTCP   bool
+		wantUDP   bool
+		wantValid bool
+	}{
+		{":13389", ":13389", "", true, false, true},
+		{"tcp://:13389", ":13389", "tcp", true, false, true},
+		{"udp://:13389", ":13389", "udp", false, true, true},
+		{"both://:13389", ":13389", "both", true, true, true},
+		{"bogus://:13389", ":13389", "bogus", true, false, false}, // WantTCP 无所谓, ValidProtocol 说了算
+	}
+	for _, c := range cases {
+		t.Run(c.listen, func(t *testing.T) {
+			d := ClientDirect{Listen: c.listen}
+			if got := d.Addr(); got != c.wantAddr {
+				t.Errorf("ClientDirect.Addr() = %q, want %q", got, c.wantAddr)
+			}
+			if got := d.Protocol(); got != c.wantProto {
+				t.Errorf("ClientDirect.Protocol() = %q, want %q", got, c.wantProto)
+			}
+			if got := d.WantUDP(); got != c.wantUDP {
+				t.Errorf("ClientDirect.WantUDP() = %v, want %v", got, c.wantUDP)
+			}
+			if got := d.ValidProtocol(); got != c.wantValid {
+				t.Errorf("ClientDirect.ValidProtocol() = %v, want %v", got, c.wantValid)
+			}
+			if c.wantValid {
+				if got := d.WantTCP(); got != c.wantTCP {
+					t.Errorf("ClientDirect.WantTCP() = %v, want %v", got, c.wantTCP)
+				}
+			}
+
+			f := ServerForward{Listen: c.listen}
+			if got := f.Addr(); got != c.wantAddr {
+				t.Errorf("ServerForward.Addr() = %q, want %q", got, c.wantAddr)
+			}
+			if got := f.Protocol(); got != c.wantProto {
+				t.Errorf("ServerForward.Protocol() = %q, want %q", got, c.wantProto)
+			}
+			if got := f.WantUDP(); got != c.wantUDP {
+				t.Errorf("ServerForward.WantUDP() = %v, want %v", got, c.wantUDP)
+			}
+			if got := f.ValidProtocol(); got != c.wantValid {
+				t.Errorf("ServerForward.ValidProtocol() = %v, want %v", got, c.wantValid)
+			}
+		})
+	}
+}
+
+// TestListenProtocolPrefixYAML 确认协议前缀写进 YAML 后能原样解出来——"://" 里的
+// 冒号不能被 YAML 误当成键值分隔符解析掉(实际写法建议加引号, 这里连未加引号的写法
+// 也一并测一遍, 确认不引号也不会被拆坏)。
+func TestListenProtocolPrefixYAML(t *testing.T) {
+	y := `
+client:
+  direct:
+    - listen: "both://:13389"
+      email: c@example.com
+      port: 3389
+    - listen: udp://:13390
+      email: c@example.com
+      port: 3390
+`
+	var w struct {
+		Client WsClient `yaml:"client"`
+	}
+	if err := yaml.Unmarshal([]byte(y), &w); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(w.Client.Direct) != 2 {
+		t.Fatalf("got %d direct rules, want 2", len(w.Client.Direct))
+	}
+	if got := w.Client.Direct[0].Protocol(); got != "both" {
+		t.Errorf("quoted both://: Protocol() = %q, want \"both\"", got)
+	}
+	if got := w.Client.Direct[0].Addr(); got != ":13389" {
+		t.Errorf("quoted both://: Addr() = %q, want \":13389\"", got)
+	}
+	if got := w.Client.Direct[1].Protocol(); got != "udp" {
+		t.Errorf("unquoted udp://: Protocol() = %q, want \"udp\"", got)
+	}
+	if got := w.Client.Direct[1].Addr(); got != ":13390" {
+		t.Errorf("unquoted udp://: Addr() = %q, want \":13390\"", got)
+	}
+}
+
 // TestWebsocketClientList 确认 Websocket.ClientList() 的合并/回退逻辑:
 // 配了 clients 就用 clients(忽略旧 client); 只配旧 client 时回退为单元素列表;
 // 都不配(或旧 client.connect 为空)时返回空, 不应凭空多出一条要连接的 server。
@@ -267,7 +399,7 @@ func TestWsClientWantsPersistentConnect(t *testing.T) {
 		{"nothing configured", WsClient{}, false},
 		{"subscribe", WsClient{Subscribe: []Subscribe{{Key: "k", Val: "v"}}}, true},
 		{"forward", WsClient{Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, true},
-		{"direct rule", WsClient{Direct: []ClientDirect{{Listen: ":1", Email: "a@example.com", Port: 1}}}, true},
+		{"direct rule", WsClient{Direct: []ClientDirect{{Listen: ":1", Email: "a@example.com", ForwardPort: 1}}}, true},
 		{"directAccept", WsClient{DirectAccept: true}, true},
 		{"receive.dir", WsClient{Receive: ClientReceive{Dir: "/data"}}, true},
 		{"sendRecvOnly alone", WsClient{SendRecvOnly: true}, false},

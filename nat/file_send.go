@@ -127,11 +127,20 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	switch via {
 	case ViaDirect:
 		// 一次直连, 所有文件共用 —— 每个文件(或每一块)占一条 stream, 不必反复打洞。
-		rule := conf.ClientDirect{Email: toEmail, Port: directFilePort}
+		//
+		// ensureSession 内部打洞/握手的过程日志全部挂在 directPeer.quiet 后面(见
+		// nat/direct.go 的 logf), 一次性命令默认不显示——不加这两行的话, 用户在打洞
+		// 期间会看着终端空等好几秒, 不知道卡在哪一步、打了多久、连的是哪个地址。这两行
+		// 独立于那套调试日志之外, 一次性命令默认就该看到。
+		fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", toEmail)
+		punchStart := time.Now()
+		rule := conf.ClientDirect{Email: toEmail, ForwardPort: directFilePort}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was sent: %w", toEmail, err)
 		}
+		fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
+			toEmail, sess.addr, time.Since(punchStart).Round(time.Millisecond))
 		quicStats = sess.stats
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
 			return sender.peer.sendFile(sess, it, onProgress)
@@ -330,9 +339,9 @@ func newChunkProgress(n int, p *progress) *chunkProgress {
 }
 
 func (c *chunkProgress) update(i int, sent int64) {
-	// progress.update 本身不是并发安全的(设计上只有一个文件的一条连接会调它)——
-	// 分块并行时多个块各自的 goroutine 都会跑到这里, 所以锁要一直拿到调完 p.update
-	// 为止, 不能算完 total 就先放开, 不然多个块的 update 调用还是会互相踩。
+	// progress.update 自己虽然是并发安全的(只是记一个值, 见其定义), 但这里的
+	// each[i] 是所有分块共用同一个 slice——一个块写自己的 each[i] 的同时, 另一个块
+	// 可能正在为了算 total 读整个 slice, 不加锁就是数据竞争, 所以要靠这把锁串行化。
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.each[i] = sent
@@ -345,36 +354,75 @@ func (c *chunkProgress) update(i int, sent int64) {
 
 // ---------- 进度输出 ----------
 
+// progressTick 进度行的渲染间隔。定时渲染而不是"有新字节才画"——否则网络卡住后
+// update() 不会再被调用, 界面就会停在卡住前算出的最后一个速率上, 看着像"卡在高速"
+// 而不是真实地掉到 0(见 newProgress/render 的说明)。
+const progressTick = 200 * time.Millisecond
+
 // progress 单个文件的进度条, 输出到 stderr。
 //
-// 限流刷新: 千兆下一次 io.Copy 循环就是 256KB, 不限流的话每秒要打几千行, 光是写
-// 终端就能拖慢传输本身。
+// update() 只负责记一个最新的 sent 值, 真正渲染在 newProgress 起的后台 goroutine
+// 里按 progressTick 定时进行, 二者用 mu 解耦——中继路径下 update 现在是从
+// localReadPump 那个后台 goroutine 回调进来的(见 nat/file_relay.go 的 onAcked),
+// 不能假设只有一个 goroutine 会碰 sent。
 type progress struct {
-	prefix   string
-	total    int64
-	start    time.Time
-	last     time.Time
+	prefix string
+	total  int64
+
+	mu       sync.Mutex
+	sent     int64
 	lastSent int64
+	last     time.Time
 	shown    bool
+
+	stop     chan struct{}
+	loopDone chan struct{}
 }
 
 func newProgress(prefix string, total int64) *progress {
-	now := time.Now()
-	return &progress{prefix: prefix, total: total, start: now, last: now}
+	p := &progress{
+		prefix: prefix, total: total, last: time.Now(),
+		stop: make(chan struct{}), loopDone: make(chan struct{}),
+	}
+	go p.loop()
+	return p
 }
 
 func (p *progress) update(sent int64) {
-	now := time.Now()
-	if now.Sub(p.last) < 200*time.Millisecond {
-		return
+	p.mu.Lock()
+	p.sent = sent
+	p.mu.Unlock()
+}
+
+// loop 按 progressTick 定时渲染, 直到 done() 发出停止信号。
+func (p *progress) loop() {
+	defer close(p.loopDone)
+	ticker := time.NewTicker(progressTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			p.render()
+		case <-p.stop:
+			return
+		}
 	}
+}
+
+func (p *progress) render() {
+	p.mu.Lock()
+	sent := p.sent
+	now := time.Now()
 	// 显示的是**这一小段区间**的速率, 不是从头到现在的累计平均: 排查限速/拥塞退避
 	// 时要看的是"现在多快、有没有往下掉", 累计平均会把开头的高速和后面的骤降拉平抹
-	// 掉, 看着一直是个温吞的数字, 分不清是从来没快过还是快过又掉了下去。
+	// 掉, 看着一直是个温吞的数字, 分不清是从来没快过还是快过又掉了下去。定时渲染下,
+	// 这一小段区间没有新字节时, sent-lastSent 就是 0, 速率如实显示成 0, 不会停留在
+	// 卡住前的旧值上。
 	instRate := rate(sent-p.lastSent, now.Sub(p.last))
 	p.lastSent = sent
 	p.last = now
 	p.shown = true
+	p.mu.Unlock()
 	pct := 0.0
 	if p.total > 0 {
 		pct = float64(sent) * 100 / float64(p.total)
@@ -383,9 +431,15 @@ func (p *progress) update(sent int64) {
 		p.prefix, humanBytes(sent), humanBytes(p.total), pct, instRate)
 }
 
-// done 收尾: 把进度那一行擦掉, 让后面的结果行从行首开始打。
+// done 收尾: 先停掉渲染 goroutine 并等它退出(避免和下面的擦行打印互相踩踏), 再把
+// 进度那一行擦掉, 让后面的结果行从行首开始打。
 func (p *progress) done() {
-	if p.shown {
+	close(p.stop)
+	<-p.loopDone
+	p.mu.Lock()
+	shown := p.shown
+	p.mu.Unlock()
+	if shown {
 		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 100))
 	}
 }

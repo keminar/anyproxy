@@ -103,30 +103,39 @@ type Subscribe struct {
 
 // ServerForward 服务端(tunnel侧)裸TCP端口转发入口(内网穿透)。
 // 在 Listen 端口起裸TCP监听, 每个连接经websocket转发给该 Email 的订阅方。
+//
+// Listen 可以带协议前缀, 形如 "both://:2222"(等价的还有 "tcp://"/"udp://", 不写
+// 前缀按 tcp): 协议直接写在监听地址前面, 一眼就能看出"这个监听口子是什么协议",
+// 不需要跳到另一个字段才能拼出完整含义——之前 Protocol 是与 Listen 分开的独立字段,
+// 两者的关系只能靠读代码/文档才知道。方法 Protocol()/Addr() 从 Listen 里解出这两半,
+// Addr() 是真正喂给 net.Listen/net.ResolveUDPAddr 的那部分(前缀已经剥掉)。
+//
+// 两种协议在这条中继路径上**各走各的**, 不共用一条通道: TCP 仍旧经 websocket
+// 转发, UDP 另起一条 UDP 中继(见 nat/relay_udp.go)。绝不能把 UDP 塞进 websocket
+// —— 那是 TCP, 会给每个数据报强加重传与保序, 把 RDP 的 UDP 通道特意要绕开的
+// 队头阻塞又请回来, 只会更卡。
+//
+// both 用于 RDP: mstsc 的主通道是 TCP 3389, RDP 8+ 的图形通道另用同号 UDP 3389,
+// 只转发 TCP 等于把后者堵死。入口两个监听同号, 客户端不用改配置。
 type ServerForward struct {
-	Listen string `yaml:"listen"` //监听地址, 如 ":2222"
+	Listen string `yaml:"listen"` //监听地址, 可带协议前缀, 如 ":2222"、"both://:2222"
 	Email  string `yaml:"email"`  //转发给此email的订阅方
-
-	// Protocol 入口协议: tcp(默认) / udp / both, 取值同 ClientDirect.Protocol。
-	//
-	// 两种协议在这条中继路径上**各走各的**, 不共用一条通道: TCP 仍旧经 websocket
-	// 转发, UDP 另起一条 UDP 中继(见 nat/relay_udp.go)。绝不能把 UDP 塞进 websocket
-	// —— 那是 TCP, 会给每个数据报强加重传与保序, 把 RDP 的 UDP 通道特意要绕开的
-	// 队头阻塞又请回来, 只会更卡。
-	//
-	// both 用于 RDP: mstsc 的主通道是 TCP 3389, RDP 8+ 的图形通道另用同号 UDP 3389,
-	// 只转发 TCP 等于把后者堵死。入口两个监听同号, 客户端不用改配置。
-	Protocol string `yaml:"protocol"`
 }
 
+// Protocol 从 Listen 的协议前缀解出协议名; 没写前缀返回空串(WantTCP 按 tcp 处理)。
+func (f ServerForward) Protocol() string { proto, _ := splitListenScheme(f.Listen); return proto }
+
+// Addr 去掉协议前缀后的监听地址, 真正喂给 net.Listen/net.ResolveUDPAddr 用。
+func (f ServerForward) Addr() string { _, addr := splitListenScheme(f.Listen); return addr }
+
 // WantTCP 是否要起 TCP 入口(经 websocket 中继)。留空按 tcp 处理, 与旧配置一致。
-func (f ServerForward) WantTCP() bool { return protoWantTCP(f.Protocol) }
+func (f ServerForward) WantTCP() bool { return protoWantTCP(f.Protocol()) }
 
 // WantUDP 是否要起 UDP 中继入口。
-func (f ServerForward) WantUDP() bool { return protoWantUDP(f.Protocol) }
+func (f ServerForward) WantUDP() bool { return protoWantUDP(f.Protocol()) }
 
-// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
-func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol) }
+// ValidProtocol 配置里写了不认识的前缀时要能报出来, 而不是静默退化成 tcp。
+func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol()) }
 
 // ClientForward 订阅方(proxy侧)裸TCP端口转发目标。
 // 收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
@@ -137,26 +146,49 @@ type ClientForward struct {
 }
 
 // ClientDirect 订阅方(A侧)的直连入口规则: 在本机 Listen 起裸TCP监听, 进来的连接不再经
-// 服务端中转, 而是用 QUIC 直接连到 Email 对应的另一个订阅方(C), 由对方按 Port 查它
-// 自己的 client.forward[port] 决定 dial 哪个内网目标。
+// 服务端中转, 而是用 QUIC 直接连到 Email 对应的另一个订阅方(C), 由对方按 ForwardPort
+// 查它自己的 client.forward[port] 决定 dial 哪个内网目标。
 //
 // 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
 // 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
+//
+// Listen 可以带协议前缀, 形如 "both://:13389"(等价的还有 "tcp://"/"udp://", 不写
+// 前缀按 tcp): 协议与要监听的地址写在一起, 一眼就能看出这个监听口子是什么协议——
+// 之前 Protocol 是与 Listen 分开的独立字段, 两者的关系只能靠读代码/文档才知道。
+//
+// 两种协议在 QUIC 上的承载不同, 语义才对得上: TCP 走 stream(可靠有序), UDP 走
+// datagram(不可靠无序, RFC 9221)。不能拿 stream 扛 UDP —— 那会给 UDP 强加重传与
+// 保序, 把队头阻塞又请回来。
+//
+// both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
+// UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
+//
+// ForwardPort 不是"拨到内网目标的端口"、也不是这条 Listen 自己的端口——容易被
+// 当成前者, 因为名字里有个 port。它选的是 C 自己 client.forward[] 表里的哪一条
+// 规则, 真正 dial 哪个内网 target 由 C 的配置决定, A 这边填错/乱填只会被 C 拒绝。
+// 这是故意设计成白名单: 没有它, A 只凭 Email 就能让 C 转发到 C 配过的**任意**
+// 内网目标, 相当于把 C 的全部转发表都开放给对面; 有了它, C 只认自己在 forward
+// 里列出的端口号, A 连不认识的目标都摸不到。
 type ClientDirect struct {
-	Listen string `yaml:"listen"` //本机入口监听地址, 如 ":13389"
-	Email  string `yaml:"email"`  //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
-	Port   uint16 `yaml:"port"`   //告诉对方要用哪条 client.forward[port] 规则, 对方未映射该端口即拒绝
-
-	// Protocol 入口与落地要还原的协议: tcp(默认) / udp / both。
-	//
-	// 两种协议在 QUIC 上的承载不同, 语义才对得上: TCP 走 stream(可靠有序), UDP 走
-	// datagram(不可靠无序, RFC 9221)。不能拿 stream 扛 UDP —— 那会给 UDP 强加重传与
-	// 保序, 把队头阻塞又请回来。
-	//
-	// both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
-	// UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
-	Protocol string `yaml:"protocol"`
+	Listen      string `yaml:"listen"`      //本机入口监听地址, 可带协议前缀, 如 ":13389"、"both://:13389"
+	Email       string `yaml:"email"`       //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
+	ForwardPort uint16 `yaml:"forwardPort"` //选用 C 的 client.forward[] 里哪一条规则(白名单选号, 不是目标端口), 对方未映射该端口即拒绝
 }
+
+// Protocol 从 Listen 的协议前缀解出协议名; 没写前缀返回空串(WantTCP 按 tcp 处理)。
+func (d ClientDirect) Protocol() string { proto, _ := splitListenScheme(d.Listen); return proto }
+
+// Addr 去掉协议前缀后的监听地址, 真正喂给 net.Listen/net.ResolveUDPAddr 用。
+func (d ClientDirect) Addr() string { _, addr := splitListenScheme(d.Listen); return addr }
+
+// WantTCP 是否要起 TCP 入口。留空按 tcp 处理, 保持与旧配置一致。
+func (d ClientDirect) WantTCP() bool { return protoWantTCP(d.Protocol()) }
+
+// WantUDP 是否要起 UDP 入口。
+func (d ClientDirect) WantUDP() bool { return protoWantUDP(d.Protocol()) }
+
+// ValidProtocol 配置里写了不认识的前缀时要能报出来, 而不是静默退化成 tcp。
+func (d ClientDirect) ValidProtocol() bool { return protoValid(d.Protocol()) }
 
 // 入口支持的协议取值。直连入口(ClientDirect)与中继入口(ServerForward)共用。
 const (
@@ -164,6 +196,17 @@ const (
 	ProtoUDP  = "udp"
 	ProtoBoth = "both"
 )
+
+// splitListenScheme 从 "scheme://addr" 里拆出协议前缀和真正的监听地址。没写
+// scheme(不含 "://")时协议按空串处理(WantTCP 等就地当 tcp), addr 就是原始整串。
+// 前缀本身合不合法(是不是 tcp/udp/both 之一)不在这里判断, 交给 protoValid ——
+// 拆分和校验分开, 写错前缀时调用方才能把原始值如实打进错误日志。
+func splitListenScheme(raw string) (proto, addr string) {
+	if i := strings.Index(raw, "://"); i >= 0 {
+		return raw[:i], raw[i+3:]
+	}
+	return "", raw
+}
 
 func protoWantTCP(p string) bool { return p == "" || p == ProtoTCP || p == ProtoBoth }
 func protoWantUDP(p string) bool { return p == ProtoUDP || p == ProtoBoth }
@@ -174,15 +217,6 @@ func protoValid(p string) bool {
 	}
 	return false
 }
-
-// WantTCP 是否要起 TCP 入口。留空按 tcp 处理, 保持与旧配置一致。
-func (d ClientDirect) WantTCP() bool { return protoWantTCP(d.Protocol) }
-
-// WantUDP 是否要起 UDP 入口。
-func (d ClientDirect) WantUDP() bool { return protoWantUDP(d.Protocol) }
-
-// ValidProtocol 配置里写了不认识的值时要能报出来, 而不是静默退化成 tcp。
-func (d ClientDirect) ValidProtocol() bool { return protoValid(d.Protocol) }
 
 // ClientReceive 订阅方与别人交换文件的目录。不配 Dir 就收发一律拒绝。
 //
@@ -281,10 +315,19 @@ func (s WsServer) LookupUser(user string) (ServerUser, bool) {
 type WsClient struct {
 	Connect string `yaml:"connect"` //连接的 ip:端口
 	Host    string `yaml:"host"`    //connect 的域名(Host头)
-	User    string `yaml:"user"`    //认证用户(发给服务端)
-	Pass    string `yaml:"pass"`    //密码(与 key 二选一)
-	Key     string `yaml:"key"`     //Ed25519 私钥(base64), 与 pass 二选一; 两者都配时优先用 key。见 ServerUser.Key
-	Email   string `yaml:"email"`   //Email用于定位用户, 不鉴权
+
+	// Proxy 经由的上游 HTTP/SOCKS5 代理, 格式 scheme://host:port(scheme 为 socks5 或
+	// http)。用于 Connect 是内网/回环地址、不直接可达的场景: 让本机先连 B 已经暴露的
+	// 代理端口, 由那个代理 CONNECT/SOCKS5 到 B 本机的 Connect 地址(通常是绑在
+	// 127.0.0.1 的 websocket.server.listen), B 从而只需要暴露一个代理端口, 不用再
+	// 单独开 ws 端口。不配则保持原来的直连行为(bypassDial)。
+	// 和 Connect 一样只在启动/每次重连时取一次, 不参与热加载(见 liveAuthCfg)。
+	Proxy string `yaml:"proxy"`
+
+	User  string `yaml:"user"`  //认证用户(发给服务端)
+	Pass  string `yaml:"pass"`  //密码(与 key 二选一)
+	Key   string `yaml:"key"`   //Ed25519 私钥(base64), 与 pass 二选一; 两者都配时优先用 key。见 ServerUser.Key
+	Email string `yaml:"email"` //Email用于定位用户, 不鉴权
 
 	// UUID 这份配置的身份凭证, 只在 A、C 两端之间使用, B 完全不感知(既不存也不转发,
 	// 见 nat/file.go、nat/file_relay.go)。对端要收自己发的文件, 得把这个值连同 Email
@@ -304,6 +347,63 @@ type WsClient struct {
 	DirectAccept bool           `yaml:"directAccept"` //true 时起 QUIC 监听并把端点通告给服务端, 允许其它订阅方直连自己
 	Direct       []ClientDirect `yaml:"direct"`       //本机直连入口规则(见 ClientDirect)
 	Receive      ClientReceive  `yaml:"receive"`      //接收传来的文件(见 ClientReceive); 打洞直连(-via direct)要同时开 directAccept, 走服务端中继(-via relay)则不需要
+
+	// DirectEncrypt 为 true 时, 本机作为打洞发起方(A)时发出的打洞控制包
+	// (PUNCH/PONG)都会用本机与对端共享的 uuid 加密, 防止运营商设备按明文里
+	// "ANYPROXY-DIRECT-PUNCH" 这类可见 ASCII 特征串识别并丢弃。
+	//
+	// 按 client 一次性开关, 不是每条 direct[] 规则单独配: 这台机器发起的所有打洞
+	// (无论是 direct[] 里的端口转发规则, 还是 -send/-recv 文件传输)共用同一个
+	// UUID 身份, 也就没有必要、也没有办法按目标区分"这次要不要加密"——同一份
+	// uuid 对不同对端要么都配对了 receive.allow, 要么没配, 开关本身没有"只对某个
+	// 对端生效"的意义。原先挂在 ClientDirect.Encrypt 下(每条 direct 规则单独配)
+	// 就是这个原因导致 -send/-recv 用不上它: 那条路径不走 direct[] 规则, 现场拼的
+	// ClientDirect 里自然没有这一项。收在 WsClient 上之后两条路径共用同一个开关。
+	//
+	// 纯 opt-in: 默认 false 时协议与之前完全一样(明文), 零行为变化。打开前必须
+	// 确认: 1) 本机 websocket.client.uuid 已生成(自动生成, 不可手配); 2) 已经把
+	// 这个 uuid 连同本机 email 配进了对端(direct[] 规则的 Email, 或 -send/-recv
+	// 的目标 email)那台机器的 websocket.client.receive.allow。任一条件不满足,
+	// 打洞会直接失败并在错误信息里说明原因, 不会静默退化成明文(退化会让防 DPI
+	// 的初衷本身失效)。
+	DirectEncrypt bool `yaml:"directEncrypt"`
+
+	// DirectPortmap 为 true 时, 直连候选收集(nat/direct_reflect.go 的
+	// gatherCandidates)才会去尝试 UPnP/PCP/NAT-PMP 端口映射; 默认 false 不试。
+	//
+	// 默认关掉的原因: 这三种协议对家用路由器的命中率很低(多数默认关闭或路由器压根
+	// 不支持), 探测本身还要等三个协议各自的超时(实测能占掉 gatherCandidates 一两秒),
+	// 大多数情况下只是让日志多刷三行失败原因、让直连多等一会, 却几乎从没真正提供过
+	// 一条候选。它唯一能救的场景是对称 NAT(反射器探到的端口对第三方没用, 只能靠路由器
+	// 直接开洞), 救不了 CGNAT(见 docs/websocket.md「端口映射能救什么、不能救什么」)——
+	// 用得上的人不多, 不该让多数用户都为它多等这一两秒。确认自己路由器支持、且怀疑自己
+	// 是对称 NAT 时再打开。
+	DirectPortmap bool `yaml:"directPortmap"`
+
+	// DirectLanAddrs 手工配置本机的局域网/内网 IP(不带端口), 让直连候选收集
+	// (nat/direct_reflect.go 的 gatherCandidates)额外把 "这个 IP + 本机当前 QUIC
+	// 端口" 拼成一条候选, 跟反射器观测到的公网候选一起参与打洞/QUIC 拨号竞速。
+	//
+	// 只填 IP、不填端口: 端口是当场探测/按需起监听决定的, 会随连接生命周期变化
+	// (见 directPeer 的 ensureAccept/stopAccept), 用户填了也会作废, 干脆不让填。
+	//
+	// 故意不做网卡扫描去自动发现: 一台机器常有多张网卡(物理网卡、容器桥接、VPN
+	// 虚拟网卡等), 自动枚举出来的地址里大多数对对端毫无意义, 徒增候选噪音和打洞
+	// 次数; 而真正有用的那一个(两台机器实际共享的局域网段), 用户自己一眼就知道,
+	// 不如让用户显式指定。不可达的地址不会造成任何问题——跟其它候选一样, 打洞/
+	// 拨号超时静默落选, 不影响其它候选(见 nat/direct_candidate.go 的择优逻辑)。
+	DirectLanAddrs []string `yaml:"directLanAddrs"`
+
+	// DirectPlainUDP 覆盖命令行 -direct-plain-udp 对这一条连接的默认值(见
+	// config.DirectPlainUDP 的注释——为什么会有人想主动关掉 quic-go 的 UDP 快速
+	// 路径)。三态: 不配(nil)时跟随 -direct-plain-udp 的全局值; 显式 true/false 时
+	// 以这条为准, 不管全局开没开。
+	//
+	// 需要覆盖的场景: 一台机器上配了多条 websocket.client(clients 数组), 分别走不同
+	// 的本机网卡/网络路径——快速路径的问题(如果有)通常是某张网卡驱动的锅, 不是所有
+	// 路径都会撞上, 不该为了绕开一条路径上的问题而牺牲其它路径本来正常的批量收发
+	// 优化。
+	DirectPlainUDP *bool `yaml:"directPlainUdp"`
 
 	// SendRecvOnly true 时强制这条 client 配置只用来给 -send/-recv 命令行取凭证
 	// (以及生成/持久化上面的 UUID), 常驻的 anyproxy 进程不会为它发起 websocket 连接

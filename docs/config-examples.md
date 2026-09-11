@@ -372,13 +372,24 @@ websocket:
     pass: OfficePass1234567890
     email: office@example.com
     direct:
-      - listen: ":13389"        # 本机入口，mstsc 连这里
+      - listen: "both://:13389" # 本机入口，mstsc 连这里；协议前缀 tcp://(默认,可不写)/udp://both://，RDP 8+ 用 both://
         email: home@example.com # 直连到这个 email 的订阅端
-        port: 3389               # 用对方 forward 里的哪条规则
-        protocol: both            # tcp(默认) / udp / both；RDP 8+ 用 both
+        forwardPort: 3389        # 选对方 forward[] 里的哪条规则(白名单选号)，不是内网目标端口；对方没配这个号就拒绝
 ```
 
 用法：`mstsc` 连 `127.0.0.1:13389`，实际字节走 A↔C 的 QUIC 直连，不经服务端。打洞失败就直接失败（连接被关掉，日志写明每条候选卡在哪），**没有中继回落**——要经中继就照 8.2 配 `server.forward`，两条路径互不兜底。字段与打洞机制详见 [websocket.md](websocket.md#配置字段)。
+
+**运营商按明文特征丢打洞包时**：给这条 `direct` 规则加 `encrypt: true`（要求对端 `receive.allow` 配好本机 `uuid`），详见 [websocket.md](websocket.md#打洞控制包加密encrypt)：
+
+```yaml
+    direct:
+      - listen: "both://:13389"
+        email: home@example.com
+        forwardPort: 3389
+        encrypt: true
+```
+
+**两台机器其实在同一局域网**时，可以用 `websocket.client.directLanAddrs` 手工把本机内网 IP 加为候选（不做网卡自动扫描），让直连优先走内网而不是绕公网，详见 [websocket.md](websocket.md#多条路同时打谁通用谁)。
 
 ### 8.6 直连收发文件（不依赖对端装 sshd/rsync）
 

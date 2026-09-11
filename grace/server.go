@@ -248,7 +248,7 @@ func (srv *Server) getListener(laddr string) (l *net.TCPListener, err error) {
 		// 否则改了 listen 后 SIGHUP 平滑重启不会生效(继续监听旧地址)。这里发现
 		// 地址不一致就放弃继承, 关掉旧 fd 改在新地址上重新监听。
 		if oldAddr, ok := l.Addr().(*net.TCPAddr); ok && !sameTCPAddr(oldAddr, wantAddr) {
-			log.Println(os.Getpid(), "listen addr changed:", oldAddr, "->", wantAddr, ", 放弃继承旧 fd, 重新监听")
+			log.Println(os.Getpid(), "listen addr changed:", oldAddr, "->", wantAddr, ", abandoning inherited fd, listening fresh")
 			l.Close() // 关闭 net.FileListener 内部 dup 出的 fd
 			f.Close() // net.FileListener 会 dup fd, 原始继承的 fd 3 需要单独关闭, 否则泄漏
 			l, err = net.ListenTCP(srv.Network, wantAddr)

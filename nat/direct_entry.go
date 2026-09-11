@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/keminar/anyproxy/utils/conf"
@@ -31,7 +32,7 @@ func (d *directPeer) startEntries(rules []conf.ClientDirect) {
 		if !r.ValidProtocol() {
 			// 写错协议名不能静默按 tcp 处理: 配了 udp 却只起 TCP, 现象是"RDP 能连但
 			// 依旧卡", 极难往配置上想。
-			d.logf("skip direct rule %s: unknown protocol %q (want tcp/udp/both)", r.Listen, r.Protocol)
+			d.logf("skip direct rule %s: unknown protocol %q (want tcp://, udp://, both://, or no prefix for tcp)", r.Listen, r.Protocol())
 			continue
 		}
 		if r.WantTCP() {
@@ -44,12 +45,12 @@ func (d *directPeer) startEntries(rules []conf.ClientDirect) {
 }
 
 func (d *directPeer) listenEntry(r conf.ClientDirect) {
-	ln, err := net.Listen("tcp", r.Listen)
+	ln, err := net.Listen("tcp", r.Addr())
 	if err != nil {
 		d.logf("direct entry listen %s failed: %v", r.Listen, err)
 		return
 	}
-	d.logf("direct entry listening on %s -> email %s (port %d)", r.Listen, r.Email, r.Port)
+	d.logf("direct entry listening on %s -> email %s (port %d)", r.Listen, r.Email, r.ForwardPort)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -68,7 +69,7 @@ func (d *directPeer) handleEntry(conn net.Conn, r conf.ClientDirect) {
 	id := uint(forwardInc.ID())
 	src := conn.RemoteAddr()
 	start := time.Now()
-	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry accept %s -> email %s (port %d)", src, r.Email, r.Port))
+	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry accept %s -> email %s (port %d)", src, r.Email, r.ForwardPort))
 
 	sess, stream, err := d.openStream(r)
 	if err != nil {
@@ -95,18 +96,18 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 	}
 	// 连接已在 ensureSession 里认证过, 数据流不必再带凭证。QUIC 的 stream 相互独立,
 	// 一条连接上并发多个会话不会像单条 TCP 复用那样互相队头阻塞。
-	stream, err := d.openHeadedStream(sess, directStreamData, "", r.Port)
+	stream, err := d.openHeadedStream(sess, directStreamData, "", r.ForwardPort)
 	if err == nil {
 		return sess, stream, nil
 	}
 	// 连接可能已被对端关掉、空闲回收掉或超时老化, 丢弃后完整重建一次。
-	d.dropSession(r.Email, sess, r.Port)
+	d.dropSession(r.Email, sess, r.ForwardPort)
 	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Email, err)
 	sess, err = d.ensureSession(r)
 	if err != nil {
 		return nil, nil, err
 	}
-	stream, err = d.openHeadedStream(sess, directStreamData, "", r.Port)
+	stream, err = d.openHeadedStream(sess, directStreamData, "", r.ForwardPort)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -116,7 +117,7 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 // ensureSession 取一条**已认证**的 QUIC 连接: 有就复用, 没有就走一遍信令 + 拨号 + 鉴权。
 // TCP 与 UDP 两条通路共用它。
 func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) {
-	if sess := d.session(r.Email, r.Port); sess != nil {
+	if sess := d.session(r.Email, r.ForwardPort); sess != nil {
 		return sess, nil
 	}
 	// A 侧也需要自己的 socket: QUIC 从它拨出去, 它的端点还要报给服务端, 好让 C 朝它
@@ -130,17 +131,26 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 		return nil, err
 	}
 	// 多条候选同时打洞, 按 RTT + 地址类型偏置选出最优的那条, 再只对它做一次 QUIC 拨号。
-	// 不对每条候选都拨 QUIC: 那是 N 次完整握手, 而打洞包一来一回就够判断通不通与快慢。
-	winner, err := d.pickPeerAddr(r.Email, offer.PeerAddrs)
+	// 不是每条候选都拨 QUIC: 打洞包一来一回就够判断通不通与快慢, 通常犯不着为选路
+	// 多付出 N 次完整握手的成本。
+	var sess *directSession
+	winner, punchErr := d.pickPeerAddr(r.Email, token, offer.PeerAddrs)
+	if punchErr == nil {
+		sess, err = d.connectPeer(tr, r.Email, winner.Addr, offer.Fingerprint, r.ForwardPort)
+	} else {
+		// 打洞全灭才退这一步: 有状态防火墙/运营商设备可能按明文特征拦了自定义 PUNCH
+		// 协议, 但同一个 socket 上真实的 QUIC Initial 包(标准 TLS 1.3 握手)不容易被
+		// 针对性拦截。不再像以前那样从候选列表里盲选一条去赌, 而是对**所有**候选并行
+		// 发起真实拨号竞速, 谁先握手成功用谁(见 raceQUICDial)。
+		d.logf("path selection for %s: punch all failed (%v), falling back to a quic dial race across all candidates",
+			r.Email, punchErr)
+		sess, err = d.raceQUICDial(tr, r.Email, offer.Fingerprint, offer.PeerAddrs, r.ForwardPort)
+	}
 	if err != nil {
 		return nil, err
 	}
-	sess, err := d.connectPeer(tr, r.Email, winner.Addr, offer.Fingerprint, r.Port)
-	if err != nil {
-		return nil, err
-	}
-	if err := d.authenticateSession(sess, token, r.Port); err != nil {
-		d.dropSession(r.Email, sess, r.Port)
+	if err := d.authenticateSession(sess, token, r.ForwardPort); err != nil {
+		d.dropSession(r.Email, sess, r.ForwardPort)
 		return nil, err
 	}
 	// 回程 datagram 的分发依赖这条 goroutine, TCP-only 的连接上它只是空转等关闭。
@@ -191,7 +201,7 @@ func (d *directPeer) udpSession(r conf.ClientDirect, e *directUDPEntry) (*direct
 	if err != nil {
 		return nil, err
 	}
-	sess.bindUDPEntry(r.Port, e)
+	sess.bindUDPEntry(r.ForwardPort, e)
 	return sess, nil
 }
 
@@ -202,6 +212,13 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	token, err := newDirectToken()
 	if err != nil {
 		return "", offer, err
+	}
+	// 打洞加密准备放在最前面: 配置有误(uuid 缺失/非法)就直接失败, 不用先浪费一趟
+	// 候选收集与信令往返。isInitiator=true: 用自己的 uuid, 不需要查表。按 client
+	// 一次性开关(d.cfg.DirectEncrypt), 不是按 r 这条规则单独配——同一个 uuid 身份
+	// 发起的所有打洞(direct[] 规则或 -send/-recv)共用同一个决定。
+	if errMsg := d.prepareDirectCrypto(token, d.cfg.DirectEncrypt, true, ""); errMsg != "" {
+		return "", offer, errors.New(errMsg)
 	}
 	// 每次都重新收集候选: 隐私临时地址会轮换、NAT 映射会老化重建, 上一次的结果可能
 	// 已经作废。多条路并行探, 少一条不影响其它条。
@@ -224,11 +241,13 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	}()
 
 	// 把本端的地址都打出来: 本地 socket 端口用于抓包定位, 各候选用于判断哪些路探到了、
-	// 哪些没探到 —— 排查直连问题时这些缺一不可。
-	d.logf("requesting %s: local socket port %d, my candidates %v", r.Email, d.localUDPPort(), myCands)
+	// 哪些没探到 —— 排查直连问题时这些缺一不可。encrypt 一起打出来, 排查"punch 是不是
+	// 用了加密"不用再翻配置反推。
+	d.logf("requesting %s: local socket port %d, my candidates %v, encrypt=%v",
+		r.Email, d.localUDPPort(), myCands, d.cfg.DirectEncrypt)
 
-	req := DirectRequest{Email: r.Email, Port: r.Port, Token: token,
-		Candidates: myCands, Endpoint: firstAddr(myCands)}
+	req := DirectRequest{Email: r.Email, Port: r.ForwardPort, Token: token,
+		Candidates: myCands, Endpoint: firstAddr(myCands), Encrypt: d.cfg.DirectEncrypt}
 	if err := d.send(METHOD_DIRECT_REQUEST, reqID, req); err != nil {
 		return "", offer, fmt.Errorf("ask server for peer endpoint: %w", err)
 	}
@@ -251,23 +270,16 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 }
 
 // pickPeerAddr 朝对端的所有候选同时打洞并测 RTT, 再按 RTT + 地址类型偏置选一条。
+// 全灭(没有一条候选打洞成功)时把 selectCandidate 的错误原样返回, 是否转入
+// raceQUICDial 兜底由调用方(ensureSession)决定。
 //
 // 并行而不是逐条试: 逐条的话前面几条不通就要各等一个超时, 轮到能用的那条时入口连接
 // 早就超时了。并行发出去, 谁先回谁先被观测到; 多条都回才谈优先级。
-func (d *directPeer) pickPeerAddr(email string, cands []directCandidate) (directCandidate, error) {
-	results := d.punchAll(cands)
+func (d *directPeer) pickPeerAddr(email, token string, cands []directCandidate) (directCandidate, error) {
+	results := d.punchAll(token, cands)
 	winner, err := selectCandidate(results)
 	if err != nil {
-		// 打洞失败不直接判死: 有状态防火墙可能拦自定义 punch 包但放行 QUIC Initial,
-		// 对端进程也可能因报文格式差异静默丢弃 punch —— 而它真正的 QUIC 监听并没坏。
-		// 拿第一条可用候选继续拨号, 让 QUIC 自己的握手与重传去试 (directDialWait 预算)。
-		fallback := firstUsableCandidate(cands)
-		if fallback == nil {
-			return directCandidate{}, fmt.Errorf("no path to %s: %w", email, err)
-		}
-		d.logf("path selection for %s: punch all failed (%v), falling back to quic dial on %s",
-			email, err, fallback.Addr)
-		return *fallback, nil
+		return directCandidate{}, err
 	}
 	// 把每条候选的 RTT、偏置、得分都打出来。选了哪条、为什么选它, 不打就只能靠猜;
 	// 而"为什么没走 IPv6"这类问题恰恰只有这一行答得了。
@@ -275,20 +287,23 @@ func (d *directPeer) pickPeerAddr(email string, cands []directCandidate) (direct
 	return winner, nil
 }
 
-// firstUsableCandidate 返回第一条本机可拨的候选。候选在服务端已做过格式校验, 这里只
-// 兜底排除本机解析不了的地址(如没有那一族地址)。
-func firstUsableCandidate(cands []directCandidate) *directCandidate {
-	for i := range cands {
-		if _, err := net.ResolveUDPAddr("udp", cands[i].Addr); err == nil {
-			return &cands[i]
-		}
-	}
-	return nil
-}
-
 // connectPeer 按服务端给的端点与指纹建立 QUIC 连接并登记复用。信令之外的部分独立成
 // 一个方法, 便于不经 websocket 直接测试数据路径。
 func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprint string, port ...uint16) (*directSession, error) {
+	sess, err := d.dialQUIC(tr, email, peerAddr, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	// Token 鉴权绑定到端口；按 email+port 复用，避免已鉴权连接跨端口访问。
+	d.putSession(email, sess, port...)
+	return sess, nil
+}
+
+// dialQUIC 只做拨号, 不登记进 d.sessions。单独拆出来是给 raceQUICDial 用的: 竞速时
+// 可能不止一条候选握手成功, 只有最终选中的那条才该进 sessions 表——提前登记的话,
+// 后一条握手成功的连接会覆盖掉先登记的那条, 调用方手里攥着的"赢家"引用就和
+// sessions 表里的实际记录对不上了。
+func (d *directPeer) dialQUIC(tr *quic.Transport, email, peerAddr, fingerprint string) (*directSession, error) {
 	// udp 而不是 udp6: socket 是双栈的, IPv4 与 IPv6 候选都可能胜出。
 	udpAddr, err := net.ResolveUDPAddr("udp", peerAddr)
 	if err != nil {
@@ -302,10 +317,72 @@ func (d *directPeer) connectPeer(tr *quic.Transport, email, peerAddr, fingerprin
 		return nil, fmt.Errorf("quic dial %s: %w", peerAddr, err)
 	}
 	d.logf("quic connected to email %s at %s", email, peerAddr)
-	sess := &directSession{conn: conn, addr: peerAddr, stats: stats}
-	// Token 鉴权绑定到端口；按 email+port 复用，避免已鉴权连接跨端口访问。
-	d.putSession(email, sess, port...)
-	return sess, nil
+	return &directSession{conn: conn, addr: peerAddr, stats: stats}, nil
+}
+
+// directDialAttempt 一次候选拨号竞速的结果。
+type directDialAttempt struct {
+	sess *directSession
+	addr string
+	err  error
+}
+
+// raceQUICDial 打洞全灭之后的兜底: 对**所有**候选并行发起真实 QUIC 拨号, 谁先握手
+// 成功就用谁。比以前"从候选列表里盲选第一条去赌"更彻底——有状态防火墙/运营商设备
+// 可能按明文特征拦了自定义 PUNCH 协议, 但走同一个 socket 的真实 QUIC Initial 包
+// (标准 TLS 1.3 握手)不容易被针对性拦截, 值得每条候选都真的试一次握手, 而不是赌
+// 赌看蒙对的是不是那条能通的。
+//
+// 可能不止一条候选握手成功(比如两条网络当时都通): 谁先答应谁当选, 其余晚到的一律
+// 关掉(见 drainDialRace)——这里只负责兜底最坏情况, 犯不着为一个小概率的"两条都通"
+// 场景做更复杂的比较/保留逻辑。
+func (d *directPeer) raceQUICDial(tr *quic.Transport, email, fingerprint string, cands []directCandidate, port uint16) (*directSession, error) {
+	resultCh := make(chan directDialAttempt, len(cands))
+	attempted := 0
+	for _, c := range cands {
+		if _, err := net.ResolveUDPAddr("udp", c.Addr); err != nil {
+			continue // 本机就解析不了的候选(如没有那一族地址), 重试无益, 直接跳过
+		}
+		attempted++
+		go func(c directCandidate) {
+			d.logf("quic dial race for %s: trying %s", email, c.Addr)
+			sess, err := d.dialQUIC(tr, email, c.Addr, fingerprint)
+			resultCh <- directDialAttempt{sess: sess, addr: c.Addr, err: err}
+		}(c)
+	}
+	if attempted == 0 {
+		return nil, fmt.Errorf("no path to %s: no usable candidate to dial", email)
+	}
+
+	var errs []string
+	for i := 0; i < attempted; i++ {
+		r := <-resultCh
+		if r.err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", r.addr, r.err))
+			continue
+		}
+		d.logf("quic dial race for %s: %s answered first, using it", email, r.addr)
+		d.putSession(email, r.sess, port)
+		// 剩下还在飞的拨号不用等在这里: 赢家已经能用了, 让它们在后台各自收尾。
+		go d.drainDialRace(email, r.addr, resultCh, attempted-i-1)
+		return r.sess, nil
+	}
+	return nil, fmt.Errorf("quic dial race for %s: all %d candidate(s) failed (%s)", email, attempted, strings.Join(errs, "; "))
+}
+
+// drainDialRace 赢家已经决出后, 后台把还没返回的拨号结果收尾: 握手成功的多余连接
+// 直接关掉(赢家已经在用了, 留着就是纯粹的连接和 keep-alive 泄漏), 失败的只打个日志。
+func (d *directPeer) drainDialRace(email, winnerAddr string, ch <-chan directDialAttempt, remaining int) {
+	for i := 0; i < remaining; i++ {
+		r := <-ch
+		if r.err != nil {
+			d.logf("quic dial race for %s: %s failed (winner %s already in use): %v", email, r.addr, winnerAddr, r.err)
+			continue
+		}
+		d.logf("quic dial race for %s: %s also answered after %s already won, closing the extra connection",
+			email, r.addr, winnerAddr)
+		_ = r.sess.conn.CloseWithError(0, "quic dial race: a faster candidate already won")
+	}
 }
 
 // openHeadedStream 在已建立的连接上开一条流并写好首部。

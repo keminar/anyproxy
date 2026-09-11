@@ -114,12 +114,18 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	var openPull func() (fileConn, error)
 	switch via {
 	case ViaDirect:
-		// 一次直连, 所有文件共用 —— 每个文件占一条 stream, 不必反复打洞。
-		rule := conf.ClientDirect{Email: from, Port: directFilePort}
+		// 一次直连, 所有文件共用 —— 每个文件占一条 stream, 不必反复打洞。打洞/握手的
+		// 过程日志挂在 quiet 后面不显示(见 nat/file_send.go 里同一处改动的说明), 这
+		// 两行独立于那套调试日志之外, 让一次性命令不至于在打洞期间空等无输出。
+		fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", from)
+		punchStart := time.Now()
+		rule := conf.ClientDirect{Email: from, ForwardPort: directFilePort}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was fetched: %w", from, err)
 		}
+		fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
+			from, sess.addr, time.Since(punchStart).Round(time.Millisecond))
 		openPull = func() (fileConn, error) { return sender.peer.openPullStream(sess) }
 	case ViaRelay:
 		openPull = func() (fileConn, error) {

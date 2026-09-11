@@ -67,12 +67,22 @@ type DirectRequest struct {
 
 	// Endpoint 同 DirectReady.Endpoint, 只为兼容旧版对端。
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// Encrypt 为 true 表示 A 这台机器开启了 websocket.client.directEncrypt, 要求本次
+	// 会话的 PUNCH/PONG 用 A、C 共享的 uuid 加密(见 nat/direct_crypto.go)。
+	Encrypt bool `json:"encrypt,omitempty"`
 }
 
 // DirectPunch 服务端转交给 C 的连接请求。
 //
-// 不带发起方身份: 文件传输的身份声明改由 A 直接在已加密的 QUIC 流里自己带上
+// 不带发起方的文件传输身份: 那部分声明改由 A 直接在已加密的 QUIC 流里自己带上
 // (见 nat/file.go 的 fileAuth), 不需要 B 在信令里额外转告——B 本就不该知道这些。
+//
+// 但下面的 Email 字段例外: 它不是"身份声明"本身, 只是 B 处理 onRequest 时已经必然
+// 知道的事实("c.Email 要连 req.Email")的透传, 用于 C 在打洞开始前(此时还没有任何
+// 加密通道)就能按 email 查 receive.allow 得到 A 的 uuid, 从而派生出与 A 一致的
+// 打洞会话密钥, 不需要另起一轮密钥交换。这是 B 自己认证过的 c.Email, 不是 A 自报的,
+// 不可被 A 伪造成别的 email。
 type DirectPunch struct {
 	PeerAddrs []directCandidate `json:"peerAddrs"` //A 的全部候选端点, C 朝它们同时打洞
 	Token     string            `json:"token"`     //期望 A 出示的凭证
@@ -80,6 +90,11 @@ type DirectPunch struct {
 
 	// PeerAddr 同 DirectReady.Endpoint, 只为兼容旧版对端。
 	PeerAddr string `json:"peerAddr,omitempty"`
+
+	// Email 是 B 已认证过的 A 的 email(即 onRequest 里的 c.Email), 由 B 现填。
+	Email string `json:"email,omitempty"`
+	// Encrypt 原样透传自 DirectRequest.Encrypt。
+	Encrypt bool `json:"encrypt,omitempty"`
 }
 
 // DirectOffer 服务端回给 A 的结果。Err 非空表示这次直连没法建立(对方不在线、没开

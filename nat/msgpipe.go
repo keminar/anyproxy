@@ -3,8 +3,11 @@ package nat
 import (
 	"errors"
 	"io"
+	"log"
 	"sync"
 	"time"
+
+	"github.com/keminar/anyproxy/config"
 )
 
 // msgPipe 把"经 websocket 转发的一串 Message"包装成一个 fileConn(见 file.go)。
@@ -29,6 +32,11 @@ type msgPipe struct {
 	pushCh  chan []byte        // 待消费的数据段, 由 push() 塞入、Read() 取出
 	done    chan struct{}      // 关闭信号, close 一次即可, 配合 select 让阻塞中的 Read/push 及时退出
 
+	// tag 诊断日志前缀, 对应这条中继 session 所在的那条 websocket 连接(见
+	// nat/file_relay.go 的 newFileRelaySession), 只在 -debug 2 打印的日志里用到,
+	// 不参与业务逻辑, 所以不用加锁保护——创建时赋一次值, 之后只读。
+	tag string
+
 	mu       sync.Mutex
 	rest     []byte // Read() 内部保存的、上一条消息里还没读完的尾巴
 	closed   bool
@@ -42,11 +50,13 @@ type msgPipe struct {
 	ackMu    sync.Mutex
 	ackedVal int64
 	ackWake  chan struct{} // 收到确认时的唤醒信号(容量1, 满了就丢——值本身在 ackedVal 里)
+	onAcked  func(int64)   // 可选: 每次确认值推进时回调, 供发送方把进度条挂在真实送达而不是本地读盘上(见 setOnAcked)
 	sent     int64
 
 	// 接收侧: 已交给上层的累计字节数与上次确认点, 只由 Read 那一个 goroutine 读写。
-	consumed int64
-	lastAck  int64
+	consumed  int64
+	lastAck   int64
+	lastAckAt time.Time // 上一次回确认的时间, 仅用于 -debug 2 诊断日志算间隔/速率
 }
 
 const (
@@ -95,11 +105,28 @@ func (p *msgPipe) onAck(n int64) {
 	if n > p.ackedVal {
 		p.ackedVal = n
 	}
+	acked := p.ackedVal
+	onAcked := p.onAcked
 	p.ackMu.Unlock()
 	select {
 	case p.ackWake <- struct{}{}:
 	default: // 已经有一个待处理的唤醒了, 确认值是累计的, 不会因此丢
 	}
+	// 用 p.ackedVal(取过锁的最新值)而不是入参 n 回调: 重复/过期的确认不该让进度倒退。
+	if onAcked != nil {
+		onAcked(acked)
+	}
+}
+
+// setOnAcked 挂一个进度回调: 每次确认值推进时收到新的累计已确认字节数。发送方
+// (sendFileViaRelay/sendFileChunkViaRelay)用它替代"按本地读盘触发"的进度条——
+// 中继路径下读盘只代表塞进了本地发送队列, 不代表对端真收到了(见 waitWindow 的
+// 4MB 窗口), 按读盘触发会出现"冲一下就卡住"的假象。加锁是为了和 onAck 里的读
+// 避免数据竞争, 不是因为真的会撞上(调用方总在还没开始写数据前设好这个回调)。
+func (p *msgPipe) setOnAcked(f func(int64)) {
+	p.ackMu.Lock()
+	p.onAcked = f
+	p.ackMu.Unlock()
 }
 
 func (p *msgPipe) acked() int64 {
@@ -115,6 +142,15 @@ func (p *msgPipe) Read(buf []byte) (int, error) {
 	if n > 0 {
 		p.consumed += int64(n)
 		if p.consumed-p.lastAck >= relayAckEvery && p.sendAck != nil {
+			if config.DebugLevel >= config.LevelDebug {
+				now := time.Now()
+				if !p.lastAckAt.IsZero() {
+					d := now.Sub(p.lastAckAt)
+					log.Printf("[%s] nat relay ack: consumed %d bytes in %s (%s)\n",
+						p.tag, p.consumed-p.lastAck, d.Round(time.Millisecond), rate(p.consumed-p.lastAck, d))
+				}
+				p.lastAckAt = now
+			}
 			p.lastAck = p.consumed
 			_ = p.sendAck(p.consumed)
 		}
@@ -214,14 +250,23 @@ func (p *msgPipe) Write(b []byte) (int, error) {
 // waitWindow 等到在途字节数落回窗口以内。第一块永远放行(sent==acked 时不等), 免得
 // 单块大于窗口时死等。
 func (p *msgPipe) waitWindow(n int64) error {
+	var waitStart time.Time
 	for {
 		acked := p.acked()
 		inflight := p.sent - acked
 		if inflight == 0 || inflight+n <= relayWindow {
 			return nil
 		}
+		debug := config.DebugLevel >= config.LevelDebug
+		if debug && waitStart.IsZero() {
+			waitStart = time.Now()
+		}
 		select {
 		case <-p.ackWake:
+			if debug {
+				log.Printf("[%s] nat relay window: waited %s for ack, inflight=%d acked=%d\n",
+					p.tag, time.Since(waitStart).Round(time.Millisecond), inflight, p.acked())
+			}
 		case <-p.done:
 			return p.closedErr()
 		case <-time.After(relayAckTimeout):

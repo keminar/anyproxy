@@ -12,10 +12,10 @@ import (
 // 原先只有一个候选(反射器观测到的 IPv6 端点), 通不了就整条失败。现在改成**多条路
 // 同时打**: IPv4、IPv6、端口映射(UPnP/PCP), 全部并行探测, 哪条先回包就先被观测到。
 //
-// 不收本机接口地址那一类候选: 那只在"两台机器同网段"时才有用, 而面向的场景是跨网
-// (中间隔着 CGNAT 或真正的公网), 同网段直连不是要解决的问题(见 direct_reflect.go
-// 的 gatherCandidates)。candSrcLocal 仍留着给测试当通用标签用, 也留一条以后要做
-// 同网段优化时的接口。
+// 不扫网卡去自动发现本机接口地址: 一台机器常有多张网卡(物理网卡、容器桥接、VPN
+// 虚拟网卡等), 自动枚举出来的地址对对端大多毫无意义, 只会增加候选噪音。同网段场景
+// 改成让用户在 websocket.client.directLanAddrs 里显式配置(见 conf.WsClient.DirectLanAddrs 和
+// direct_reflect.go 的 gatherCandidates), candSrcLocal 就是这类候选的来源标签。
 //
 // 多条都通时才谈优先级, 按实测 RTT 选, 并按地址类型给一个偏置(相当于给它减去一点
 // RTT, 让它更容易胜出):
@@ -36,7 +36,7 @@ const (
 	candSrcReflectV4 = "v4"      //反射器观测到的 IPv4 端点
 	candSrcReflectV6 = "v6"      //反射器观测到的 IPv6 端点
 	candSrcPortmap   = "portmap" //UPnP / PCP / NAT-PMP 映射来的端点
-	candSrcLocal     = "local"   //本机接口上的地址; 目前没有代码会产出这类候选(见上), 常量留给测试用
+	candSrcLocal     = "local"   //websocket.client.directLanAddrs 里手工配置的局域网地址
 )
 
 // 地址类型偏置。数值是**减去**的 RTT, 所以越负越优先。

@@ -58,7 +58,7 @@ func (h *Hub) run() {
 			h.mu.Unlock()
 			if ok {
 				close(client.send)
-				client.quietLog("client email %s disconnected, total client nums %d\n", client.Email, n)
+				client.quietLog("[%s] client email %s disconnected, total client nums %d\n", client.tag, client.Email, n)
 				// 拆掉这个 Client 牵涉到的文件中继路由(如果有): 不拆的话另一端的
 				// msgPipe 会在 Read() 上无限期挂着, 表现就是"传输莫名其妙卡住"。
 				// 这个 Hub 类型两处角色(B 的 ServerHub、订阅方自己的本地 hub)共用

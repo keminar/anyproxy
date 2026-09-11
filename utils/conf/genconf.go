@@ -389,11 +389,10 @@ func genWebsocketServer() string {
     allowIP:
     #  - 172.17.0.0/16
     # 端口转发入口: 在本机 listen 收连接, 转给该 email 的订阅方, 由对方按端口查它的 client.forward
-    # protocol: tcp(默认) / udp / both, both 适合 RDP(TCP 3389 + UDP 3389)
+    # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
     forward:
-    #  - listen: ":2222"
+    #  - listen: "tcp://:2222"
     #    email: someone@example.com
-    #    protocol: tcp
 `
 }
 
@@ -423,12 +422,17 @@ func genWebsocketClient() string {
     #    target: 127.0.0.1:22
     # 允许别的订阅方 QUIC 直连本机(数据不经服务端), 监听按需起, 平时不占端口
     directAccept: false
-    # 本机直连入口: 在 listen 收连接, 直接送给 email 对应的订阅方, 由对方按 port 查它的 forward
+    # 本机直连入口: 在 listen 收连接, 直接送给 email 对应的订阅方, 由对方按 forwardPort 查它的 forward
+    # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
     direct:
-    #  - listen: ":13389"
+    #  - listen: "both://:13389"
     #    email: someone@example.com
-    #    port: 3389
-    #    protocol: both
+    #    forwardPort: 3389  # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个端口就拒绝(白名单), 别人不能靠瞎填端口探到对方的其它转发目标
+    # 直连(QUIC)默认吃 quic-go 对 UDP 的批量收发/ECN 优化; 极少数机器上(常见于某些
+    # 网卡驱动/虚拟网卡)这条优化本身会导致丢包、拥塞窗口涨不起来, 症状是直连传输
+    # 明显偏慢且丢包率异常高。不配则跟随命令行 -direct-plain-udp 的全局默认值,
+    # 显式配了 true/false 只影响这一条连接
+    #directPlainUdp: false
     # 与别人收发文件(anyproxy -send / -recv)的目录, 收和取共用这一份。不配 dir 则收发一律拒绝
     receive:
     #  dir: /data/incoming

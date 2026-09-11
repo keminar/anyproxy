@@ -162,7 +162,12 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 		h.Add("Host", live.Host)
 	}
 	wsDialer := &websocket.Dialer{
-		NetDial:          func(network, addr string) (net.Conn, error) { return bypassDial(network, addr, 30*time.Second) },
+		NetDial: func(network, addr string) (net.Conn, error) {
+			if w.cfg.Proxy != "" {
+				return dialThroughProxy(w.cfg.Proxy, network, addr, 30*time.Second)
+			}
+			return bypassDial(network, addr, 30*time.Second)
+		},
 		HandshakeTimeout: 45 * time.Second,
 	}
 	c, resp, err := wsDialer.Dial(u.String(), h)

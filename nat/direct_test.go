@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/keminar/anyproxy/config"
 	"github.com/keminar/anyproxy/utils/conf"
 )
 
@@ -69,6 +70,67 @@ func newDialPeer(t *testing.T) *directPeer {
 // 用例里直接用 ::1。
 func peerEndpoint(d *directPeer) string {
 	return fmt.Sprintf("[::1]:%d", d.localUDPPort())
+}
+
+// TestEnsureTransportPlainUDPToggle 回归测试: config.DirectPlainUDP 必须真的让
+// quic-go 探测不到底下是 *net.UDPConn(否则"绕开批量收发/ECN 快速路径"这个开关就是
+// 摆设, 见 config.DirectPlainUDP 的注释), 关掉时则要保持原生 *net.UDPConn 不受影响
+// (性能优化不能被这个开关误伤)。
+func TestEnsureTransportPlainUDPToggle(t *testing.T) {
+	old := config.DirectPlainUDP
+	t.Cleanup(func() { config.DirectPlainUDP = old })
+
+	config.DirectPlainUDP = false
+	off := newDirectPeer("test-plain-off", conf.WsClient{}, nil)
+	trOff, err := off.ensureTransport()
+	if err != nil {
+		t.Skipf("cannot create ipv6 udp socket: %v", err)
+	}
+	if _, ok := trOff.Conn.(*net.UDPConn); !ok {
+		t.Fatalf("DirectPlainUDP=false: transport.Conn is %T, want *net.UDPConn (quic-go's fast path must stay enabled)", trOff.Conn)
+	}
+
+	config.DirectPlainUDP = true
+	on := newDirectPeer("test-plain-on", conf.WsClient{}, nil)
+	trOn, err := on.ensureTransport()
+	if err != nil {
+		t.Skipf("cannot create ipv6 udp socket: %v", err)
+	}
+	if _, ok := trOn.Conn.(*net.UDPConn); ok {
+		t.Fatal("DirectPlainUDP=true: transport.Conn is still *net.UDPConn, quic-go's fast path would still trigger")
+	}
+}
+
+func ptrBool(b bool) *bool { return &b }
+
+// TestDirectPlainUDPResolution 覆盖 directPlainUDP 的三态解析规则: 每条
+// websocket.client 的 directPlainUdp 没配(nil)时跟随全局默认值, 配了 true/false
+// 就不管全局值是什么, 以这条为准——这是"一台机器多条连接、只有某条路径的网卡有问题"
+// 这个场景成立的前提, 见 conf.WsClient.DirectPlainUDP 的注释。
+func TestDirectPlainUDPResolution(t *testing.T) {
+	old := config.DirectPlainUDP
+	t.Cleanup(func() { config.DirectPlainUDP = old })
+
+	cases := []struct {
+		name      string
+		global    bool
+		perClient *bool
+		wantPlain bool
+	}{
+		{"unset follows global off", false, nil, false},
+		{"unset follows global on", true, nil, true},
+		{"explicit true overrides global off", false, ptrBool(true), true},
+		{"explicit false overrides global on", true, ptrBool(false), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			config.DirectPlainUDP = c.global
+			got := directPlainUDP(conf.WsClient{DirectPlainUDP: c.perClient})
+			if got != c.wantPlain {
+				t.Fatalf("directPlainUDP(global=%v, per-client=%v) = %v, want %v", c.global, c.perClient, got, c.wantPlain)
+			}
+		})
+	}
 }
 
 // TestDirectEndToEnd 完整跑一遍: A 拨号 -> 出示凭证 -> C 查 forward 表 -> dial 内网目标 -> 双向搬字节。
@@ -306,7 +368,7 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 	// 起 A 侧 UDP 入口, 并把回程分发绑上去。
 	entry := &directUDPEntry{
 		peer:     a,
-		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", Port: port},
+		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", ForwardPort: port},
 		byAddr:   make(map[string]uint32),
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: make(map[uint32]time.Time),
@@ -384,7 +446,7 @@ func TestDirectUDPStats(t *testing.T) {
 
 	entry := &directUDPEntry{
 		peer:     a,
-		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", Port: port},
+		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", ForwardPort: port},
 		byAddr:   make(map[string]uint32),
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: make(map[uint32]time.Time),
@@ -513,6 +575,37 @@ func TestDirectProbeEndpoint(t *testing.T) {
 	// 本地端口。这条断言验的是"探测确实问的是这个 socket", 不是"两者恒等"。
 	if portStr != fmt.Sprint(d.localUDPPort()) {
 		t.Fatalf("probed port %s does not match the quic socket port %d (loopback has no NAT, so they must match here)", portStr, d.localUDPPort())
+	}
+}
+
+// TestGatherCandidatesIncludesConfiguredLanAddrs websocket.client.directLanAddrs 里
+// 配的地址不用探测, 应该原样拼上本机当前 QUIC 端口成为一条 candSrcLocal 候选; 格式
+// 不对的条目只应该被跳过并计入失败原因, 不能拖垮其它候选的收集。
+func TestGatherCandidatesIncludesConfiguredLanAddrs(t *testing.T) {
+	d := newDirectPeer("test-lan", conf.WsClient{DirectLanAddrs: []string{"192.168.1.50", "not-an-ip"}}, nil)
+	if _, err := d.ensureTransport(); err != nil {
+		t.Skipf("cannot create ipv6 udp socket: %v", err)
+	}
+
+	cands, err := d.gatherCandidates()
+	if err != nil {
+		t.Fatalf("gatherCandidates: %v", err)
+	}
+	want := net.JoinHostPort("192.168.1.50", fmt.Sprint(d.localUDPPort()))
+	var found *directCandidate
+	for i := range cands {
+		if cands[i].Addr == want {
+			found = &cands[i]
+		}
+		if cands[i].Addr == "not-an-ip" {
+			t.Fatalf("a malformed directLanAddrs entry must not become a candidate: %v", cands)
+		}
+	}
+	if found == nil {
+		t.Fatalf("candidates %v do not include the configured lan address %s", cands, want)
+	}
+	if found.Source != candSrcLocal {
+		t.Fatalf("lan candidate source = %q, want %q", found.Source, candSrcLocal)
 	}
 }
 
@@ -742,7 +835,7 @@ func TestDirectPunchAllPicksTheReachableOne(t *testing.T) {
 	// 一个格式就不对的, 不该让整批探测崩掉。
 	junk := directCandidate{Addr: "garbage", Source: candSrcLocal}
 
-	results := a.punchAll([]directCandidate{dead, junk, live})
+	results := a.punchAll("", []directCandidate{dead, junk, live})
 	if len(results) != 3 {
 		t.Fatalf("want a result per candidate, got %d", len(results))
 	}
@@ -783,7 +876,7 @@ func TestDirectPunchGetsPong(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	rtt, err := a.punchOne(tr, addr)
+	rtt, err := a.punchOne(tr, "", addr)
 	if err != nil {
 		t.Fatalf("punch got no pong: %v", err)
 	}
@@ -791,5 +884,184 @@ func TestDirectPunchGetsPong(t *testing.T) {
 	// (Windows 上就会量出 0), 所以下界是 0 而不是"必须大于 0"。
 	if rtt < 0 || rtt > directPunchGap*directPunchCount {
 		t.Fatalf("implausible rtt %s", rtt)
+	}
+}
+
+// TestRaceQUICDialPicksFirstSuccess 打洞全灭之后的兜底: 死候选不该拖累活的那条,
+// 谁先握手成功就该拿谁, 而且这条会话要真的登记进 d.sessions(不是回来后还要调用方
+// 手动 putSession)。
+func TestRaceQUICDialPicksFirstSuccess(t *testing.T) {
+	c := newAcceptPeer(t, nil)
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	live := directCandidate{Addr: peerEndpoint(c), Source: candSrcReflectV6}
+	// 没人监听的端口, 真实 QUIC 拨号最终会失败, 但不该拖住活的那条候选先胜出。
+	dead := directCandidate{Addr: "[::1]:1", Source: candSrcReflectV6}
+
+	sess, err := a.raceQUICDial(tr, "c@example.com", c.fingerprint, []directCandidate{dead, live}, 2222)
+	if err != nil {
+		t.Fatalf("race: %v", err)
+	}
+	if sess.addr != live.Addr {
+		t.Fatalf("won with %s, want the reachable %s", sess.addr, live.Addr)
+	}
+	if got := a.session("c@example.com", 2222); got != sess {
+		t.Fatalf("the winner must already be registered in d.sessions, got %v want %v", got, sess)
+	}
+}
+
+// TestRaceQUICDialNoUsableCandidates 候选全都本机解析不了时必须直接报错, 不能挂起
+// 等一个永远不会到来的结果。
+func TestRaceQUICDialNoUsableCandidates(t *testing.T) {
+	a := newDialPeer(t)
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	junk := directCandidate{Addr: "garbage", Source: candSrcLocal}
+	if _, err := a.raceQUICDial(tr, "c@example.com", "fp", []directCandidate{junk}, 2222); err == nil {
+		t.Fatalf("all-unusable candidates must fail, not hang or silently succeed")
+	}
+}
+
+// TestRaceQUICDialClosesExtraWinners 不止一条候选握手成功时(这里用两条都指向同一个
+// 可达地址来稳定复现), 只有最先到的赢家该留着, 其余晚到的连接要被关掉、不能泄漏。
+func TestRaceQUICDialClosesExtraWinners(t *testing.T) {
+	c := newAcceptPeer(t, nil)
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	live := directCandidate{Addr: peerEndpoint(c), Source: candSrcReflectV6}
+
+	if _, err := a.raceQUICDial(tr, "c@example.com", c.fingerprint, []directCandidate{live, live}, 2222); err != nil {
+		t.Fatalf("race: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if c.acceptConns.Load() <= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("extra winner connection was not closed in time, acceptConns=%d", c.acceptConns.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestPrepareDirectCryptoNoopWhenDisabled encrypt=false 时是纯 opt-in 功能的落地点:
+// 不该建立任何会话, 也不该报错——协议必须和没有这个功能之前完全一样。
+func TestPrepareDirectCryptoNoopWhenDisabled(t *testing.T) {
+	d := newDirectPeer("test", conf.WsClient{}, nil)
+	if errMsg := d.prepareDirectCrypto(testDirectToken32, false, true, ""); errMsg != "" {
+		t.Fatalf("encrypt=false must be a no-op, got errMsg %q", errMsg)
+	}
+	if _, ok := d.crypto.get(testDirectToken32); ok {
+		t.Fatalf("encrypt=false must not create a crypto session")
+	}
+}
+
+// TestPrepareDirectCryptoInitiatorRequiresValidUUID A 侧(isInitiator=true)直接用
+// 自己的 uuid, 不查表——没有合法 uuid 就必须 fail-closed, 不能默默退化成明文。
+func TestPrepareDirectCryptoInitiatorRequiresValidUUID(t *testing.T) {
+	d := newDirectPeer("test", conf.WsClient{}, nil) // UUID 为空
+	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, true, ""); errMsg == "" {
+		t.Fatalf("empty uuid must fail closed, got no error")
+	}
+	if _, ok := d.crypto.get(testDirectToken32); ok {
+		t.Fatalf("a failed prepare must not leave a session behind")
+	}
+
+	d.cfg.UUID = testUUIDA
+	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, true, ""); errMsg != "" {
+		t.Fatalf("a valid uuid must succeed, got %q", errMsg)
+	}
+	if _, ok := d.crypto.get(testDirectToken32); !ok {
+		t.Fatalf("a successful prepare must register a session under the token")
+	}
+}
+
+// TestPrepareDirectCryptoResponderLooksUpByEmail C 侧(isInitiator=false)必须按对端
+// 报上来的 email 去 receive.allow 查 uuid——查不到就 fail-closed, 这正是"配置疏漏
+// 不能静默退化成明文"这条设计决策的落地点。
+func TestPrepareDirectCryptoResponderLooksUpByEmail(t *testing.T) {
+	d := newDirectPeer("test", conf.WsClient{}, nil)
+	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, false, "a@example.com"); errMsg == "" {
+		t.Fatalf("peer not configured in receive.allow must fail closed, got no error")
+	}
+
+	d.cfg.Receive = conf.ClientReceive{Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
+	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, false, "a@example.com"); errMsg != "" {
+		t.Fatalf("a configured peer must succeed, got %q", errMsg)
+	}
+	if _, ok := d.crypto.get(testDirectToken32); !ok {
+		t.Fatalf("a successful prepare must register a session under the token")
+	}
+}
+
+// TestDirectPunchEncryptedRoundTrip 端到端覆盖 A、C 各自按角色调 prepareDirectCrypto
+// 建好会话后, punchOne 全程走加密路径(encodeDirectPacket 加密发出、drainNonQUIC
+// 按 magic byte 识别并用会话表解密、回 pong 时自动沿用加密格式)仍然functional——
+// 这是本次改动最终想要的效果: 打洞照常成功, 但线上再也看不到明文的 verb 字符串
+// (payload 不含明文这件事已经在 TestSealOpenDirectPacketRoundTrip 里单独验证过)。
+func TestDirectPunchEncryptedRoundTrip(t *testing.T) {
+	c := newAcceptPeer(t, nil)
+	a := newDialPeer(t)
+
+	a.cfg.UUID = testUUIDA
+	c.cfg.Receive = conf.ClientReceive{Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
+
+	token, err := newDirectToken()
+	if err != nil {
+		t.Fatalf("new token: %v", err)
+	}
+	if errMsg := a.prepareDirectCrypto(token, true, true, ""); errMsg != "" {
+		t.Fatalf("initiator prepare: %s", errMsg)
+	}
+	if errMsg := c.prepareDirectCrypto(token, true, false, "a@example.com"); errMsg != "" {
+		t.Fatalf("responder prepare: %s", errMsg)
+	}
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	addr, err := net.ResolveUDPAddr("udp", peerEndpoint(c))
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	rtt, err := a.punchOne(tr, token, addr)
+	if err != nil {
+		t.Fatalf("encrypted punch got no pong: %v", err)
+	}
+	if rtt < 0 || rtt > directPunchGap*directPunchCount {
+		t.Fatalf("implausible rtt %s", rtt)
+	}
+}
+
+// TestEncodeDirectPacketFallsBackToPlaintextWithoutSession token 没有对应会话时
+// (没开 Encrypt, 或本来就是明文场景传的 "")必须退回明文包, 调用方不需要分支判断,
+// 也保证了 A、C 有一方未升级/未配置时不会互相发出对方读不懂的格式。
+func TestEncodeDirectPacketFallsBackToPlaintextWithoutSession(t *testing.T) {
+	d := newDirectPeer("test", conf.WsClient{}, nil)
+	pkt := d.encodeDirectPacket("", verbPunch+" nonce")
+	if pkt[0] != directPacketMagic {
+		t.Fatalf("without a session, must fall back to the plaintext magic byte, got %#x", pkt[0])
+	}
+	payload, ok := directPayload(pkt)
+	if !ok || payload != verbPunch+" nonce" {
+		t.Fatalf("plaintext fallback payload mismatch: %q, %v", payload, ok)
+	}
+
+	pkt = d.encodeDirectPacket(testDirectToken32, verbPunch+" nonce") // token 未 put 过任何会话
+	if pkt[0] != directPacketMagic {
+		t.Fatalf("an unknown token must also fall back to plaintext, got magic %#x", pkt[0])
 	}
 }

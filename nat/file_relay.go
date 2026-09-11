@@ -149,7 +149,7 @@ func handleFileRelayServer(c *Client, msg *Message) bool {
 func (b *fileRelayBroker) onRequest(c *Client, msg *Message) {
 	var req FileRelayOpen
 	if err := json.Unmarshal(msg.Body, &req); err != nil {
-		log.Printf("nat file relay: bad open from email %s: %v", c.Email, err)
+		log.Printf("[%s] nat file relay: bad open from email %s: %v", c.tag, c.Email, err)
 		return
 	}
 	reply := func(err string) {
@@ -188,7 +188,7 @@ func (b *fileRelayBroker) onRequest(c *Client, msg *Message) {
 		return
 	}
 	peer.hub.broadcast <- &CMessage{client: peer, message: &Message{ID: id, Type: ConnFileRelay, Method: METHOD_FILE_RELAY_OPEN, Body: body}}
-	log.Printf("nat file relay: email %s -> %s, relaying a file transfer request", c.Email, req.Email)
+	log.Printf("[%s->%s] nat file relay: email %s -> %s, relaying a file transfer request", c.tag, peer.tag, c.Email, req.Email)
 }
 
 // forward 把消息原样转给路由的另一端, 替换成对端自己认得的 ID。用于信令回执
@@ -406,6 +406,7 @@ func newFileRelaySession(client *Client, id uint) *fileRelaySession {
 		return nil
 	}
 	s.pipe = newMsgPipe(send, sendAck)
+	s.pipe.tag = client.tag
 	fileRelayPipes.Store(fileRelayKey{client, id}, s.pipe)
 	return s
 }
@@ -538,21 +539,31 @@ func openRelayConn(client *Client, toEmail, op string) (fileConn, *fileRelaySess
 
 // sendFileViaRelay 经服务端中继(不打洞、不需要 directAccept)把一个文件发给 toEmail。
 func sendFileViaRelay(client *Client, toEmail string, it fileItem, onProgress func(int64)) (string, error) {
-	secured, _, err := openRelayConn(client, toEmail, "")
+	secured, sess, err := openRelayConn(client, toEmail, "")
 	if err != nil {
 		return "", err
 	}
+	// 进度条挂在对端真实确认(ACK)上, 不挂在本地读盘上——中继路径有 4MB 的发送
+	// 窗口(见 msgPipe.waitWindow), 读盘触发的进度会在窗口打满前冲得飞快、之后又
+	// 卡住, 跟数据有没有真送达完全脱钩。sendFileOver 这里就不再传 onProgress 了。
+	if onProgress != nil {
+		sess.pipe.setOnAcked(onProgress)
+	}
 	// sendFileOver 用完即关(defer conn.Close()), 这里不必再收尾。
-	return sendFileOver(secured, it, onProgress)
+	return sendFileOver(secured, it, nil)
 }
 
 // sendFileChunkViaRelay 是 sendFileViaRelay 的分块版, 供单文件并行分块传输用(见
 // file_send.go 的 parallel 参数)。每一块各自调一次 openRelayConn——协议本身早就
 // 支持"随时开一条新的加密会话"(每次都是独立的 salt/密钥), 不需要为分块单独改握手。
 func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
-	secured, _, err := openRelayConn(client, toEmail, "")
+	secured, sess, err := openRelayConn(client, toEmail, "")
 	if err != nil {
 		return "", err
 	}
-	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	// 原因同 sendFileViaRelay: 进度改成挂在 ACK 上。
+	if onProgress != nil {
+		sess.pipe.setOnAcked(onProgress)
+	}
+	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, chunkCount, nil)
 }

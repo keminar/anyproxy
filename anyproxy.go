@@ -58,6 +58,7 @@ var (
 	gSendVia         string
 	gRecv            string
 	gParallel        int
+	gDirectPlainUDP  bool
 )
 
 func init() {
@@ -89,6 +90,7 @@ func init() {
 
 	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
 	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
+	flag.BoolVar(&gDirectPlainUDP, "direct-plain-udp", false, "direct (NAT punch) connections: skip quic-go's batched/ECN fast path for the UDP socket, always falling back to plain per-packet I/O. Try this if a direct transfer shows high loss and a congestion window stuck near its floor even on an otherwise healthy link -- on some machines (seen on Windows, likely a NIC driver/virtual adapter quirk) that fast path itself corrupts or delays packets, which quic-go then mistakes for congestion. Unlike -debug, this does not log every packet, so it's fine to leave on")
 
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
 	flag.BoolVar(&gCheckFix, "check-fix", false, "Apply recommended sysctl tuning (needs root) and exit")
@@ -111,12 +113,12 @@ func main() {
 	// geo 数据集离线提取: 生成精简 .dat 后退出, 不启动代理。
 	if gGeoExtract {
 		if gGeoIn == "" || gGeoCat == "" || gGeoOut == "" {
-			log.Fatalln("geo-extract 需要 -geo-in -geo-cat -geo-out")
+			log.Fatalln("geo-extract requires -geo-in -geo-cat -geo-out")
 		}
 		if err := geo.Extract(gGeoIn, strings.Split(gGeoCat, ","), gGeoOut); err != nil {
 			log.Fatalln("geo-extract:", err)
 		}
-		fmt.Printf("geo-extract: 已从 %s 提取类别 [%s] 写入 %s\n", gGeoIn, gGeoCat, gGeoOut)
+		fmt.Printf("geo-extract: extracted categories [%s] from %s into %s\n", gGeoCat, gGeoIn, gGeoOut)
 		return
 	}
 	// 生成 websocket 鉴权密钥对: 私钥配订阅方 websocket.client.key, 公钥配服务端
@@ -150,6 +152,7 @@ func main() {
 	}
 
 	config.SetDebugLevel(gDebug)
+	config.DirectPlainUDP = gDirectPlainUDP
 	conf.LoadAllConfig(gConfigFile)
 
 	// 检查配置是否存在
@@ -347,9 +350,9 @@ func main() {
 		// 关闭了代理监听: 没有 grace server 阻塞主流程, 改为等退出信号,
 		// 收到后取消 TUN context 并等设备清理。websocket 后台 goroutine 随进程退出。
 		if gWebsocketListen == "" && len(clientList) == 0 && mode != "tun" && mode != "bypass" {
-			log.Println("warning: 代理监听已关闭(listen off), 但未配置 websocket/tun, 进程将空转")
+			log.Println("warning: proxy listen is off, but no websocket/tun configured; process will idle")
 		}
-		log.Println("代理监听已关闭(listen off), 仅运行后台服务(websocket/tun 等)")
+		log.Println("proxy listen is off; running background services only (websocket/tun etc.)")
 		if grace.IsChild() {
 			// listen 由端口改成了 off 后 SIGHUP 重启到这里: 旧进程还在
 			// grace.Server 里等子进程 bind 成功后发来的 SIGTERM 才退出, 但这里走不到
@@ -385,9 +388,9 @@ func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
 	for {
 		switch <-sig {
 		case syscall.SIGHUP:
-			log.Println(os.Getpid(), "Received SIGHUP (listen off): 启动新进程接管, 退出当前进程")
+			log.Println(os.Getpid(), "Received SIGHUP (listen off): starting new process to take over, exiting current process")
 			if err := restartSelf(); err != nil {
-				log.Println("restart err:", err, "(保持当前进程运行)")
+				log.Println("restart err:", err, "(keeping current process running)")
 				continue // 起新进程失败就不退旧进程, 避免服务中断
 			}
 			cancel()
@@ -525,7 +528,7 @@ func loadGeo() {
 			continue
 		}
 		if err := geo.LoadIPFile(path, gf.Cats); err != nil {
-			log.Printf("geo: 加载 geoip <- %s 失败: %v", path, err)
+			log.Printf("geo: failed to load geoip <- %s: %v", path, err)
 		}
 	}
 	for _, gf := range conf.RouterConfig().GeoSite {
@@ -534,7 +537,7 @@ func loadGeo() {
 			continue
 		}
 		if err := geo.LoadSiteFile(path, gf.Cats); err != nil {
-			log.Printf("geo: 加载 geosite <- %s 失败: %v", path, err)
+			log.Printf("geo: failed to load geosite <- %s: %v", path, err)
 		}
 	}
 	if ic, sc := geo.Stat(); ic > 0 || sc > 0 {
@@ -543,10 +546,10 @@ func loadGeo() {
 	// 用了 geoip:/geosite: 规则但数据未就绪时提示
 	for _, h := range conf.RouterConfig().Hosts {
 		if strings.HasPrefix(h.Name, "geoip:") && !geo.HasIP() {
-			log.Printf("geo: 规则 %q 需要 geo.ip 加载 geoip.dat, 当前未加载, 该规则不会命中", h.Name)
+			log.Printf("geo: rule %q requires geo.ip to load geoip.dat, but it is not loaded; this rule will never match", h.Name)
 		}
 		if strings.HasPrefix(h.Name, "geosite:") && !geo.HasSite() {
-			log.Printf("geo: 规则 %q 需要 geo.site 加载 geosite.dat, 当前未加载, 该规则不会命中", h.Name)
+			log.Printf("geo: rule %q requires geo.site to load geosite.dat, but it is not loaded; this rule will never match", h.Name)
 		}
 	}
 }
