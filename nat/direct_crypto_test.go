@@ -7,11 +7,11 @@ import (
 )
 
 func TestDeriveDirectSessionKeys(t *testing.T) {
-	a2c1, c2a1, err := deriveDirectSessionKeys("uuid-1", "token-1")
+	a2c1, c2a1, err := deriveDirectSessionKeys("token-1")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
-	a2c2, c2a2, err := deriveDirectSessionKeys("uuid-1", "token-1")
+	a2c2, c2a2, err := deriveDirectSessionKeys("token-1")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
@@ -22,34 +22,23 @@ func TestDeriveDirectSessionKeys(t *testing.T) {
 		t.Fatalf("the two directions must not share the same key")
 	}
 
-	a2c3, _, err := deriveDirectSessionKeys("uuid-2", "token-1")
+	a2c3, _, err := deriveDirectSessionKeys("token-2")
 	if err != nil {
 		t.Fatalf("derive: %v", err)
 	}
 	if a2c3 == a2c1 {
-		t.Fatalf("different uuid must give a different key")
-	}
-
-	a2c4, _, err := deriveDirectSessionKeys("uuid-1", "token-2")
-	if err != nil {
-		t.Fatalf("derive: %v", err)
-	}
-	if a2c4 == a2c1 {
 		t.Fatalf("different token must give a different key")
 	}
 
-	if _, _, err := deriveDirectSessionKeys("", "token-1"); err == nil {
-		t.Fatalf("empty uuid must error")
-	}
-	if _, _, err := deriveDirectSessionKeys("uuid-1", ""); err == nil {
+	if _, _, err := deriveDirectSessionKeys(""); err == nil {
 		t.Fatalf("empty token must error")
 	}
 }
 
 // 域隔离回归测试: 打洞加密和中继加密不该共享同一份派生密钥空间, 哪怕喂给它们的
-// uuid/salt-token 字符串完全相同。防止以后有人图省事把两个函数合并。
+// salt/token 字符串相同。防止以后有人图省事把两个函数合并。
 func TestDeriveDirectSessionKeysDiffersFromRelay(t *testing.T) {
-	directA2C, directC2A, err := deriveDirectSessionKeys("shared-uuid", "shared-salt")
+	directA2C, directC2A, err := deriveDirectSessionKeys("shared-salt")
 	if err != nil {
 		t.Fatalf("derive direct: %v", err)
 	}
@@ -59,22 +48,25 @@ func TestDeriveDirectSessionKeysDiffersFromRelay(t *testing.T) {
 	}
 	if directA2C == relaySender || directA2C == relayReceiver ||
 		directC2A == relaySender || directC2A == relayReceiver {
-		t.Fatalf("direct punch keys must not collide with relay keys under the same uuid/salt")
+		t.Fatalf("direct punch keys must not collide with relay keys")
 	}
 }
 
 // testDirectToken32 is a stand-in for newDirectToken()'s output: real tokens are
 // always exactly 32 hex characters, and sealDirectPacket/openDirectPacket assume
 // that fixed length (see directTokenWireLen), so tests must use tokens this size.
-const testDirectToken32 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const (
+	testDirectToken32  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testDirectToken32b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
 
 func TestSealOpenDirectPacketRoundTrip(t *testing.T) {
-	const uuid, token = "shared-uuid", testDirectToken32
-	initiator, err := newDirectCryptoSession(uuid, token, true)
+	const token = testDirectToken32
+	initiator, err := newDirectCryptoSession(token, true)
 	if err != nil {
 		t.Fatalf("new initiator session: %v", err)
 	}
-	responder, err := newDirectCryptoSession(uuid, token, false)
+	responder, err := newDirectCryptoSession(token, false)
 	if err != nil {
 		t.Fatalf("new responder session: %v", err)
 	}
@@ -110,33 +102,33 @@ func TestSealOpenDirectPacketRoundTrip(t *testing.T) {
 	}
 }
 
-func TestOpenDirectPacketRejectsWrongUUID(t *testing.T) {
-	const token = testDirectToken32
-	initiator, err := newDirectCryptoSession("uuid-a", token, true)
+// 两端从不同 token 派生 → 密钥不同 → 解密必须失败。密钥现在只由 token 决定(不再有 uuid)。
+func TestOpenDirectPacketRejectsWrongToken(t *testing.T) {
+	initiator, err := newDirectCryptoSession(testDirectToken32, true)
 	if err != nil {
 		t.Fatalf("new initiator session: %v", err)
 	}
-	responder, err := newDirectCryptoSession("uuid-b", token, false)
+	responder, err := newDirectCryptoSession(testDirectToken32b, false)
 	if err != nil {
 		t.Fatalf("new responder session: %v", err)
 	}
 
-	pkt, err := sealDirectPacket(initiator, token, verbPunch+" nonce")
+	pkt, err := sealDirectPacket(initiator, testDirectToken32, verbPunch+" nonce")
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
 	if _, err := openDirectPacket(responder, pkt); err == nil {
-		t.Fatalf("decrypting with a mismatched uuid must fail")
+		t.Fatalf("decrypting with a key from a different token must fail")
 	}
 }
 
 func TestOpenDirectPacketRejectsTamperedHeader(t *testing.T) {
-	const uuid, token = "shared-uuid", testDirectToken32
-	initiator, err := newDirectCryptoSession(uuid, token, true)
+	const token = testDirectToken32
+	initiator, err := newDirectCryptoSession(token, true)
 	if err != nil {
 		t.Fatalf("new initiator session: %v", err)
 	}
-	responder, err := newDirectCryptoSession(uuid, token, false)
+	responder, err := newDirectCryptoSession(token, false)
 	if err != nil {
 		t.Fatalf("new responder session: %v", err)
 	}
@@ -159,7 +151,7 @@ func TestOpenDirectPacketRejectsTamperedHeader(t *testing.T) {
 }
 
 func TestSealDirectPacketUsesFreshNoncePerCall(t *testing.T) {
-	sess, err := newDirectCryptoSession("shared-uuid", testDirectToken32, true)
+	sess, err := newDirectCryptoSession(testDirectToken32, true)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -179,7 +171,7 @@ func TestSealDirectPacketUsesFreshNoncePerCall(t *testing.T) {
 }
 
 func TestPeekDirectToken(t *testing.T) {
-	sess, err := newDirectCryptoSession("uuid", "0123456789abcdef0123456789abcdef", true)
+	sess, err := newDirectCryptoSession("0123456789abcdef0123456789abcdef", true)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -200,7 +192,7 @@ func TestPeekDirectToken(t *testing.T) {
 
 func TestDirectCryptoTablePutGetNotOneShot(t *testing.T) {
 	table := newDirectCryptoTable()
-	sess, err := newDirectCryptoSession("uuid", "token", true)
+	sess, err := newDirectCryptoSession("token", true)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -215,7 +207,7 @@ func TestDirectCryptoTablePutGetNotOneShot(t *testing.T) {
 
 func TestDirectCryptoTableExpires(t *testing.T) {
 	table := newDirectCryptoTable()
-	sess, err := newDirectCryptoSession("uuid", "expired-token", true)
+	sess, err := newDirectCryptoSession("expired-token", true)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
@@ -225,7 +217,7 @@ func TestDirectCryptoTableExpires(t *testing.T) {
 		t.Fatalf("an expired session must not be returned")
 	}
 
-	fresh, err := newDirectCryptoSession("uuid", "fresh-token", true)
+	fresh, err := newDirectCryptoSession("fresh-token", true)
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}

@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -27,11 +28,36 @@ import (
 // sendDialTimeout 建 websocket 的超时。
 const sendDialTimeout = 30 * time.Second
 
-// ViaDirect/ViaRelay -send 的两种路径, 必须显式声明(见 SendFiles 的 via 参数)。
+// ViaDirect/ViaRelay -send 的两种路径关键字, 必须显式声明(见 SendFiles 的 via 参数)。
+// via 除了这两个关键字外还可以填一个 email——见 resolveVia。
 const (
 	ViaDirect = "direct" // 打洞直连(A<->C, 不经服务端转发数据), 默认
 	ViaRelay  = "relay"  // 经服务端 B 中继转发(不打洞, 不需要对端开 directAccept)
 )
+
+// resolveVia 解出 -via 参数的真实含义。三种取值:
+//
+//   - "direct": 打洞直连, 不经任何中继。
+//   - "relay": 经服务端 B 中继转发(不打洞)。
+//   - 其它任意值: 当作一台公网 VPS 的 email——打洞直连, 但打洞对象换成这台 VPS 的
+//     盲转发中继端点(需 VPS 开 directRelay), 而非直连对端。QUIC/TLS 仍端到端在两个
+//     订阅方之间, VPS 只盲转发不透明包。等价于配置里 direct[].via, 只是这里是命令行、
+//     一次性生效。详见 docs/direct-relay-design.md。
+//
+// 不与前两个关键字冲突: 正常 email 都带 "@", 不会字面等于 "direct"/"relay" 这两个
+// 保留词; 真撞上了(极端情况下有人把订阅方 email 就配成这两个词)按关键字处理, 不支持
+// 经一个恰好叫 direct/relay 的 VPS 中继——这本身也是一种应该改名的配置。
+func resolveVia(via string) (actualVia, relayVia string) {
+	switch via {
+	case ViaDirect, ViaRelay, "":
+		if via == "" {
+			via = ViaDirect
+		}
+		return via, ""
+	default:
+		return ViaDirect, via
+	}
+}
 
 // splitSendTo 把 "-to" 参数拆成邮箱和目标子目录, 类似 scp 的 user@host:path ——
 // user@a.com:/aaa/ 表示存到对端 receive.dir/aaa/ 下, 不带冒号则跟以前一样存到根目录。
@@ -62,15 +88,20 @@ func splitSendTo(to string) (email, subdir string, err error) {
 
 // SendFiles 把 paths 指定的文件/目录发给 to 对应的订阅方(邮箱, 可选 :子目录后缀)。
 //
-// via 二选一, 不接受默认之外的静默兜底(传别的值直接报错), 呼应两条路径完全不同的
+// via 三选一(见 resolveVia), 不接受识别不出的值之外的静默兜底, 呼应几条路径完全不同的
 // 失败语义:
 //
-//   - ViaDirect: 打洞失败就直接返回错误、一个字节都不传——没有经服务端中继的回落,
-//     与直连入口的约定一致(见 directPeer.handleEntry)。要传输保密(QUIC 全程加密)、
+//   - ViaDirect("direct"): 打洞失败就直接返回错误、一个字节都不传——没有经服务端中继的
+//     回落, 与直连入口的约定一致(见 directPeer.handleEntry)。要传输保密(QUIC 全程加密)、
 //     或双方都不方便让 B 看到明文时用这条。
-//   - ViaRelay: 不打洞, 只要 A、C 都连着同一个 B 就能传, 不需要对端开
+//   - ViaRelay("relay"): 不打洞, 只要 A、C 都连着同一个 B 就能传, 不需要对端开
 //     directAccept。代价是数据经过 B(信令与直连一样鉴权发起方身份, 但字节本身
 //     B 是能看到的, 不像直连那样端到端加密), 且吞吐受 B 的带宽限制。
+//   - 一台公网 VPS 的 email: 仍是打洞直连, 但打洞对象换成这台 VPS(需开 directRelay)的
+//     盲转发中继端点——两个居民各自朝 VPS 打洞, QUIC/TLS 仍端到端在 A<->C, VPS 只盲
+//     转发不透明包、看不到明文。用于双方都在受限 CGNAT 后彼此直连打不通、但各自能连通
+//     该 VPS 的场景。等价于配置里 direct[].via, 只是这里是一次性命令行、不需要写进配置
+//     文件。详见 docs/direct-relay-design.md。
 //
 // parallel 大于 1 且单个文件够大(见 chunkMinSize)时, 把这一个文件切成最多 parallel
 // 块、各开一条独立连接并行传——只切单个大文件, 不会让多个文件同时传输(那样反而可能
@@ -90,8 +121,19 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	if toEmail == cfg.Email {
 		return fmt.Errorf("-to %s is this machine's own email", toEmail)
 	}
-	if via != ViaDirect && via != ViaRelay {
-		return fmt.Errorf("-via must be %q or %q, got %q", ViaDirect, ViaRelay, via)
+	actualVia, relayVia := resolveVia(via)
+	if relayVia != "" {
+		if relayVia == cfg.Email {
+			return fmt.Errorf("-via %s is this machine's own email", relayVia)
+		}
+		if relayVia == toEmail {
+			return fmt.Errorf("-via %s must be a different subscriber from -to %s", relayVia, toEmail)
+		}
+		// 中继连接要在 e2e QUIC 流里对 C 应答 uuid 挑战(见 direct_relay_auth.go), 提前
+		// 校验免得先打完一趟洞、连上了才在鉴权这步报错。
+		if !conf.IsValidUUID(cfg.UUID) {
+			return errors.New("websocket.client.uuid is empty or not a valid uuid, required to authenticate a relayed (-via VPS) connection")
+		}
 	}
 	items, err := collectFiles(paths)
 	if err != nil {
@@ -124,7 +166,7 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	// quicStats 直连路径才有: 传完打一行 QUIC 收发统计, 用来判断"传得慢"是链路丢包
 	// 还是本端的问题(见 nat/direct_stats.go 的判读说明)。
 	var quicStats *directStats
-	switch via {
+	switch actualVia {
 	case ViaDirect:
 		// 一次直连, 所有文件共用 —— 每个文件(或每一块)占一条 stream, 不必反复打洞。
 		//
@@ -132,9 +174,13 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		// nat/direct.go 的 logf), 一次性命令默认不显示——不加这两行的话, 用户在打洞
 		// 期间会看着终端空等好几秒, 不知道卡在哪一步、打了多久、连的是哪个地址。这两行
 		// 独立于那套调试日志之外, 一次性命令默认就该看到。
-		fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", toEmail)
+		if relayVia != "" {
+			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch, blind-relayed through %s)...\n", toEmail, relayVia)
+		} else {
+			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", toEmail)
+		}
 		punchStart := time.Now()
-		rule := conf.ClientDirect{Email: toEmail, ForwardPort: directFilePort}
+		rule := conf.ClientDirect{Email: toEmail, ForwardPort: directFilePort, Via: relayVia}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was sent: %w", toEmail, err)

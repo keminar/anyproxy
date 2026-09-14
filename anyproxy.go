@@ -86,7 +86,7 @@ func init() {
 
 	flag.StringVar(&gSend, "send", "", "Send a file or directory to another subscriber and exit (extra paths may follow as arguments)")
 	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory")
-	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path) or \"relay\" (through the server B, no punching needed); both are end-to-end encrypted")
+	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path), \"relay\" (through the server B, no punching needed), or the email of a public VPS (needs directRelay enabled) to blindly relay the NAT punch through -- for when the two peers cannot punch to each other directly (e.g. both behind CGNAT) but can each reach that VPS; the QUIC/TLS session still ends end-to-end between the two peers, the VPS only forwards opaque UDP packets. All are end-to-end encrypted. See docs/direct-relay-design.md")
 
 	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
 	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")

@@ -29,13 +29,13 @@ anyproxy 是一个跨平台（Linux / macOS / Windows）的**智能流量转发�
 
 ## 系统架构总览
 
-![系统架构](docs/系统架构总览.png)
+![系统架构](docs/system-architecture-overview.png)
 
 > 模块细节见 [docs/overview.md](docs/overview.md)、[docs/modes.md](docs/modes.md)、[docs/tun-features.md](docs/tun-features.md)。
 
 ## websocket 内网穿透
 
-![内网穿透链路](docs/内网穿透链路.png)
+![内网穿透链路](docs/network-tunnel-topology.png)
 
 > 完整配置与坑见 [docs/websocket.md](docs/websocket.md)。
 

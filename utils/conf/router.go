@@ -173,6 +173,15 @@ type ClientDirect struct {
 	Listen      string `yaml:"listen"`      //本机入口监听地址, 可带协议前缀, 如 ":13389"、"both://:13389"
 	Email       string `yaml:"email"`       //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
 	ForwardPort uint16 `yaml:"forwardPort"` //选用 C 的 client.forward[] 里哪一条规则(白名单选号, 不是目标端口), 对方未映射该端口即拒绝
+
+	// Via 经这个 email 对应的订阅方(一台公网 VPS, 需开 directRelay)做**盲转发中继**到
+	// Email(最终目标 C): A、C 各自和 VPS 打洞, QUIC/TLS 仍在 A<->C 端到端, VPS 只在传输层
+	// 盲转发不透明 UDP 包(看不到明文)。留空=直连 C(现状, 不经任何中继)。
+	//
+	// 适用 A、C 都在受限 CGNAT 后、彼此直连打不通、但各自能连通公网 VPS 的场景。VPS 无需为每对
+	// A-C 配 forward/direct/receive.allow, 只需一个 directRelay 总开关。详见
+	// docs/direct-relay-design.md。
+	Via string `yaml:"via"`
 }
 
 // Protocol 从 Listen 的协议前缀解出协议名; 没写前缀返回空串(WantTCP 按 tcp 处理)。
@@ -216,6 +225,129 @@ func protoValid(p string) bool {
 		return true
 	}
 	return false
+}
+
+// DirectSettings QUIC 直连(A<->C 不经服务端转发数据)相关的全部配置, 挂在
+// websocket.client.direct 一个块下。把原来十来个平铺的 directXxx 字段(directAccept、
+// directEncrypt、directPortmap、directPunchFirst、directRelay、directRelayAllow、
+// directRelayPublic、directLanAddrs、directPlainUdp)和入口规则数组(原来平铺的
+// direct: [...])合到一起, 字段名去掉 direct 前缀(前缀已经在外层 direct: 这个 key 上
+// 体现了, 块内重复没有意义)。
+//
+// 这是破坏性改动(v0.x 阶段直接切, 不留旧平铺字段的兼容层): 旧配置文件要把这些字段
+// 从 websocket.client 顶层挪进 direct: 块、原来的 direct: [...] 改名成 direct.rules。
+type DirectSettings struct {
+	// Accept 为 true 时起 QUIC 监听并把端点通告给服务端, 允许其它订阅方直连自己
+	// (原 directAccept)。与 Rules 互相独立: 只想被别人直连就单开 Accept, 只想主动
+	// 直连别人就单配 Rules。
+	Accept bool `yaml:"accept"`
+
+	// Rules 本机直连入口规则(见 ClientDirect), 原来平铺的 direct: [...]。
+	Rules []ClientDirect `yaml:"rules"`
+
+	// Encrypt 为 true 时, 本机作为打洞发起方(A)时发出的打洞控制包(PUNCH/PONG)都会
+	// 加密, 防止运营商设备按明文里 "ANYPROXY-DIRECT-PUNCH" 这类可见 ASCII 特征串
+	// 识别并丢弃(原 directEncrypt)。
+	//
+	// 密钥从本次会话的一次性 token 派生(见 nat/direct_crypto.go 的 deriveDirectSessionKeys),
+	// **不依赖 uuid/receive.allow**:打洞包加密的唯一目的是防 DPI、不承担鉴权(鉴权在别处),
+	// 密钥只需"两边都有、DPI 中间盒没有"——token 由 A 生成、经服务端 B 的信令发给对端, 正好
+	// 满足。所以这是个纯开关, 打开即用, 不需要任何身份配置。
+	//
+	// 按 client 一次性开关, 不是每条 rules[] 规则单独配: 对 rules[] 端口转发与 -send/-recv
+	// 文件传输同时生效。纯 opt-in: 默认 false 时协议与之前完全一样(明文), 零行为变化。
+	// 两端都要开(或都不开)才对得上——一端加密另一端不认识, 打洞包会被丢。
+	Encrypt bool `yaml:"encrypt"`
+
+	// Portmap 为 true 时, 直连候选收集(nat/direct_reflect.go 的 gatherCandidates)
+	// 才会去尝试 UPnP/PCP/NAT-PMP 端口映射; 默认 false 不试(原 directPortmap)。
+	//
+	// 默认关掉的原因: 这三种协议对家用路由器的命中率很低(多数默认关闭或路由器压根
+	// 不支持), 探测本身还要等三个协议各自的超时(实测能占掉 gatherCandidates 一两秒),
+	// 大多数情况下只是让日志多刷三行失败原因、让直连多等一会, 却几乎从没真正提供过
+	// 一条候选。它唯一能救的场景是对称 NAT(反射器探到的端口对第三方没用, 只能靠路由器
+	// 直接开洞), 救不了 CGNAT(见 docs/websocket.md「端口映射能救什么、不能救什么」)——
+	// 用得上的人不多, 不该让多数用户都为它多等这一两秒。确认自己路由器支持、且怀疑自己
+	// 是对称 NAT 时再打开。
+	Portmap bool `yaml:"portmap"`
+
+	// PunchFirst 为 true 时声明"本机在受限的运营商级 CGNAT 后面, 主动发起直连时
+	// 必须由本机先发出第一个打洞包"(原 directPunchFirst)。设了它, 本机作为发起方去
+	// 连对端时, 会让对端(接受方)**推迟**自己的打洞, 好让本机先打。
+	//
+	// 为什么需要: 这类 CGNAT 有个特性——如果它在自己发出第一个包之前先收到了对端的包,
+	// 它对这个目的地的映射就被"毒化"(之后用的外网端口不再是通告出去的那个), 双向全灭。
+	// 而 anyproxy 默认是"接受方先打", 当本机(CGNAT)作为发起方去连一个公网/云主机时, 对端
+	// (接受方)先打 -> 本机被毒化 -> 连不上。设成 true 就翻转这一跳的打洞顺序。详细的机制、
+	// 证据和排查见 docs/direct-punch-order.md。
+	//
+	// 按机器设(不是按每条 rules 规则), 因为"本机在不在 CGNAT 后"是这台机器的属性; 对
+	// rules[] 端口转发与 -send/-recv 文件传输同时生效。只有主动发起方是 CGNAT 侧时才需要
+	// 设(比如家宽机器);公网/云主机作为发起方去连家宽时保持默认(接受方=家宽先打)即可,
+	// 不要设。两端都是 CGNAT 的直连本就极难打通, 这个开关不覆盖那种场景。
+	PunchFirst bool `yaml:"punchFirst"`
+
+	// Relay 为 true 时, 本机(一台公网 VPS)允许作为 A<->C 之间的**盲转发中继**(原
+	// directRelay): 收到服务端(B)转来的中继请求, 就为这一对开一个专用 UDP socket、
+	// 探到自己的公网端点、让 A 和 C 都朝它打洞, 之后在两个来源地址之间盲转发不透明
+	// UDP 包。QUIC/TLS 端到端在 A<->C, 本机全程看不到明文, 也不解 QUIC。
+	//
+	// 关键: 本机**不需要**为每对 A-C 配 forward/rules/receive.allow, 只要这一个开关。
+	// 目标 C 由 A 在请求里用 rules[].via 指定。数据不经服务端 B。详见 docs/direct-relay-design.md。
+	//
+	// 默认 false: 不开就完全不参与中继(收到中继请求直接回错)。开了即对 B 内所有已鉴权订阅方
+	// 开放中继; 用 RelayAllow 可收紧到指定来源 email。
+	Relay bool `yaml:"relay"`
+
+	// RelayAllow 收紧 Relay: 只有这里列出的来源 email(即发起中继的 A 的、经 B
+	// 认证过的 email)才能用本机中继。留空(且 Relay 为 true)= 不限制, B 内任何已鉴权
+	// 订阅方都能用。仅 email 白名单, 不涉及 uuid——中继本身不做身份鉴权(那在 A<->C 的 e2e
+	// QUIC 层, 见 docs/direct-relay-design.md), 这里只是"谁能占用本机中继资源"的准入。
+	// (原 directRelayAllow)
+	RelayAllow []string `yaml:"relayAllow"`
+
+	// RelayPublic 显式指定本机(中继 VPS)的公网中继端点, 形如 "1.2.3.4:40000"(可多条,
+	// 含 IPv4/IPv6, 原 directRelayPublic)。配了它就**跳过反射器探测**, 直接用这些端点
+	// 当 E 报给 A、C, 并把中继专用 socket **绑定到端点里的那个端口**(而非随机端口)。
+	//
+	// 为什么需要: 中继要求 VPS 在一个**稳定、可入站**的端点上收包。默认靠反射器探本机出口
+	// 映射, 这在 1:1 公网 IP 或端点无关(EIM/锥形)NAT 下没问题; 但如果 VPS 挂在**出口 IP/端口
+	// 逐流随机(对称型)的 NAT 网关**后, 反射器探到的出口 ≠ A/C 发包时对应的入向映射, 中继就废
+	// 了(和对称 NAT 打不了洞同理)。这时应改用一条**固定 DNAT 入站规则**(公网 IP:端口 -> 本机
+	// 同一 UDP 端口), 并在这里把那个公网端点填进来: 入站恒开、与出口随不随机无关。
+	//
+	// 端口即插槽: 一个固定端口上只能有一个 socket, 所以**能配几个不同端口, 就最多支持几对并发
+	// 中继**(每对 open 时挑一个当前空闲的配置端口绑定; 都被占用则该次中继失败)。要更多并发就
+	// 多配几条(不同端口, 并各配好 DNAT/安全组放行)。同端口的多条(v4+v6)算同一个 socket 的
+	// 多个候选。假定 DNAT 端口保留(公网端口==本机端口); 直接公网 IP 无 NAT 时同样适用, 放行该
+	// 端口即可。留空则维持默认的反射器探测。详见 docs/direct-relay-design.md。
+	RelayPublic []string `yaml:"relayPublic"`
+
+	// LanAddrs 手工配置本机的局域网/内网 IP(不带端口), 让直连候选收集
+	// (nat/direct_reflect.go 的 gatherCandidates)额外把 "这个 IP + 本机当前 QUIC
+	// 端口" 拼成一条候选, 跟反射器观测到的公网候选一起参与打洞/QUIC 拨号竞速。
+	// (原 directLanAddrs)
+	//
+	// 只填 IP、不填端口: 端口是当场探测/按需起监听决定的, 会随连接生命周期变化
+	// (见 directPeer 的 ensureAccept/stopAccept), 用户填了也会作废, 干脆不让填。
+	//
+	// 故意不做网卡扫描去自动发现: 一台机器常有多张网卡(物理网卡、容器桥接、VPN
+	// 虚拟网卡等), 自动枚举出来的地址里大多数对对端毫无意义, 徒增候选噪音和打洞
+	// 次数; 而真正有用的那一个(两台机器实际共享的局域网段), 用户自己一眼就知道,
+	// 不如让用户显式指定。不可达的地址不会造成任何问题——跟其它候选一样, 打洞/
+	// 拨号超时静默落选, 不影响其它候选(见 nat/direct_candidate.go 的择优逻辑)。
+	LanAddrs []string `yaml:"lanAddrs"`
+
+	// PlainUDP 覆盖命令行 -direct-plain-udp 对这一条连接的默认值(见
+	// config.DirectPlainUDP 的注释——为什么会有人想主动关掉 quic-go 的 UDP 快速
+	// 路径, 原 directPlainUdp)。三态: 不配(nil)时跟随 -direct-plain-udp 的全局值;
+	// 显式 true/false 时以这条为准, 不管全局开没开。
+	//
+	// 需要覆盖的场景: 一台机器上配了多条 websocket.client(clients 数组), 分别走不同
+	// 的本机网卡/网络路径——快速路径的问题(如果有)通常是某张网卡驱动的锅, 不是所有
+	// 路径都会撞上, 不该为了绕开一条路径上的问题而牺牲其它路径本来正常的批量收发
+	// 优化。
+	PlainUDP *bool `yaml:"plainUdp"`
 }
 
 // ClientReceive 订阅方与别人交换文件的目录。不配 Dir 就收发一律拒绝。
@@ -342,78 +474,20 @@ type WsClient struct {
 	Subscribe []Subscribe     `yaml:"subscribe"` //订阅头部信息
 	Forward   []ClientForward `yaml:"forward"`   //裸TCP端口转发目标(见 ClientForward)
 
-	// 以下两项为 QUIC 直连(A<->C 不经服务端转发数据), 见 ClientDirect。
-	// 两者互相独立: 只想被别人直连就单开 directAccept, 只想主动直连别人就单配 direct。
-	DirectAccept bool           `yaml:"directAccept"` //true 时起 QUIC 监听并把端点通告给服务端, 允许其它订阅方直连自己
-	Direct       []ClientDirect `yaml:"direct"`       //本机直连入口规则(见 ClientDirect)
-	Receive      ClientReceive  `yaml:"receive"`      //接收传来的文件(见 ClientReceive); 打洞直连(-via direct)要同时开 directAccept, 走服务端中继(-via relay)则不需要
+	// Direct 是 QUIC 直连/中继相关的全部配置, 见 DirectSettings。
+	Direct DirectSettings `yaml:"direct"`
 
-	// DirectEncrypt 为 true 时, 本机作为打洞发起方(A)时发出的打洞控制包
-	// (PUNCH/PONG)都会用本机与对端共享的 uuid 加密, 防止运营商设备按明文里
-	// "ANYPROXY-DIRECT-PUNCH" 这类可见 ASCII 特征串识别并丢弃。
-	//
-	// 按 client 一次性开关, 不是每条 direct[] 规则单独配: 这台机器发起的所有打洞
-	// (无论是 direct[] 里的端口转发规则, 还是 -send/-recv 文件传输)共用同一个
-	// UUID 身份, 也就没有必要、也没有办法按目标区分"这次要不要加密"——同一份
-	// uuid 对不同对端要么都配对了 receive.allow, 要么没配, 开关本身没有"只对某个
-	// 对端生效"的意义。原先挂在 ClientDirect.Encrypt 下(每条 direct 规则单独配)
-	// 就是这个原因导致 -send/-recv 用不上它: 那条路径不走 direct[] 规则, 现场拼的
-	// ClientDirect 里自然没有这一项。收在 WsClient 上之后两条路径共用同一个开关。
-	//
-	// 纯 opt-in: 默认 false 时协议与之前完全一样(明文), 零行为变化。打开前必须
-	// 确认: 1) 本机 websocket.client.uuid 已生成(自动生成, 不可手配); 2) 已经把
-	// 这个 uuid 连同本机 email 配进了对端(direct[] 规则的 Email, 或 -send/-recv
-	// 的目标 email)那台机器的 websocket.client.receive.allow。任一条件不满足,
-	// 打洞会直接失败并在错误信息里说明原因, 不会静默退化成明文(退化会让防 DPI
-	// 的初衷本身失效)。
-	DirectEncrypt bool `yaml:"directEncrypt"`
-
-	// DirectPortmap 为 true 时, 直连候选收集(nat/direct_reflect.go 的
-	// gatherCandidates)才会去尝试 UPnP/PCP/NAT-PMP 端口映射; 默认 false 不试。
-	//
-	// 默认关掉的原因: 这三种协议对家用路由器的命中率很低(多数默认关闭或路由器压根
-	// 不支持), 探测本身还要等三个协议各自的超时(实测能占掉 gatherCandidates 一两秒),
-	// 大多数情况下只是让日志多刷三行失败原因、让直连多等一会, 却几乎从没真正提供过
-	// 一条候选。它唯一能救的场景是对称 NAT(反射器探到的端口对第三方没用, 只能靠路由器
-	// 直接开洞), 救不了 CGNAT(见 docs/websocket.md「端口映射能救什么、不能救什么」)——
-	// 用得上的人不多, 不该让多数用户都为它多等这一两秒。确认自己路由器支持、且怀疑自己
-	// 是对称 NAT 时再打开。
-	DirectPortmap bool `yaml:"directPortmap"`
-
-	// DirectLanAddrs 手工配置本机的局域网/内网 IP(不带端口), 让直连候选收集
-	// (nat/direct_reflect.go 的 gatherCandidates)额外把 "这个 IP + 本机当前 QUIC
-	// 端口" 拼成一条候选, 跟反射器观测到的公网候选一起参与打洞/QUIC 拨号竞速。
-	//
-	// 只填 IP、不填端口: 端口是当场探测/按需起监听决定的, 会随连接生命周期变化
-	// (见 directPeer 的 ensureAccept/stopAccept), 用户填了也会作废, 干脆不让填。
-	//
-	// 故意不做网卡扫描去自动发现: 一台机器常有多张网卡(物理网卡、容器桥接、VPN
-	// 虚拟网卡等), 自动枚举出来的地址里大多数对对端毫无意义, 徒增候选噪音和打洞
-	// 次数; 而真正有用的那一个(两台机器实际共享的局域网段), 用户自己一眼就知道,
-	// 不如让用户显式指定。不可达的地址不会造成任何问题——跟其它候选一样, 打洞/
-	// 拨号超时静默落选, 不影响其它候选(见 nat/direct_candidate.go 的择优逻辑)。
-	DirectLanAddrs []string `yaml:"directLanAddrs"`
-
-	// DirectPlainUDP 覆盖命令行 -direct-plain-udp 对这一条连接的默认值(见
-	// config.DirectPlainUDP 的注释——为什么会有人想主动关掉 quic-go 的 UDP 快速
-	// 路径)。三态: 不配(nil)时跟随 -direct-plain-udp 的全局值; 显式 true/false 时
-	// 以这条为准, 不管全局开没开。
-	//
-	// 需要覆盖的场景: 一台机器上配了多条 websocket.client(clients 数组), 分别走不同
-	// 的本机网卡/网络路径——快速路径的问题(如果有)通常是某张网卡驱动的锅, 不是所有
-	// 路径都会撞上, 不该为了绕开一条路径上的问题而牺牲其它路径本来正常的批量收发
-	// 优化。
-	DirectPlainUDP *bool `yaml:"directPlainUdp"`
+	Receive ClientReceive `yaml:"receive"` //接收传来的文件(见 ClientReceive); 打洞直连(-via direct)要同时开 direct.accept, 走服务端中继(-via relay)则不需要
 
 	// SendRecvOnly true 时强制这条 client 配置只用来给 -send/-recv 命令行取凭证
 	// (以及生成/持久化上面的 UUID), 常驻的 anyproxy 进程不会为它发起 websocket 连接
-	// ——哪怕下面 subscribe/forward/direct/directAccept/receive 配了其中几项也照样跳过。
+	// ——哪怕下面 subscribe/forward/direct/receive 配了其中几项也照样跳过。
 	//
-	// 这是个显式的强制开关, 不是必须品: subscribe/forward/direct/directAccept/
-	// receive.dir 全都没配的常见情况(这条 client 块本来就只是给 -send/-recv 用)不需
-	// 要手动开它——常驻进程会自动判断出"这条配置没什么可连的"而跳过, 见
-	// WantsPersistentConnect。留着这个字段是为了那种"配了其中一项、但仍然只想给
-	// -send/-recv 用"的少见场景(比如先写好 forward 打算以后再启用)。
+	// 这是个显式的强制开关, 不是必须品: subscribe/forward/direct/receive.dir 全都
+	// 没配的常见情况(这条 client 块本来就只是给 -send/-recv 用)不需要手动开它——
+	// 常驻进程会自动判断出"这条配置没什么可连的"而跳过, 见 WantsPersistentConnect。
+	// 留着这个字段是为了那种"配了其中一项、但仍然只想给 -send/-recv 用"的少见场景
+	// (比如先写好 forward 打算以后再启用)。
 	SendRecvOnly bool `yaml:"sendRecvOnly"`
 }
 
@@ -452,8 +526,8 @@ func (w WsClient) WantsPersistentConnect() bool {
 	if w.SendRecvOnly {
 		return false
 	}
-	return len(w.Subscribe) > 0 || len(w.Forward) > 0 || len(w.Direct) > 0 ||
-		w.DirectAccept || w.Receive.Dir != ""
+	return len(w.Subscribe) > 0 || len(w.Forward) > 0 || len(w.Direct.Rules) > 0 ||
+		w.Direct.Accept || w.Direct.Relay || w.Receive.Dir != ""
 }
 
 // Default 域名

@@ -201,7 +201,23 @@ macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`
 | `websocket.server.forward` | 服务端裸TCP转发入口列表，元素为 `{listen, email}` |
 | `websocket.client.connect` | 客户端连接的地址端口 |
 | `websocket.client.host` | connect 的域名 |
+| `websocket.client.proxy` | 订阅端**经上游 HTTP/SOCKS5 代理**回连服务端 B，格式 `scheme://host:port`：`socks5://`（走 SOCKS5）/ `http://`、`https://`（走 HTTP CONNECT）；其它 scheme 直接报错、不静默退化为直连。用于 `connect` 是内网/回环地址、本机不能直连的场景——先连这台可达代理，由它转到 `connect`。不配则直连（原行为）。与 `connect`/`forward` 一样**只在启动/每次重连时取一次，不参与热加载** |
 | `websocket.client.user` / `.pass` | 客户端认证用户名 / 密码（发给服务端） |
 | `websocket.client.email` | 用于定位用户，不鉴权 |
 | `websocket.client.subscribe` | 订阅头部信息列表，元素为 `{key, val}` |
 | `websocket.client.forward` | 订阅端裸TCP转发目标列表，元素为 `{port, target}` |
+| `websocket.client.uuid` | 本订阅端身份凭证，仅文件传输收发双方使用；**不在配置里写**，启动时自动生成并持久化到同名隐藏文件 `.router.uuid`，重启不变 | — |
+| `websocket.client.direct.accept` | `true` 时起 QUIC 监听并把端点通告服务端，允许其它订阅方直连自己（路径 C） | — |
+| `websocket.client.direct.rules` | 本机 QUIC 直连入口规则数组，每条 `{listen, email, forwardPort, via}`；`listen` 可带 `tcp://`(默认)/`udp://`/`both://` 前缀 | — |
+| `websocket.client.direct.encrypt` | `true` 时打洞控制包额外 AES-256-GCM 加密，防运营商按明文特征丢包；默认 `false`，对 `direct.rules[]` 与 `-send`/`-recv` 同时生效 | — |
+| `websocket.client.direct.portmap` | `true` 时直连候选收集尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` | — |
+| `websocket.client.direct.punchFirst` | `true` 声明本机在受限 CGNAT 后、主动直连时须先发首包（让对端接受方推迟打洞）；家宽连公网/云主机不通时设 | — |
+| `websocket.client.direct.relay` | `true` 时本机(公网 VPS)允许作为 A↔C 盲转发中继；无需为每对配 `forward`/`direct`，目标由发起方 `direct.rules[].via` 指定 | — |
+| `websocket.client.direct.relayAllow` | 收紧 `direct.relay`：只放行这些来源 email 用本机中继；留空=不限制 | — |
+| `websocket.client.direct.relayPublic` | 可选，显式指定本机公网中继端点数组(`ip:port`)；配了跳过反射器探测，用于 VPS 挂在出口随机(对称)NAT 网关后 | — |
+| `websocket.client.direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对本条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 | `-direct-plain-udp` |
+| `websocket.client.direct.lanAddrs` | 手工填本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速候选 | — |
+| `websocket.client.receive` | 接收文件传输配置 `{dir, allow[], readonly}`；`allow` 每条 `{email, uuid}`，`readonly: true` 只出不进 | — |
+| `websocket.client.sendRecvOnly` | `true` 时强制这条配置只给 `-send`/`-recv` 取凭证，常驻进程不为它发起连接 | — |
+
+> `websocket.client` 的直连/中继/文件传输字段（上表 `direct*` / `receive` / `sendRecvOnly`）完整语义、鉴权与示例见 [websocket.md](websocket.md#文件传输-send--recv--receive)；`-genkey` 生成 `key` 亦见该页。

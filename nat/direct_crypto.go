@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/keminar/anyproxy/utils/conf"
 )
 
 // 打洞控制包(PUNCH/PONG)的加密层。
@@ -23,7 +21,11 @@ import (
 //
 // 运营商设备按明文 ASCII 特征串(如 "ANYPROXY-DIRECT-PUNCH")识别并丢弃打洞包, 是
 // 打洞失败排查中确认的一个病因; 这层加密去掉这个可被识别的明文特征。纯 opt-in:
-// conf.WsClient.DirectEncrypt 不开就完全不受影响(见 prepareDirectCrypto)。
+// conf.DirectSettings.Encrypt 不开就完全不受影响(见 prepareDirectCrypto)。
+//
+// 密钥从本次会话的 token 派生, 不用 uuid: 这层只为防 DPI、不承担鉴权, 密钥只需"两边都有、
+// DPI 中间盒看不到"——token(A 生成、经 B 信令发给对端)正好满足, 于是 directEncrypt 无需
+// 任何身份配置(uuid/receive.allow)。详见 deriveDirectSessionKeys。
 
 const (
 	// directCryptedMagic 加密控制包的首字节, 与明文的 directPacketMagic(0x00) 区分,
@@ -51,26 +53,29 @@ type directCryptoSession struct {
 	expires time.Time
 }
 
-// deriveDirectSessionKeys 从共享 uuid + 本次会话 token(充当一次性 salt) 派生两个
-// 方向各自的 AES-256-GCM key。手法与 deriveRelaySessionKeys 一致(两个不同标签的
-// SHA-256), 但标签独立, 不与中继会话共享派生密钥空间。
-func deriveDirectSessionKeys(uuid, token string) (a2c, c2a [32]byte, err error) {
-	if uuid == "" {
-		return a2c, c2a, errors.New("empty uuid")
-	}
+// deriveDirectSessionKeys 从本次会话的 token 派生两个方向各自的 AES-256-GCM key。
+//
+// 为什么用 token 而不是 uuid: 打洞包加密的**唯一目的是防 DPI**(抹掉明文特征串), 不承担
+// 鉴权(鉴权在 QUIC 流层)。密钥只需"两边都有、且 DPI 中间盒没有"——token 正好: A 生成、
+// 经 B 的信令(websocket-TLS)发给 C, 两边都有, 而运营商 DPI 在打洞包路径上看不到它(它只
+// 在 TLS 里传)。这样 directEncrypt 就不再依赖 uuid/receive.allow, 变成纯开关。token 是
+// newDirectToken() 的 16 字节随机 hex(128 位熵), 经 SHA-256 派生成 256 位 key。
+// B 能看到 token、理论上能解打洞包, 但打洞包只有 verb+nonce、无秘密, 且 B 是可信信令端——
+// 防的是运营商不是 B。真正的秘密 uuid 全程不参与打洞包, 只用于 QUIC 流层的身份鉴权。
+func deriveDirectSessionKeys(token string) (a2c, c2a [32]byte, err error) {
 	if token == "" {
 		return a2c, c2a, errors.New("empty token")
 	}
-	a2c = sha256.Sum256([]byte(uuid + "|" + token + "|direct-a2c"))
-	c2a = sha256.Sum256([]byte(uuid + "|" + token + "|direct-c2a"))
+	a2c = sha256.Sum256([]byte(token + "|direct-a2c"))
+	c2a = sha256.Sum256([]byte(token + "|direct-c2a"))
 	return a2c, c2a, nil
 }
 
 // newDirectCryptoSession 按角色把两个方向 key 分配成 out/in。isInitiator=true 是 A
 // (用 a2c 发、c2a 收), false 是 C(反过来), 与 file_relay.go 里 senderKey/receiverKey
 // 按角色分配的写法是同一个模式。
-func newDirectCryptoSession(uuid, token string, isInitiator bool) (*directCryptoSession, error) {
-	a2c, c2a, err := deriveDirectSessionKeys(uuid, token)
+func newDirectCryptoSession(token string, isInitiator bool) (*directCryptoSession, error) {
+	a2c, c2a, err := deriveDirectSessionKeys(token)
 	if err != nil {
 		return nil, err
 	}
@@ -187,35 +192,17 @@ func (t *directCryptoTable) get(token string) (*directCryptoSession, bool) {
 }
 
 // prepareDirectCrypto 在打洞前按需建立本次会话的加密上下文。A(isInitiator=true)和
-// C(isInitiator=false)共用同一个函数, 只是取 uuid 的方式不同。encrypt=false 时什么
-// 都不做, 直接返回空——这是"opt-in, 不开就零行为变化"的落地点。
+// C(isInitiator=false)共用同一个函数。encrypt=false 时什么都不做, 直接返回空——这是
+// "opt-in, 不开就零行为变化"的落地点。
 //
-// 返回非空 errMsg 表示 encrypt=true 但没法满足(uuid 未配置/不合法), 调用方必须直接
-// 让这次打洞失败退出, 不能静默退化成明文——退化会让"防 DPI"这个初衷本身失效, 而
-// 失败时至少能在日志/DirectReady.Err 里看到明确原因。
-func (d *directPeer) prepareDirectCrypto(token string, encrypt bool, isInitiator bool, peerEmail string) (errMsg string) {
+// 密钥从本次会话的 token 派生(见 deriveDirectSessionKeys), 不依赖 uuid/receive.allow:
+// 打洞包加密只为防 DPI, token 两边都有(A 生成、经 B 发给 C), 够用且无需任何配置。返回值
+// 保留(签名不变)但正常总是空串——token 一定非空, 不会失败。
+func (d *directPeer) prepareDirectCrypto(token string, encrypt bool, isInitiator bool) (errMsg string) {
 	if !encrypt {
 		return ""
 	}
-	var uuid string
-	if isInitiator {
-		// A: 自己的 uuid 天然就有, 不用查表。
-		uuid = d.cfg.UUID
-		if !conf.IsValidUUID(uuid) {
-			return "directEncrypt is enabled but websocket.client.uuid is empty or not a valid uuid"
-		}
-	} else {
-		// C: 按 A 报上来的 email 去 receive.allow 里查 A 的 uuid。
-		u, ok := d.cfg.Receive.Lookup(peerEmail)
-		if !ok {
-			return fmt.Sprintf("peer %s requested encrypted punch but is not configured in websocket.client.receive.allow", peerEmail)
-		}
-		if !conf.IsValidUUID(u) {
-			return fmt.Sprintf("configured uuid for %s is not a valid uuid", peerEmail)
-		}
-		uuid = u
-	}
-	sess, err := newDirectCryptoSession(uuid, token, isInitiator)
+	sess, err := newDirectCryptoSession(token, isInitiator)
 	if err != nil {
 		return fmt.Sprintf("cannot set up punch encryption: %v", err)
 	}

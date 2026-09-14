@@ -247,7 +247,8 @@ WinDivert 拦截的是所有 outbound TCP，包括 anyproxy 自己发出的连�
 > 暴涨，被 50/域名/秒 限流压住空转）。改用源端口段后不再依赖该事件，问题根除。
 
 SOCKS Guard 仍保留，作为两种情况的兜底：① 端口段用尽时的回退（无绑定）拨号；
-② 通过 `SocksProcessNames` 配置的外部代理进程（不经 anyproxy 拨号器）。
+② 通过 `tun.windows.excludeProcs` 配置的外部代理进程（不经 anyproxy 拨号器；
+配置字段名为 `excludeProcs`，引擎内部再填进 `SocksProcessNames` 供 SOCKS Guard 匹配）。
 
 > 端口段的权衡：绑定固定源端口受 TIME_WAIT 影响，段内端口在 TIME_WAIT 期间
 > （Windows 约 2-4 分钟）不能复用。该段约 9000 个端口，绑定冲突会自动换槽重试，
@@ -265,7 +266,7 @@ SOCKS Guard 仍保留，作为两种情况的兜底：① 端口段用尽时的�
 4. process() 中检查源端口是否在 egress 集合中，是则放行
 
 支持多进程代理套件（如 GUI + core 分离的 clash），通过进程名而非
-单个 PID 来识别整个代理家族。可通过 `SocksProcessNames` 追加额外进程名。
+单个 PID 来识别整个代理家族。可通过 `tun.windows.excludeProcs` 追加额外进程名。
 
 如果 SOCKET 层不可用（旧版 WinDivert），Guard 被禁用，
 仅依赖速率限制器作为环路兜底。

@@ -321,7 +321,7 @@ func TestFileTransferEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -387,7 +387,7 @@ func TestFilePullDirectEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -463,7 +463,7 @@ func TestFileReceiveReadOnlyServesButRefusesWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -535,7 +535,7 @@ func TestFilePullDirectRejectsStranger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -582,7 +582,7 @@ func TestDirectQUICStatsCollected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	items, err := collectFiles([]string{srcPath})
@@ -629,7 +629,7 @@ func TestFileRefusedWhenNoReceiveDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestFileReceiveAllowList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -698,7 +698,7 @@ func TestFileReceiveAllowRequiresMatchingUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -730,7 +730,7 @@ func TestFileSendRefusesEmptyUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -759,7 +759,7 @@ func TestFileSendRefusesMalformedOwnUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -790,7 +790,7 @@ func TestFileReceiveRefusesMalformedConfiguredUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -984,7 +984,7 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -1068,7 +1068,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 

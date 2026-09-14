@@ -356,7 +356,8 @@ websocket:
     user: home
     pass: HomePass1234567890
     email: home@example.com
-    directAccept: true         # 允许别人直连自己；监听按需起、空闲释放，平时不占端口
+    direct:
+      accept: true              # 允许别人直连自己；监听按需起、空闲释放，平时不占端口
     forward:
       - port: 3389              # 复用同一张白名单：未映射的 port 一律拒绝
         target: 192.168.1.10:3389
@@ -372,24 +373,26 @@ websocket:
     pass: OfficePass1234567890
     email: office@example.com
     direct:
-      - listen: "both://:13389" # 本机入口，mstsc 连这里；协议前缀 tcp://(默认,可不写)/udp://both://，RDP 8+ 用 both://
-        email: home@example.com # 直连到这个 email 的订阅端
-        forwardPort: 3389        # 选对方 forward[] 里的哪条规则(白名单选号)，不是内网目标端口；对方没配这个号就拒绝
+      rules:
+        - listen: "both://:13389" # 本机入口，mstsc 连这里；协议前缀 tcp://(默认,可不写)/udp://both://，RDP 8+ 用 both://
+          email: home@example.com # 直连到这个 email 的订阅端
+          forwardPort: 3389        # 选对方 forward[] 里的哪条规则(白名单选号)，不是内网目标端口；对方没配这个号就拒绝
 ```
 
 用法：`mstsc` 连 `127.0.0.1:13389`，实际字节走 A↔C 的 QUIC 直连，不经服务端。打洞失败就直接失败（连接被关掉，日志写明每条候选卡在哪），**没有中继回落**——要经中继就照 8.2 配 `server.forward`，两条路径互不兜底。字段与打洞机制详见 [websocket.md](websocket.md#配置字段)。
 
-**运营商按明文特征丢打洞包时**：给这条 `direct` 规则加 `encrypt: true`（要求对端 `receive.allow` 配好本机 `uuid`），详见 [websocket.md](websocket.md#打洞控制包加密encrypt)：
+**运营商按明文特征丢打洞包时**：给 A 这台机器加 `direct.encrypt: true`（按 client 一次性开关，不是按每条规则单独配；两端要都开或都不开；不依赖 `uuid`/`receive.allow`），详见 [websocket.md](websocket.md#打洞控制包加密directencrypt)：
 
 ```yaml
     direct:
-      - listen: "both://:13389"
-        email: home@example.com
-        forwardPort: 3389
-        encrypt: true
+      encrypt: true
+      rules:
+        - listen: "both://:13389"
+          email: home@example.com
+          forwardPort: 3389
 ```
 
-**两台机器其实在同一局域网**时，可以用 `websocket.client.directLanAddrs` 手工把本机内网 IP 加为候选（不做网卡自动扫描），让直连优先走内网而不是绕公网，详见 [websocket.md](websocket.md#多条路同时打谁通用谁)。
+**两台机器其实在同一局域网**时，可以用 `websocket.client.direct.lanAddrs` 手工把本机内网 IP 加为候选（不做网卡自动扫描），让直连优先走内网而不是绕公网，详见 [websocket.md](websocket.md#多条路同时打谁通用谁)。
 
 ### 8.6 直连收发文件（不依赖对端装 sshd/rsync）
 
@@ -399,7 +402,8 @@ websocket:
 # C（放文件的一方，接着 8.5 的 C 配置加一段）
 websocket:
   client:
-    directAccept: true
+    direct:
+      accept: true
     receive:
       dir: D:/incoming          # 收到的文件落这里，也是允许被取走的根目录；不配 dir 则收发都拒绝
       allow:                    # 一条一个 {email, uuid}; 留空=谁都不接受
@@ -424,7 +428,7 @@ anyproxy -c conf/office.yaml -recv home@example.com:photos/2024.zip -to D:/pulle
 
 打洞不成功就报错、一个字节都不传（退出码非零），脚本里 `anyproxy -send ... && echo ok` 直接可用。设计细节（分块校验、断点占位、重名不覆盖等）详见 [websocket.md](websocket.md#配置字段)。
 
-**打洞走不通时**（双方都在严格 NAT/CGNAT 后面，比如同一个运营商大内网互相看不见），不用改任何配置——C 不需要开 `directAccept`，`receive` 原样复用——只在命令上加一个参数，两个方向都认：
+**打洞走不通时**（双方都在严格 NAT/CGNAT 后面，比如同一个运营商大内网互相看不见），不用改任何配置——C 不需要开 `direct.accept`，`receive` 原样复用——只在命令上加一个参数，两个方向都认：
 
 ```bash
 anyproxy -c conf/office.yaml -send D:/photos -to home@example.com -via relay

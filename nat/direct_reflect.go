@@ -322,9 +322,9 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 		}(r.addr, r.src)
 	}
 
-	// 端口映射不依赖反射器, 一起并行。默认关闭(见 conf.WsClient.DirectPortmap): 命中率低
+	// 端口映射不依赖反射器, 一起并行。默认关闭(见 conf.DirectSettings.Portmap): 命中率低
 	// 又要等三个协议的超时, 多数机器上只是白等一两秒。
-	if d.cfg.DirectPortmap {
+	if d.cfg.Direct.Portmap {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -337,10 +337,10 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 		}()
 	}
 
-	// 用户手工配置的局域网地址(websocket.client.directLanAddrs), 不用探测, 直接拼上
-	// 本机当前 QUIC 端口就是一条候选——不做网卡扫描(见 conf.WsClient.DirectLanAddrs
+	// 用户手工配置的局域网地址(websocket.client.direct.lanAddrs), 不用探测, 直接拼上
+	// 本机当前 QUIC 端口就是一条候选——不做网卡扫描(见 conf.DirectSettings.LanAddrs
 	// 的注释)。
-	for _, ip := range d.cfg.DirectLanAddrs {
+	for _, ip := range d.cfg.Direct.LanAddrs {
 		if net.ParseIP(ip) == nil {
 			fail(candSrcLocal, fmt.Errorf("%q is not a valid IP literal", ip))
 			continue
@@ -401,8 +401,13 @@ func (d *directPeer) punchAll(token string, cands []directCandidate) []candidate
 	return results
 }
 
-// punchOnly 朝所有候选打洞但不等回执。C 侧用: 它不需要知道哪条更快(择优由 A 做),
-// 只需要把每条路上的返回通道开出来。等回执会白白拖住给 A 的应答近一秒。
+// punchOnly 朝所有候选各连发几个打洞包, 不等回执。C 侧用: 它不需要知道哪条更快(择优
+// 由 A 做), 只需要把每条路上的返回通道开出来。等回执会白白拖住给 A 的应答近一秒。
+//
+// 只发 directPunchCount 个就够, 不必持续打: 打洞在本机 NAT/安全组上开出的表项是有状态
+// 的映射, 一旦建立能存活数十秒(CGNAT)乃至更久, A 随后的 QUIC Initial 到达时洞仍在。
+// 真正决定成败的是**顺序**——必须让受限 CGNAT 侧先发第一个包, 见 docs/direct-punch-order.md
+// 与 direct_accept.go 的 onPunch(order Y 时本侧会等对端 nudge 再调本函数)。
 func (d *directPeer) punchOnly(token string, cands []directCandidate) {
 	tr, err := d.ensureTransport()
 	if err != nil {

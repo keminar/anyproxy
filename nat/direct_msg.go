@@ -25,16 +25,24 @@ import (
 // 其中 d_punch 这步是必需的: IPv6 虽然没有 NAT, 但家用路由器默认对 IPv6 开有状态
 // 防火墙、拦截主动入站, C 必须先朝 A 发包, 才能在自己这侧开出返回通道。
 const (
-	METHOD_DIRECT_REQUEST = "d_request" //A -> B
-	METHOD_DIRECT_PUNCH   = "d_punch"   //B -> C
-	METHOD_DIRECT_READY   = "d_ready"   //C -> B
-	METHOD_DIRECT_OFFER   = "d_offer"   //B -> A
+	METHOD_DIRECT_REQUEST  = "d_request"  //A -> B
+	METHOD_DIRECT_PUNCH    = "d_punch"    //B -> C
+	METHOD_DIRECT_READY    = "d_ready"    //C -> B
+	METHOD_DIRECT_OFFER    = "d_offer"    //B -> A
+	METHOD_DIRECT_PUNCHING = "d_punching" //A -> B -> C: A 已开打, 让 C 现在打(见 DirectPunching)
+
+	// METHOD_DIRECT_RELAY_OPEN 是 VPS 盲转发中继唯一新增的信令(B -> VPS): 让 VPS 为这一对
+	// A-C 开一个专用 UDP socket、问反射器探到自己的公网中继端点 E, 用 d_ready 把 E 报回。
+	// 其余中继信令全部复用现有直连信令(d_request 加 Via、d_punch 加 Relay/Email 转达候选与
+	// 打洞、d_offer 把 E 给 A、d_punching 两腿的 nudge)。详见 docs/direct-relay-design.md。
+	METHOD_DIRECT_RELAY_OPEN = "d_relay_open" //B -> VPS
 )
 
 // isDirectMethod 判断是否为直连信令, 用于在读消息时与数据面消息分流。
 func isDirectMethod(method string) bool {
 	switch method {
-	case METHOD_DIRECT_REQUEST, METHOD_DIRECT_PUNCH, METHOD_DIRECT_READY, METHOD_DIRECT_OFFER:
+	case METHOD_DIRECT_REQUEST, METHOD_DIRECT_PUNCH, METHOD_DIRECT_READY, METHOD_DIRECT_OFFER,
+		METHOD_DIRECT_PUNCHING, METHOD_DIRECT_RELAY_OPEN:
 		return true
 	}
 	return false
@@ -69,8 +77,17 @@ type DirectRequest struct {
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// Encrypt 为 true 表示 A 这台机器开启了 websocket.client.directEncrypt, 要求本次
-	// 会话的 PUNCH/PONG 用 A、C 共享的 uuid 加密(见 nat/direct_crypto.go)。
+	// 会话的 PUNCH/PONG 加密。密钥从本次 token 派生(不用 uuid), 见 nat/direct_crypto.go。
 	Encrypt bool `json:"encrypt,omitempty"`
+
+	// PunchFirst 为 true 表示发起方 A 在受限 CGNAT 后(配了 directPunchFirst), 要求本次
+	// 由 A 先打洞、接受方 C 推迟自己的打洞(见 docs/direct-punch-order.md)。
+	PunchFirst bool `json:"punchFirst,omitempty"`
+
+	// Via 非空表示 A 要经这个 email 对应的 VPS 做盲转发中继到 Email(最终目标 C), 而非直连。
+	// B 见 Via 非空即进中继模式(见 nat/direct_broker.go 的 onRelayRequest)。取自
+	// conf.ClientDirect.Via。详见 docs/direct-relay-design.md。
+	Via string `json:"via,omitempty"`
 }
 
 // DirectPunch 服务端转交给 C 的连接请求。
@@ -92,9 +109,50 @@ type DirectPunch struct {
 	PeerAddr string `json:"peerAddr,omitempty"`
 
 	// Email 是 B 已认证过的 A 的 email(即 onRequest 里的 c.Email), 由 B 现填。
+	//
+	// 中继腿(Relay=true, B->VPS)里 Email 另有一层用途: 标明这条 d_punch 是"哪条腿"的
+	// 打洞目标——VPS 有 A、C 两条腿, 都用同一个 token, 靠 Email 区分该朝谁打、以及收到
+	// 哪条腿的 nudge 时该触发哪次停着的打洞(见 nat/direct_relay.go)。
 	Email string `json:"email,omitempty"`
 	// Encrypt 原样透传自 DirectRequest.Encrypt。
 	Encrypt bool `json:"encrypt,omitempty"`
+	// PunchFirst 原样透传自 DirectRequest.PunchFirst: A 要求先打, C 推迟自己的打洞。
+	PunchFirst bool `json:"punchFirst,omitempty"`
+
+	// Relay 为 true 表示这是 VPS 盲转发中继里的一条打洞腿:
+	//   - B -> VPS 时: PeerAddrs 是某个居民(A 或 C, 由 Email 标明)的候选, VPS 朝它打洞
+	//     (停着等该腿的 nudge, 见 direct_relay.go), 且 VPS 不是"接受 QUIC 监听", 只盲转发。
+	//   - B -> C 时: PeerAddrs 是 VPS 的中继端点 E, C 朝 E 打洞并**主动**发一个 nudge(自己
+	//     是居民、必先打), 让 VPS 知道可以朝 C 打回去了; 之后接受经 VPS 转来的 e2e QUIC。
+	// 详见 docs/direct-relay-design.md。
+	Relay bool `json:"relay,omitempty"`
+}
+
+// DirectRelayOpen B -> VPS: 让 VPS 为本次会话(Token)开一个专用中继 socket、探到自己的
+// 公网中继端点 E, 用 d_ready(Candidates=[E], 无 Fingerprint)把 E 报回 B。这是整套中继里
+// 唯一新增的信令类型。VPS 记住 Token->socket, 之后按 B 转来的 d_punch(Relay=true)朝 A、C
+// 两腿打洞并盲转发。详见 docs/direct-relay-design.md。
+type DirectRelayOpen struct {
+	Token string `json:"token"` //本次中继会话标识, 与 A 的 DirectRequest.Token 一致
+}
+
+// DirectPunching A(发起方)开打后发出的 nudge: A -> B -> C, 通知 C"我已开始打洞, 你
+// 现在可以打了"。仅在 A 设了 directPunchFirst(A 在受限 CGNAT 后、必须先打)时发。
+//
+// 为什么要它: order Y 里 A 必须先发出第一个包, C 才能后打(否则 A 的 CGNAT 映射被 C 先
+// 到的包毒化)。但 A 只有拿到 offer 才知道 C 的地址、才开始打, C 却在更早的 d_punch 时
+// 就想打——只能让 C 先"停下等信号"。这个 nudge 就是那个信号: A 一开打就发, 经 B 路由到
+// C(按 Email 找 C), C 用 Token 对上自己停着的那次打洞、立即打。见 docs/direct-punch-order.md。
+//
+// A -> B 时带 Email(供 B 路由到 C)与 Token; B -> C 时 Email 可省(只需 Token 对上)。
+//
+// 中继场景里 nudge 的路由与语义不同(见 nat/direct_relay.go、direct_broker.go 的 onPunching):
+// A、C 两个居民都朝 VPS 的中继端点打洞, 且都要先打, 所以两腿各发一个 nudge 给 VPS。B 按
+// Token 认出这是中继会话, 把 nudge 转给 VPS 并**保留发出方的 email**(A 的或 C 的), VPS 靠
+// 这个 email 认出是"哪条腿"该打回去。
+type DirectPunching struct {
+	Email string `json:"email,omitempty"` //A->B: 目标订阅方(C)供 B 路由; 中继腿里则是发出方(A/C)自己的 email
+	Token string `json:"token"`           //与对端停着的那次打洞的 token 对上
 }
 
 // DirectOffer 服务端回给 A 的结果。Err 非空表示这次直连没法建立(对方不在线、没开

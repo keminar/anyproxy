@@ -200,11 +200,13 @@ func TestWsClientDirectPlainUDP(t *testing.T) {
 `: nil,
 		`client:
   connect: a:1
-  directPlainUdp: true
+  direct:
+    plainUdp: true
 `: boolPtr(true),
 		`client:
   connect: a:1
-  directPlainUdp: false
+  direct:
+    plainUdp: false
 `: boolPtr(false),
 	}
 	for y, want := range cases {
@@ -214,7 +216,7 @@ func TestWsClientDirectPlainUDP(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(y), &w); err != nil {
 			t.Fatalf("unmarshal %q: %v", y, err)
 		}
-		got := w.Client.DirectPlainUDP
+		got := w.Client.Direct.PlainUDP
 		switch {
 		case want == nil && got != nil:
 			t.Fatalf("%q: got %v, want nil", y, *got)
@@ -292,12 +294,13 @@ func TestListenProtocolPrefixYAML(t *testing.T) {
 	y := `
 client:
   direct:
-    - listen: "both://:13389"
-      email: c@example.com
-      port: 3389
-    - listen: udp://:13390
-      email: c@example.com
-      port: 3390
+    rules:
+      - listen: "both://:13389"
+        email: c@example.com
+        port: 3389
+      - listen: udp://:13390
+        email: c@example.com
+        port: 3390
 `
 	var w struct {
 		Client WsClient `yaml:"client"`
@@ -305,19 +308,19 @@ client:
 	if err := yaml.Unmarshal([]byte(y), &w); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(w.Client.Direct) != 2 {
-		t.Fatalf("got %d direct rules, want 2", len(w.Client.Direct))
+	if len(w.Client.Direct.Rules) != 2 {
+		t.Fatalf("got %d direct rules, want 2", len(w.Client.Direct.Rules))
 	}
-	if got := w.Client.Direct[0].Protocol(); got != "both" {
+	if got := w.Client.Direct.Rules[0].Protocol(); got != "both" {
 		t.Errorf("quoted both://: Protocol() = %q, want \"both\"", got)
 	}
-	if got := w.Client.Direct[0].Addr(); got != ":13389" {
+	if got := w.Client.Direct.Rules[0].Addr(); got != ":13389" {
 		t.Errorf("quoted both://: Addr() = %q, want \":13389\"", got)
 	}
-	if got := w.Client.Direct[1].Protocol(); got != "udp" {
+	if got := w.Client.Direct.Rules[1].Protocol(); got != "udp" {
 		t.Errorf("unquoted udp://: Protocol() = %q, want \"udp\"", got)
 	}
-	if got := w.Client.Direct[1].Addr(); got != ":13390" {
+	if got := w.Client.Direct.Rules[1].Addr(); got != ":13390" {
 		t.Errorf("unquoted udp://: Addr() = %q, want \":13390\"", got)
 	}
 }
@@ -399,8 +402,8 @@ func TestWsClientWantsPersistentConnect(t *testing.T) {
 		{"nothing configured", WsClient{}, false},
 		{"subscribe", WsClient{Subscribe: []Subscribe{{Key: "k", Val: "v"}}}, true},
 		{"forward", WsClient{Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, true},
-		{"direct rule", WsClient{Direct: []ClientDirect{{Listen: ":1", Email: "a@example.com", ForwardPort: 1}}}, true},
-		{"directAccept", WsClient{DirectAccept: true}, true},
+		{"direct rule", WsClient{Direct: DirectSettings{Rules: []ClientDirect{{Listen: ":1", Email: "a@example.com", ForwardPort: 1}}}}, true},
+		{"direct.accept", WsClient{Direct: DirectSettings{Accept: true}}, true},
 		{"receive.dir", WsClient{Receive: ClientReceive{Dir: "/data"}}, true},
 		{"sendRecvOnly alone", WsClient{SendRecvOnly: true}, false},
 		{"sendRecvOnly overrides forward", WsClient{SendRecvOnly: true, Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, false},

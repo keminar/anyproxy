@@ -130,6 +130,19 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	if err != nil {
 		return nil, err
 	}
+	// order Y: 本机在受限 CGNAT 后(directPunchFirst), 必须先发出第一个包。这里在真正开打
+	// 之前给对端发个 nudge——对端收到 d_punch 时是"停着等信号"的(见 direct_accept.go 的
+	// parkPunch), 收到这个 nudge 才打。nudge 经 B 转发要走一小段, 而本机紧接着的 pickPeerAddr
+	// 立刻就开始打, 所以本机必先发出第一个包, CGNAT 映射不被对端先来的包毒化。nudge 丢了
+	// 也不卡: 对端有 directPunchFirstDelay 兜底。详见 docs/direct-punch-order.md。
+	//
+	// 中继(r.Via 非空)里无条件发: A<->VPS 这条腿, A 永远是居民/发起侧、必须先朝 E 打, VPS
+	// (公网)停着等这个 nudge 才朝 A 打回来——与 A 自己在不在 CGNAT 无关(见 direct_relay.go)。
+	if d.cfg.Direct.PunchFirst || r.Via != "" {
+		if err := d.send(METHOD_DIRECT_PUNCHING, 0, DirectPunching{Email: r.Email, Token: token}); err != nil {
+			d.logf("send punch-first nudge to %s failed: %v (peer will fall back to its timed delay)", r.Email, err)
+		}
+	}
 	// 多条候选同时打洞, 按 RTT + 地址类型偏置选出最优的那条, 再只对它做一次 QUIC 拨号。
 	// 不是每条候选都拨 QUIC: 打洞包一来一回就够判断通不通与快慢, 通常犯不着为选路
 	// 多付出 N 次完整握手的成本。
@@ -149,7 +162,7 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	if err != nil {
 		return nil, err
 	}
-	if err := d.authenticateSession(sess, token, r.ForwardPort); err != nil {
+	if err := d.authenticateSession(sess, token, r.ForwardPort, r.Via != "", offer.Fingerprint); err != nil {
 		d.dropSession(r.Email, sess, r.ForwardPort)
 		return nil, err
 	}
@@ -161,12 +174,21 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 // authenticateSession 开一条纯鉴权流出示凭证, 并等对端确认。
 //
 // 必须等确认: 认证完成前对端会丢弃 datagram, 不等就发 UDP 会静默掉包。
-func (d *directPeer) authenticateSession(sess *directSession, token string, port uint16) error {
+//
+// 中继连接(relay=true)在出示 token 之后、等确认之前, 还要应答 C 的 uuid 挑战(见
+// direct_relay_auth.go): C 经不可信 VPS 转来, 要靠这步确认对面确是允许的 A。fingerprint 是
+// C 的证书指纹(A 用它固定 TLS, 也把它绑进应答防中继层重放)。
+func (d *directPeer) authenticateSession(sess *directSession, token string, port uint16, relay bool, fingerprint string) error {
 	stream, err := d.openHeadedStream(sess, directStreamAuth, token, port)
 	if err != nil {
 		return fmt.Errorf("open auth stream: %w", err)
 	}
 	defer stream.Close()
+	if relay {
+		if err := answerRelayChallenge(stream, d.cfg.UUID, fingerprint); err != nil {
+			return fmt.Errorf("relay auth: %w", err)
+		}
+	}
 	_ = stream.SetReadDeadline(time.Now().Add(directDialWait))
 	var ack [1]byte
 	if _, err := io.ReadFull(stream, ack[:]); err != nil {
@@ -215,9 +237,9 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	}
 	// 打洞加密准备放在最前面: 配置有误(uuid 缺失/非法)就直接失败, 不用先浪费一趟
 	// 候选收集与信令往返。isInitiator=true: 用自己的 uuid, 不需要查表。按 client
-	// 一次性开关(d.cfg.DirectEncrypt), 不是按 r 这条规则单独配——同一个 uuid 身份
+	// 一次性开关(d.cfg.Direct.Encrypt), 不是按 r 这条规则单独配——同一个 uuid 身份
 	// 发起的所有打洞(direct[] 规则或 -send/-recv)共用同一个决定。
-	if errMsg := d.prepareDirectCrypto(token, d.cfg.DirectEncrypt, true, ""); errMsg != "" {
+	if errMsg := d.prepareDirectCrypto(token, d.cfg.Direct.Encrypt, true); errMsg != "" {
 		return "", offer, errors.New(errMsg)
 	}
 	// 每次都重新收集候选: 隐私临时地址会轮换、NAT 映射会老化重建, 上一次的结果可能
@@ -244,10 +266,11 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, DirectOffer, erro
 	// 哪些没探到 —— 排查直连问题时这些缺一不可。encrypt 一起打出来, 排查"punch 是不是
 	// 用了加密"不用再翻配置反推。
 	d.logf("requesting %s: local socket port %d, my candidates %v, encrypt=%v",
-		r.Email, d.localUDPPort(), myCands, d.cfg.DirectEncrypt)
+		r.Email, d.localUDPPort(), myCands, d.cfg.Direct.Encrypt)
 
 	req := DirectRequest{Email: r.Email, Port: r.ForwardPort, Token: token,
-		Candidates: myCands, Endpoint: firstAddr(myCands), Encrypt: d.cfg.DirectEncrypt}
+		Candidates: myCands, Endpoint: firstAddr(myCands), Encrypt: d.cfg.Direct.Encrypt,
+		PunchFirst: d.cfg.Direct.PunchFirst, Via: r.Via}
 	if err := d.send(METHOD_DIRECT_REQUEST, reqID, req); err != nil {
 		return "", offer, fmt.Errorf("ask server for peer endpoint: %w", err)
 	}

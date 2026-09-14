@@ -68,20 +68,28 @@ type directUDPTarget struct {
 
 // authorize 连接级鉴权。首条 stream 必须出示服务端提前经打洞消息交给我们的一次性凭证;
 // 通过后这条连接即被标记为已认证, 后续 stream 可不带凭证, datagram 也随之放行。
-func (dc *directConn) authorize(token string, port uint16) bool {
+//
+// 中继连接(凭证登记时标了 relay)多一步: token 只证明"经 B 牵线", 而 VPS 不可信, 所以在同一条
+// 首条流上再做一次 uuid 挑战-应答, 确认对面确是 receive.allow 里允许的那个 A(见
+// direct_relay_auth.go)。直连不走这步, 行为与之前完全一致。
+func (dc *directConn) authorize(stream *quic.Stream, head directStreamHead) error {
 	if dc.authed.Load() {
-		return true
+		return nil
 	}
-	e, ok := dc.peer.tokens.take(token)
+	e, ok := dc.peer.tokens.take(head.Token)
 	if !ok {
-		return false
+		return errors.New("token invalid or expired")
 	}
-	if e.port != port {
-		dc.peer.logf("token was issued for port %d but stream asks for %d", e.port, port)
-		return false
+	if e.port != head.Port {
+		return fmt.Errorf("token was issued for port %d but stream asks for %d", e.port, head.Port)
+	}
+	if e.relay {
+		if err := verifyRelayPeer(stream, dc.peer.cfg.Receive, e.email, dc.peer.fingerprint); err != nil {
+			return err
+		}
 	}
 	dc.authed.Store(true)
-	return true
+	return nil
 }
 
 // receiveDatagrams C 侧收对端发来的 UDP 数据, 转成真正的 UDP 包发给内网目标。

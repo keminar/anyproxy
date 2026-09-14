@@ -47,7 +47,7 @@ var DebugLevel int
 // 每包日志, 可以放心跟正常使用一起长期开着。
 //
 // 这是全局默认值(命令行 -direct-plain-udp), 每条 websocket.client 可以用配置文件
-// 里的 directPlainUdp 单独覆盖(见 conf.WsClient.DirectPlainUDP、nat.directPlainUDP)——
+// 里的 direct.plainUdp 单独覆盖(见 conf.DirectSettings.PlainUDP、nat.directPlainUDP)——
 // 问题通常是某张网卡驱动的锅, 一台机器上配了多条走不同网络路径的连接时, 不该为了
 // 绕开一条路径上的问题而牺牲其它路径本来正常的快速路径。
 var DirectPlainUDP bool

@@ -104,9 +104,9 @@ func TestEnsureTransportPlainUDPToggle(t *testing.T) {
 func ptrBool(b bool) *bool { return &b }
 
 // TestDirectPlainUDPResolution 覆盖 directPlainUDP 的三态解析规则: 每条
-// websocket.client 的 directPlainUdp 没配(nil)时跟随全局默认值, 配了 true/false
+// websocket.client 的 direct.plainUdp 没配(nil)时跟随全局默认值, 配了 true/false
 // 就不管全局值是什么, 以这条为准——这是"一台机器多条连接、只有某条路径的网卡有问题"
-// 这个场景成立的前提, 见 conf.WsClient.DirectPlainUDP 的注释。
+// 这个场景成立的前提, 见 conf.DirectSettings.PlainUDP 的注释。
 func TestDirectPlainUDPResolution(t *testing.T) {
 	old := config.DirectPlainUDP
 	t.Cleanup(func() { config.DirectPlainUDP = old })
@@ -125,7 +125,7 @@ func TestDirectPlainUDPResolution(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			config.DirectPlainUDP = c.global
-			got := directPlainUDP(conf.WsClient{DirectPlainUDP: c.perClient})
+			got := directPlainUDP(conf.WsClient{Direct: conf.DirectSettings{PlainUDP: c.perClient}})
 			if got != c.wantPlain {
 				t.Fatalf("directPlainUDP(global=%v, per-client=%v) = %v, want %v", c.global, c.perClient, got, c.wantPlain)
 			}
@@ -278,7 +278,7 @@ func TestDirectParallelStreams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, port); err != nil {
+	if err := a.authenticateSession(sess, token, port, false, c.fingerprint); err != nil {
 		t.Fatalf("authenticate session: %v", err)
 	}
 
@@ -360,7 +360,7 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 		t.Fatalf("connect peer: %v", err)
 	}
 	// datagram 在连接认证之前会被丢弃, 所以必须先认证。
-	if err := a.authenticateSession(sess, token, port); err != nil {
+	if err := a.authenticateSession(sess, token, port, false, c.fingerprint); err != nil {
 		t.Fatalf("authenticate session: %v", err)
 	}
 	go a.receiveDatagrams(sess)
@@ -439,7 +439,7 @@ func TestDirectUDPStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect peer: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, port); err != nil {
+	if err := a.authenticateSession(sess, token, port, false, c.fingerprint); err != nil {
 		t.Fatalf("authenticate session: %v", err)
 	}
 	go a.receiveDatagrams(sess)
@@ -582,7 +582,7 @@ func TestDirectProbeEndpoint(t *testing.T) {
 // 配的地址不用探测, 应该原样拼上本机当前 QUIC 端口成为一条 candSrcLocal 候选; 格式
 // 不对的条目只应该被跳过并计入失败原因, 不能拖垮其它候选的收集。
 func TestGatherCandidatesIncludesConfiguredLanAddrs(t *testing.T) {
-	d := newDirectPeer("test-lan", conf.WsClient{DirectLanAddrs: []string{"192.168.1.50", "not-an-ip"}}, nil)
+	d := newDirectPeer("test-lan", conf.WsClient{Direct: conf.DirectSettings{LanAddrs: []string{"192.168.1.50", "not-an-ip"}}}, nil)
 	if _, err := d.ensureTransport(); err != nil {
 		t.Skipf("cannot create ipv6 udp socket: %v", err)
 	}
@@ -687,7 +687,7 @@ func TestDirectAcceptLifecycle(t *testing.T) {
 	defer stopTarget()
 
 	const port = uint16(2222)
-	c := newDirectPeer("test-c", conf.WsClient{DirectAccept: true}, map[uint16]string{port: target})
+	c := newDirectPeer("test-c", conf.WsClient{Direct: conf.DirectSettings{Accept: true}}, map[uint16]string{port: target})
 
 	// 一开始不该占任何端口。
 	if c.acceptListener() != nil {
@@ -960,7 +960,7 @@ func TestRaceQUICDialClosesExtraWinners(t *testing.T) {
 // 不该建立任何会话, 也不该报错——协议必须和没有这个功能之前完全一样。
 func TestPrepareDirectCryptoNoopWhenDisabled(t *testing.T) {
 	d := newDirectPeer("test", conf.WsClient{}, nil)
-	if errMsg := d.prepareDirectCrypto(testDirectToken32, false, true, ""); errMsg != "" {
+	if errMsg := d.prepareDirectCrypto(testDirectToken32, false, true); errMsg != "" {
 		t.Fatalf("encrypt=false must be a no-op, got errMsg %q", errMsg)
 	}
 	if _, ok := d.crypto.get(testDirectToken32); ok {
@@ -968,40 +968,23 @@ func TestPrepareDirectCryptoNoopWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestPrepareDirectCryptoInitiatorRequiresValidUUID A 侧(isInitiator=true)直接用
-// 自己的 uuid, 不查表——没有合法 uuid 就必须 fail-closed, 不能默默退化成明文。
-func TestPrepareDirectCryptoInitiatorRequiresValidUUID(t *testing.T) {
-	d := newDirectPeer("test", conf.WsClient{}, nil) // UUID 为空
-	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, true, ""); errMsg == "" {
-		t.Fatalf("empty uuid must fail closed, got no error")
+// TestPrepareDirectCryptoEnabledNeedsNoUUID 打洞包密钥从 token 派生, 不依赖 uuid/
+// receive.allow: A(initiator)空 uuid、C(responder)没配 receive.allow, 都应成功建好会话
+// ——不再 fail-closed。这是"directEncrypt 变成纯开关、只防 DPI"这条决策的落地点。
+func TestPrepareDirectCryptoEnabledNeedsNoUUID(t *testing.T) {
+	a := newDirectPeer("test-a", conf.WsClient{}, nil) // UUID 为空
+	if errMsg := a.prepareDirectCrypto(testDirectToken32, true, true); errMsg != "" {
+		t.Fatalf("initiator with no uuid must still succeed, got %q", errMsg)
 	}
-	if _, ok := d.crypto.get(testDirectToken32); ok {
-		t.Fatalf("a failed prepare must not leave a session behind")
-	}
-
-	d.cfg.UUID = testUUIDA
-	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, true, ""); errMsg != "" {
-		t.Fatalf("a valid uuid must succeed, got %q", errMsg)
-	}
-	if _, ok := d.crypto.get(testDirectToken32); !ok {
+	if _, ok := a.crypto.get(testDirectToken32); !ok {
 		t.Fatalf("a successful prepare must register a session under the token")
 	}
-}
 
-// TestPrepareDirectCryptoResponderLooksUpByEmail C 侧(isInitiator=false)必须按对端
-// 报上来的 email 去 receive.allow 查 uuid——查不到就 fail-closed, 这正是"配置疏漏
-// 不能静默退化成明文"这条设计决策的落地点。
-func TestPrepareDirectCryptoResponderLooksUpByEmail(t *testing.T) {
-	d := newDirectPeer("test", conf.WsClient{}, nil)
-	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, false, "a@example.com"); errMsg == "" {
-		t.Fatalf("peer not configured in receive.allow must fail closed, got no error")
+	c := newDirectPeer("test-c", conf.WsClient{}, nil) // 没有 receive.allow
+	if errMsg := c.prepareDirectCrypto(testDirectToken32, true, false); errMsg != "" {
+		t.Fatalf("responder with no receive.allow must still succeed, got %q", errMsg)
 	}
-
-	d.cfg.Receive = conf.ClientReceive{Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
-	if errMsg := d.prepareDirectCrypto(testDirectToken32, true, false, "a@example.com"); errMsg != "" {
-		t.Fatalf("a configured peer must succeed, got %q", errMsg)
-	}
-	if _, ok := d.crypto.get(testDirectToken32); !ok {
+	if _, ok := c.crypto.get(testDirectToken32); !ok {
 		t.Fatalf("a successful prepare must register a session under the token")
 	}
 }
@@ -1015,17 +998,14 @@ func TestDirectPunchEncryptedRoundTrip(t *testing.T) {
 	c := newAcceptPeer(t, nil)
 	a := newDialPeer(t)
 
-	a.cfg.UUID = testUUIDA
-	c.cfg.Receive = conf.ClientReceive{Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
-
 	token, err := newDirectToken()
 	if err != nil {
 		t.Fatalf("new token: %v", err)
 	}
-	if errMsg := a.prepareDirectCrypto(token, true, true, ""); errMsg != "" {
+	if errMsg := a.prepareDirectCrypto(token, true, true); errMsg != "" {
 		t.Fatalf("initiator prepare: %s", errMsg)
 	}
-	if errMsg := c.prepareDirectCrypto(token, true, false, "a@example.com"); errMsg != "" {
+	if errMsg := c.prepareDirectCrypto(token, true, false); errMsg != "" {
 		t.Fatalf("responder prepare: %s", errMsg)
 	}
 

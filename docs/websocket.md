@@ -147,7 +147,8 @@ websocket:
     user: someuser
     pass: somepass
     email: home
-    directAccept: true               # 允许别人直连自己(监听按需起, 平时不占端口)
+    direct:
+      accept: true                   # 允许别人直连自己(监听按需起, 平时不占端口)
     forward:                         # 复用同一张白名单: 未映射的 port 一律拒绝
       - port: 3389
         target: 192.168.1.10:3389
@@ -160,9 +161,10 @@ websocket:
     pass: anotherpass
     email: office
     direct:
-      - listen: "both://:13389"      # 本机入口, mstsc 连这里; 协议前缀 tcp://(默认,可不写)/udp://both://
-        email: home                  # 直连到这个 email 的订阅端
-        forwardPort: 3389            # 选对方 forward[] 里的哪条规则(白名单选号), 不是内网目标端口, 对方没配这个号就拒绝
+      rules:
+        - listen: "both://:13389"    # 本机入口, mstsc 连这里; 协议前缀 tcp://(默认,可不写)/udp://both://
+          email: home                # 直连到这个 email 的订阅端
+          forwardPort: 3389          # 选对方 forward[] 里的哪条规则(白名单选号), 不是内网目标端口, 对方没配这个号就拒绝
 ```
 
 ### 多条路同时打，谁通用谁
@@ -174,11 +176,11 @@ A↔C 那一跳不再只走 IPv6。四类候选**同时**探测、同时打洞�
 | 反射器 IPv4 端点 | 用 QUIC 那个 socket 问服务端的 UDP 反射器（IPv4 那一族） |
 | 反射器 IPv6 端点 | 同上，IPv6 那一族 |
 | 端口映射 | 主动向家用路由器申请一个外网端口（PCP / NAT-PMP / UPnP，三种并行试）；**默认不试**，见下 |
-| `directLanAddrs` | 用户在 `websocket.client.directLanAddrs` 手工填的本机局域网 IP，拼上当前 QUIC 端口直接当一条候选，不经反射器/端口映射 |
+| `direct.lanAddrs` | 用户在 `websocket.client.direct.lanAddrs` 手工填的本机局域网 IP，拼上当前 QUIC 端口直接当一条候选，不经反射器/端口映射 |
 
 任何一路探不到都只是少一个候选，不影响其它路——这正是多候选的意义。以前只探 IPv6，探不到整条直连就废了。
 
-**默认不自动收本机接口地址**（网卡上的 IP）。这类候选只在"两台机器同网段"时才有用，而这里面向的场景主要是跨网——两台机器分处不同网络，中间隔着 CGNAT 或真正的公网。不自动扫描是因为一台机器常有多张网卡（物理网卡、容器桥接、VPN 虚拟网卡等），自动枚举出来的地址大多数对对端毫无意义，只会占服务端候选上限（见下）的名额、干扰排查。如果用户明确知道两台机器实际共享哪个局域网段，可以用 `websocket.client.directLanAddrs` 手工把这个网段的本机 IP 加为候选，参与打洞/QUIC 拨号竞速——只填 IP、不填端口（端口随连接生命周期变化，填了也作废），不可达的地址跟其它候选一样超时静默落选，无副作用。
+**默认不自动收本机接口地址**（网卡上的 IP）。这类候选只在"两台机器同网段"时才有用，而这里面向的场景主要是跨网——两台机器分处不同网络，中间隔着 CGNAT 或真正的公网。不自动扫描是因为一台机器常有多张网卡（物理网卡、容器桥接、VPN 虚拟网卡等），自动枚举出来的地址大多数对对端毫无意义，只会占服务端候选上限（见下）的名额、干扰排查。如果用户明确知道两台机器实际共享哪个局域网段，可以用 `websocket.client.direct.lanAddrs` 手工把这个网段的本机 IP 加为候选，参与打洞/QUIC 拨号竞速——只填 IP、不填端口（端口随连接生命周期变化，填了也作废），不可达的地址跟其它候选一样超时静默落选，无副作用。
 
 **多条都通了才谈优先级**，按实测 RTT 加一个地址类型偏置（相当于给它减去一点 RTT，让它更容易胜出）：
 
@@ -208,7 +210,7 @@ path selection for home: 1.2.3.4:41203(v4) rtt=38ms bias=0s score=38ms,
 
 **端口映射能救什么、不能救什么**：它对付的是**对称 NAT**——那种给每个目的地都换一个外网端口的 NAT，反射器问到的端口对第三方根本没用，只能直接向路由器要一个洞。它**救不了 CGNAT**：路由器上映射成功了，拿到的也只是运营商内网地址，外面依旧进不来，除非 ISP 自己支持 PCP（国内基本没有）。三种协议都失败很正常，只是少一个候选。
 
-**默认不试端口映射，要 `client.directPortmap: true` 才会尝试**：三种协议在家用路由器上的命中率都很低（多数默认关闭或压根不支持），探测还要等三个协议各自的超时——实测能占掉 `gatherCandidates` 一两秒。对大多数用户而言，开着只是让日志多刷三行失败原因、让直连多等一会，从没真正提供过一条候选；只有确认自己路由器支持、且怀疑自己在对称 NAT 后面时才值得打开。
+**默认不试端口映射，要 `client.direct.portmap: true` 才会尝试**：三种协议在家用路由器上的命中率都很低（多数默认关闭或压根不支持），探测还要等三个协议各自的超时——实测能占掉 `gatherCandidates` 一两秒。对大多数用户而言，开着只是让日志多刷三行失败原因、让直连多等一会，从没真正提供过一条候选；只有确认自己路由器支持、且怀疑自己在对称 NAT 后面时才值得打开。
 
 **三段的地址族**：
 
@@ -222,30 +224,82 @@ path selection for home: 1.2.3.4:41203(v4) rtt=38ms bias=0s score=38ms,
 
 **为什么 QUIC socket 必须是同一个双栈 socket**，而不是 v4/v6 各一个：打洞在对端防火墙上开出来的状态是按"本地 ip:port ↔ 对端 ip:port"记的。两个 socket 就是两个源端口，那边开出来的状态和这边实际拨号用的对不上。
 
-### 打洞控制包加密（`directEncrypt`）
+**打洞顺序也会决定成败**：跨"运营商 CGNAT 家宽 ↔ 公网云主机"时，居民/CGNAT 侧必须先发第一个包，否则它的 NAT 映射会被毒化、双向全灭——这条单独成文，见 [direct-punch-order.md](direct-punch-order.md)。
+
+### 打洞控制包加密（`direct.encrypt`）
 
 PUNCH/PONG/WHOAMI/SEEN 这几个打洞控制包是明文 ASCII 协议，走的是 QUIC socket 上单独复用的旁路，不受 QUIC 自身 TLS 保护——部分运营商设备会按包里的明文特征串识别并丢弃，是排查电信/联通打洞失败时确认过的一个病因。
 
-`client.directEncrypt: true` 给本机作为打洞发起方（A）时发出的打洞控制包加一层 AES-256-GCM：复用双方共享的 `uuid` 当密钥材料、按角色派生出双向 key，每个包用独立的随机 nonce（不用递增计数器，适配无序并发的 UDP 打洞场景）。
+`client.direct.encrypt: true` 给本机作为打洞发起方（A）时发出的打洞控制包加一层 AES-256-GCM：**密钥从本次会话的一次性 `token` 派生**（A 生成、经服务端 B 的信令发给对端，两边都有），按角色派生出双向 key，每个包用独立的随机 nonce（不用递增计数器，适配无序并发的 UDP 打洞场景）。
 
-**按 client 一次性开关，不是按 `direct[]` 每条规则单独配**：这台机器发起的所有打洞——不管是 `direct[]` 里的端口转发规则，还是 `-send`/`-recv` 文件传输——都用同一个 `uuid` 身份，因此也共用这同一个开关；两条路径不需要分别配置。（这也是这个字段从最初的 `direct[].encrypt` 改名搬到 `client.directEncrypt` 的原因：挂在每条 `direct` 规则下时，`-send`/`-recv` 现场拼的临时规则里没有这一项，读不到，导致文件传输一直用不上这层加密——搬到 client 级别后，两条路径共享同一份配置，这个限制自然消失。）
+**为什么用 token 而不是 uuid、因此不需要任何身份配置**：这层加密的**唯一目的是防 DPI**（抹掉明文特征串），**不承担鉴权**（鉴权在别处）。密钥只需"两边都有、且运营商 DPI 中间盒看不到"——`token` 正好满足（它只在 TLS 保护的信令里传，DPI 在打洞包路径上看不到它）。所以 `direct.encrypt` 是个**纯开关**：打开即用，**不再需要 `uuid` / `receive.allow`**。（B 能看到 token、理论上能解打洞包，但打洞包里只有 `verb+nonce`、没有秘密，防的是运营商不是 B。）
 
-**纯 opt-in**：不开（默认）协议与之前完全一样，零行为变化。打开前必须满足两个条件：
+**按 client 一次性开关，不是按 `direct.rules[]` 每条规则单独配**：对 `direct.rules[]` 端口转发与 `-send`/`-recv` 文件传输同时生效。
 
-1. 本机 `websocket.client.uuid` 已生成（启动时自动生成，不可手配，见「文件传输」）；
-2. 已经把这个 `uuid` 连同本机 `email` 配进了对端（`direct[]` 规则的 `email`，或 `-send`/`-recv` 的目标 email）那台机器的 `websocket.client.receive.allow`。
-
-任一条件不满足，打洞会直接失败并在错误信息里说明原因，**不会静默退化成明文**——退化会让开这个开关的初衷（防 DPI）本身失效。
+**纯 opt-in**：不开（默认）协议与之前完全一样，零行为变化。**注意两端要都开（或都不开）才对得上**——一端加密、另一端不认识，打洞包会被丢。
 
 ```yaml
 websocket:
   client:
-    directEncrypt: true   # 对端(home)的 receive.allow 要配好本机的 uuid, 见上; 对 direct[] 与 -send/-recv 同时生效
     direct:
-      - listen: "both://:13389"
-        email: home
-        forwardPort: 3389
+      encrypt: true   # 纯开关, 无需 uuid/receive.allow; 对 rules[] 与 -send/-recv 同时生效; 两端要一致
+      rules:
+        - listen: "both://:13389"
+          email: home
+          forwardPort: 3389
 ```
+
+### 经 VPS 盲转发中继（`via` / `direct.relay`）
+
+A、C 都在受限 CGNAT 后、彼此直连怎么都打不通，但两台各自都能连通一台公网 VPS 时，可以让 VPS 当**盲转发中继**：A 的直连入口规则加 `via: <VPS 的 email>`，VPS 那台开 `direct.relay: true`。
+
+关键是这台 VPS **不需要为每对 A-C 配任何东西**（不配 `forward`/`direct.rules`/`receive.allow`），只要一个总开关。它收到中继请求就为这一对开一个专用 UDP socket、探到自己的公网端点 E，让 A、C 都朝 E 打洞，之后在两个来源地址之间**盲转发不透明 UDP 包**——它不终结 TLS、不解 QUIC，全程看不到明文。
+
+```
+   A ─────(QUIC-TLS 端到端, VPS 看不见明文)───── C
+   └───────────▶  VPS 专用中转 socket  ◀──────────┘   数据不经 B; B 只交换地址/指纹
+```
+
+- **信令几乎全复用直连那套**：`d_request` 加 `via`、`d_punch` 加中继腿标记、`d_offer`/`d_ready`/`d_punching` 原样用，只新增一个 `d_relay_open`(B→VPS 让它开 socket 探 E)。
+- **两条腿都是"居民→云"打洞**：A、C 都先打、VPS 停着等各自的 nudge 再打回去（复用 `direct.punchFirst` 那套顺序机制）。任一腿打不通，整条中继失败、不再兜底。
+- **鉴权在 A↔C 端到端、绕开不可信的 VPS**：A 用 C 的证书指纹固定校验对面是真 C；C 在 e2e QUIC 首条流上对 A 做一次 **uuid 挑战-应答**（发随机 nonce，A 回 `HMAC(uuid, nonce ‖ C的证书指纹)`），按自己的 `receive.allow` 里 A 的 uuid 验——**uuid 全程不上网**，绑 C 指纹防 VPS 层重放。所以 C 侧要在 `receive.allow` 里配 A 的 uuid（与文件传输复用同一份名单）。
+- **`direct.encrypt` 与中继无关**：中继的安全不依赖它，它只是给两条腿的打洞包防 DPI。
+
+**对 VPS 的要求：稳定、可入站的公网端点。** VPS 默认靠反射器探自己的出口映射来得到 E，这在 **1:1 公网 IP 或端点无关(EIM/锥形)NAT** 下没问题（普通云主机 10.x→固定 49.x 就是这种）。但如果 VPS 挂在**出口 IP/端口逐流随机（对称型）的 NAT 网关**后，反射器探到的出口 ≠ A/C 发包时对应的入向映射，中继会失败（和对称 NAT 打不了洞同理）。这时应给这台 VPS 配一条**固定 DNAT 入站规则**（公网 `IP:端口` → VPS 同一 UDP 端口），并用 `direct.relayPublic` 把那个公网端点显式填进来：它会跳过反射器、把中继 socket 绑到该端口，入站恒开、与出口随不随机无关。一个端口只能承载一对并发中继，要更多并发就多配几个端口（各配好 DNAT/安全组）。当然，最省事的还是给中继 VPS 一个真正的 1:1 公网 IP。
+
+```yaml
+# A(居民, CGNAT): 入口规则加 via
+websocket:
+  client:
+    direct:
+      punchFirst: true
+      rules:
+        - listen: "both://:13389"     # mstsc 连这里
+          email: home                 # 最终目标 C
+          forwardPort: 3389
+          via: relay-vps              # 经这台 VPS 中继
+
+# VPS(公网): 一个开关, 无需任何 per-pair 配置
+websocket:
+  client:
+    direct:
+      relay: true
+      # relayAllow: [office]          # 可选: 只放行指定来源 email
+
+# C(居民, CGNAT): 照常 direct.accept + forward, 另在 receive.allow 里认 A 的 uuid
+websocket:
+  client:
+    direct:
+      punchFirst: true
+      accept: true
+    forward:
+      - {port: 3389, target: 192.168.1.10:3389}
+    receive:
+      allow:
+        - {email: office, uuid: <A 的 uuid>}
+```
+
+完整设计（信令流程、失败语义、鉴权推导、代码落点）见 [direct-relay-design.md](direct-relay-design.md)。
 
 ### 文件传输（`-send` / `-recv` / `receive`）
 
@@ -258,12 +312,12 @@ websocket:
 | `-send PATH -to EMAIL` | 把本机的文件推给对方 | 发送的那台 |
 | `-recv EMAIL:PATH -to DIR` | 把对方的文件取回本机 | **取文件的那台**，对方不需要有人配合 |
 
-配置只有一份，两个方向共用（直连路径还需同时开 `directAccept`）：
+配置只有一份，两个方向共用（直连路径还需同时开 `direct.accept`）：
 
 ```yaml
 websocket:
   client:
-    directAccept: true
+    direct.accept: true
     receive:
       dir: D:/incoming            # 收到的文件落这里，也是允许被取走的根目录；不配则收发都拒绝
       readonly: false             # true 时 dir 只能被取走、不接受任何人写入
@@ -315,7 +369,7 @@ anyproxy -recv home@example.com:backup       -to /data/in    # 取整个目录�
 
 实现上不需要反转连接方向：A 仍然是打洞/拨号的发起方，只是在流上先说一句"把这个给我"，之后两边的角色互换——C 跑发送逻辑，A 跑接收逻辑，落盘、`.part` 占位、SHA-256 校验、重名不覆盖这些跟 `-send` 是同一份代码。
 
-#### 两条路径，必须显式声明：`-via direct`（默认）还是 `-via relay`
+#### 两条路径，必须显式声明：`-via direct`（默认）还是 `-via relay`（还有第三种取值，见下）
 
 `-send` 和 `-recv` 都认这个参数。
 
@@ -327,7 +381,7 @@ anyproxy -send bigfile.zip -to home@example.com -via relay
 |---|---|---|
 | 数据怎么走 | A↔C 打洞直连（路径 C），不经 B | 经 B 转发，走 A、C 各自已鉴权的 websocket 连接 |
 | 加密 | QUIC 全程加密，B 看不到内容 | 用 `receive.allow` 里的 uuid 派生出的密钥端到端加密（见下），B 转发的是密文，同样看不到内容 |
-| 前提条件 | 收端要开 `directAccept`；打洞可能失败（双方都在严格 NAT/CGNAT 后面） | 收端**不需要**开 `directAccept`；只要 A、C 都连着同一个 B 就能传，不需要打洞 |
+| 前提条件 | 收端要开 `direct.accept`；打洞可能失败（双方都在严格 NAT/CGNAT 后面） | 收端**不需要**开 `direct.accept`；只要 A、C 都连着同一个 B 就能传，不需要打洞 |
 | 失败即拒收 | 是——一个字节都不传 | 是——同样不做静默回落，两条路径互不兜底 |
 
 `receive.allow` 在两条路径下都有效，但核验方式不同：
@@ -336,6 +390,21 @@ anyproxy -send bigfile.zip -to home@example.com -via relay
 - **`relay`**：uuid 直接被当作这次传输的加密密钥的派生来源——接收方按发送方自报的 email 查到 uuid，用它加密/解密整段数据；能不能解密+校验通过本身就是身份证明，不需要另外声明一次。这带来一个额外的好处：**中继路径现在也是端到端加密的**，B 全程只转发密文，连 email/uuid 这些字段的值都不需要保密。
 
 选哪条：两条路径现在都是端到端加密，主要看能不能打洞——能打洞就用 `direct`（延迟更低，不占 B 的带宽）；打洞失败、或者双方所在网络已知走不通打洞（比如同一个运营商大内网互相看不见）时用 `relay`，代价是吞吐受 B 的带宽限制。
+
+**打洞不通、但双方都能连一台公网 VPS 时，`-via` 还接受第三种取值：填一台 VPS 的 email**
+（那台 VPS 需开 `direct.relay`，见「经 VPS 盲转发中继」）：
+
+```bash
+anyproxy -send bigfile.zip -to home@example.com -via relay@example.com
+```
+
+`-via` 只有两个保留关键字 `direct`/`relay`，除此之外任何值都被当作 VPS 的 email——正常
+email 都带 `@`，不会字面撞上这两个词。打洞对象从对端换成 VPS 的中继端点，QUIC/TLS 依旧
+端到端在两个订阅方之间、VPS 只盲转发不透明包（看不到内容）——**不是** `-via relay` 那条经
+B 转发的路径，只是把"打洞打给谁"换成了 VPS。`receive.allow` 里还要多验一次：接收方在
+e2e QUIC 流首部对发送方做一次 uuid 挑战-应答（nonce 绑证书指纹防中继层重放），核验依据
+仍是同一份 `receive.allow`，不需要另配。适用双方都在受限 CGNAT 后彼此直连打不通、但各自
+能连通该 VPS 的场景。
 
 **版本要求**：`-recv -via relay`（经中继取文件）要求**服务端 B 也升级到本版本**——B 转发中继请求时会重新拼一个消息，老版本的 B 不认识新增的"这是取件不是发件"标记，会把它丢掉，C 于是当成收文件来处理，最后回一个语焉不详的错误。表现是明确失败（不会静默地传错东西），但要看懂就得知道这一段。`-recv -via direct`（打洞取件）不受影响：数据面完全不经 B，B 只转交地址，一行都不用动。
 
@@ -349,7 +418,7 @@ anyproxy -send bigfile.zip -to home@example.com -via relay
 - **文件名是对端说了算的，所以要防越界**：拒绝绝对路径、`..`、反斜杠和盘符，拼完之后再确认结果确实落在接收目录内。两道都做——先检查原始名字再规范化，顺序反了的话 `path.Clean` 会把 `..` 直接吃掉，检查永远不触发。
 - **取文件方向多一道符号链接检查**。收文件时创建的是新文件，符号链接无从谈起；取文件不一样——共享目录里放一个指向 `/etc/shadow` 的软链，光靠上面那套字符串检查是拦不住的（拼出来的路径确实在目录内），所以解析完软链之后要再确认一次仍在目录内。共享目录自己经由软链（macOS 的 `/tmp` → `/private/tmp`）是正常配置，两边都解析后再比，不会误判。
 - **`-send` / `-recv` 都是独立进程**，不要求本机已经跑着 anyproxy。收发文件是有明确起止的动作，独立进程的退出码就能表达成败。它会临时多开一条 websocket，不影响常驻那条——直连信令是按"发起请求的那条连接"回的，不是按 email 查的。
-- **常驻的那份配置若只是为了给 `-send`/`-recv` 取凭证，不用额外配置**：`anyproxy` 常驻进程启动时会为每一条 `websocket.client(s)` 判断值不值得发起常驻连接——只要 `subscribe`/`forward`/`direct`/`directAccept`/`receive.dir` 全是空的，就自动跳过（这条配置仍然完好，只是常驻进程不去连它；运行 `-send`/`-recv` 时照常按这条配置的凭证取用）。这是因为服务端也是同一套判断：空 `subscribe` 又不是转发目标/直连方/接收方的连接会被 `serveWs` 一直拒绝并断开（日志刷 `ignore, subscribe is empty`），常驻进程连上去纯属陪跑。想强制跳过（哪怕配了其中几项）就显式加 `sendRecvOnly: true`。
+- **常驻的那份配置若只是为了给 `-send`/`-recv` 取凭证，不用额外配置**：`anyproxy` 常驻进程启动时会为每一条 `websocket.client(s)` 判断值不值得发起常驻连接——只要 `subscribe`/`forward`/`direct.rules`/`direct.accept`/`receive.dir` 全是空的，就自动跳过（这条配置仍然完好，只是常驻进程不去连它；运行 `-send`/`-recv` 时照常按这条配置的凭证取用）。这是因为服务端也是同一套判断：空 `subscribe` 又不是转发目标/直连方/接收方的连接会被 `serveWs` 一直拒绝并断开（日志刷 `ignore, subscribe is empty`），常驻进程连上去纯属陪跑。想强制跳过（哪怕配了其中几项）就显式加 `sendRecvOnly: true`。
 
 **千兆链路上的吞吐（仅 `direct`；`relay` 受 B 的带宽限制，不受这个影响）**：QUIC 接收窗口已按千兆调过（单流 32MB / 连接 64MB）。quic-go 的默认值（单流 6MB）是按网页流量定的，吞吐上限约等于 `窗口 / RTT`，6MB 在 50ms RTT 下只剩约 960Mbps、100ms 下掉到约 480Mbps，跨省传大文件正好撞上。Linux 上还要保证 UDP 收包缓冲够大（`anyproxy -check` 会检查 `net.core.rmem_max`），否则 quic-go 会打一行 "failed to sufficiently increase receive buffer size" 并跑不满。
 
@@ -359,7 +428,7 @@ anyproxy -send bigfile.zip -to home@example.com -via relay
 
 排查方法：`-debug 2` 时 quic-go 会打一行 `connection doesn't allow setting of receive buffer size. Not a *net.UDPConn?`（`-debug 2` 自己出于打日志的需要也会触发同一次断言失败，副作用是顺带绕开了这条快速路径）。如果加上 `-debug 2` 之后丢包率骤降、拥塞窗口涨得正常了，就是这个问题——用 `-direct-plain-udp` 长期开着即可，它不逐包打日志，没有 `-debug 2` 那份开销。
 
-`-direct-plain-udp` 是全局默认值，常驻进程配了多条 `websocket.client`（`clients` 数组）分别走不同网卡/网络路径时，问题通常只出在其中一条路径的网卡驱动上，不该为了绕开它而牺牲其它路径本来正常的快速路径——这时候在对应那条 `client` 块里单独配 `directPlainUdp: true`（或 `false`）覆盖全局默认值即可，不配就跟随命令行的值。
+`-direct-plain-udp` 是全局默认值，常驻进程配了多条 `websocket.client`（`clients` 数组）分别走不同网卡/网络路径时，问题通常只出在其中一条路径的网卡驱动上，不该为了绕开它而牺牲其它路径本来正常的快速路径——这时候在对应那条 `client` 块里单独配 `direct.plainUdp: true`（或 `false`）覆盖全局默认值即可，不配就跟随命令行的值。
 
 #### 单个大文件切块并行传输：`-parallel N`
 
@@ -537,14 +606,19 @@ websocket:
 | `uuid` | 这份配置的身份凭证，只在文件传输(`-send`)的收发双方之间使用，B 完全不感知。**不可在配置文件里配**：启动时自动生成并持久化到配置文件同目录、同名的隐藏文件（`router.yaml` 对应 `.router.uuid`），重启不变；`-c` 指向不同配置文件各自独立、不共用。生成后打在启动日志里，复制给对端配进它的 `receive.allow[].uuid`。见「文件传输」 |
 | `subscribe` | HTTP 头订阅规则数组，每条 `{key, val}`；路径 A 用 |
 | `forward` | 裸 TCP 转发目标规则数组（路径 B），每条 `{port, target}`，见下 |
-| `directAccept` | `true` 时起 QUIC 监听并把端点通告给服务端，允许其它订阅方直连自己（路径 C，见下）；监听按需起、空闲释放，平时不占端口 |
-| `direct` | 本机 QUIC 直连入口规则数组（路径 C），每条 `{listen, email, forwardPort}`，`listen` 可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，见下 |
-| `directEncrypt` | `true` 时本机作为打洞发起方发出的打洞控制包(PUNCH/PONG)额外加密，防运营商设备按明文特征丢包；默认 `false`，纯 opt-in。按 client 一次性开关，对 `direct[]` 与 `-send`/`-recv` 同时生效，见「打洞控制包加密」 |
-| `directPortmap` | `true` 时直连候选收集才会去尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` 不试——命中率低又要等三个协议的超时，见上「多条路同时打，谁通用谁」 |
-| `directPlainUdp` | 覆盖命令行 `-direct-plain-udp` 对这一条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 |
-| `directLanAddrs` | 手工配置本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速的候选，见上「多条路同时打，谁通用谁」；不做网卡自动扫描 |
+| `direct.accept` | `true` 时起 QUIC 监听并把端点通告给服务端，允许其它订阅方直连自己（路径 C，见下）；监听按需起、空闲释放，平时不占端口 |
+| `direct.rules` | 本机 QUIC 直连入口规则数组（路径 C），每条 `{listen, email, forwardPort, via}`，`listen` 可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，见下 |
+| `direct.encrypt` | `true` 时本机作为打洞发起方发出的打洞控制包(PUNCH/PONG)额外加密，防运营商设备按明文特征丢包；默认 `false`，纯 opt-in。按 client 一次性开关，对 `direct.rules[]` 与 `-send`/`-recv` 同时生效，见「打洞控制包加密」 |
+| `direct.portmap` | `true` 时直连候选收集才会去尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` 不试——命中率低又要等三个协议的超时，见上「多条路同时打，谁通用谁」 |
+| `direct.punchFirst` | `true` 声明本机在受限运营商 CGNAT 后、主动发起直连时必须先发第一个包（让对端接受方推迟打洞）；默认 `false`。家宽机器连公网/云主机连不上时设它，见 [direct-punch-order.md](direct-punch-order.md) |
+| `direct.relay` | `true` 时本机(一台公网 VPS)允许作为 A↔C 之间的盲转发中继；默认 `false`。**无需为每对 A-C 配任何东西**，目标 C 由发起方用 `direct.rules[].via` 指定，见「经 VPS 盲转发中继」 |
+| `direct.relayAllow` | 可选，收紧 `direct.relay`：只放行这些来源 email(发起方 A)用本机中继；留空=不限制。仅 email 准入名单，不涉及 uuid |
+| `direct.relayPublic` | 可选，显式指定本机公网中继端点数组(`ip:port`)。配了就跳过反射器探测、直接用它当 E 并把中继 socket 绑到该端口；用于 VPS 挂在**出口随机(对称)NAT 网关**后、需改用固定 DNAT 入站的场景。一个端口一对并发，见「经 VPS 盲转发中继」 |
+| `direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对这一条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 |
+| `direct.lanAddrs` | 手工配置本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速的候选，见上「多条路同时打，谁通用谁」；不做网卡自动扫描 |
 | `receive` | 接收文件传输（直连或中继）的配置 `{dir, allow}`，`allow` 每条 `{email, uuid}`；不配 `dir` 则一律拒收，`allow` 留空则谁都不接受，见「文件传输」 |
 | `sendRecvOnly` | `true` 时强制这条配置只用来给 `-send`/`-recv` 命令行取凭证（含生成/持久化 `uuid`），常驻进程不会为它发起连接，哪怕配了 `subscribe`/`forward`/`direct`/`receive` 也照样跳过。**通常不需要配它**：这几项全空时常驻进程会自动判断出没什么可连的而跳过，见下方说明 |
+| `direct` | QUIC 直连/中继相关全部配置的嵌套块，见上面各 `direct.*` 行；对应结构体 `DirectSettings` |
 
 ### 密钥对鉴权（免时钟同步）
 
@@ -630,15 +704,16 @@ websocket:
 | `port` | 订阅端 | 对应服务端入口端口号（如 `2222`），TCP 与 UDP 共用同一张表 |
 | `target` | 订阅端 | 收到该端口来的连接/数据报时 dial 的内网真实目标，如 `127.0.0.1:22` |
 
-`client.direct` 每条（`ClientDirect`，路径 C 的本机直连入口，配在**发起方** A 上）：
+`client.direct.rules` 每条（`ClientDirect`，路径 C 的本机直连入口，配在**发起方** A 上）：
 
 | 字段 | 说明 |
 |------|------|
 | `listen` | 本机入口监听地址，如 `:13389`；`:13389` 绑 `[::]` 双栈，IPv4 客户端也能连。可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，如 `both://:13389`——两种协议在 QUIC 上走不同承载（stream / datagram），见下文「TCP 与 UDP」；`both://` 常用于 RDP |
 | `email` | 直连到这个 email 的订阅方（即 C，须与本条 `server` 连接下的另一订阅方一致） |
 | `forwardPort` | 告诉 C 用它自己 `client.forward[port]` 里的哪条规则；**不是**要 dial 的内网目标端口，也不是上面 `listen` 的端口。故意设计成白名单选号：没有它 A 只凭 `email` 就能让 C 转发到 C 配过的任意内网目标，有了它 C 只认自己 `forward` 里列出的端口，未映射的一律拒绝 |
+| `via` | 可选。填一台公网 VPS 的 email(那台需开 `direct.relay`)，则经它盲转发到 `email`(最终目标 C)，而非直连；留空=直连。适用 A、C 都在受限 CGNAT 后彼此打不通、但各自能连通 VPS 的场景，见「经 VPS 盲转发中继」 |
 
-`client.receive`（`ClientReceive`，接收直连传来的文件，配在**接收方** C 上，需同时开 `directAccept`）：
+`client.receive`（`ClientReceive`，接收直连传来的文件，配在**接收方** C 上，需同时开 `direct.accept`）：
 
 | 字段 | 说明 |
 |------|------|
@@ -669,7 +744,7 @@ websocket:
 |------|--------|
 | `-ws-listen` | `websocket.server.listen` |
 | `-genkey` | 生成一对鉴权密钥并退出（私钥填 `websocket.client.key`，公钥填 `websocket.server.users[].key`） |
-| `-send PATH -to EMAIL [-via direct\|relay] [-parallel N]` | 把文件/目录发给另一个订阅端并退出，`-via` 默认 `direct`，`-parallel` 默认 1（见"文件传输"） |
+| `-send PATH -to EMAIL [-via direct\|relay\|VPS的email] [-parallel N]` | 把文件/目录发给另一个订阅端并退出，`-via` 默认 `direct`，`-parallel` 默认 1；`-via` 填一台公网 VPS 的 email 则经它盲转发中继打洞（见"文件传输"） |
 
 > 订阅端(客户端)**没有命令行参数**，`connect`/`user`/`pass`/`key`/`email`/`subscribe`/`forward` 都只能写在配置文件里；同时订阅多台 server 也只能用 `websocket.clients[]`。所以裸 TCP 转发（依赖 `forward`）和订阅端相关配置只能用配置文件。
 
@@ -684,7 +759,7 @@ websocket:
 - **UDP 中继只在 `listen` 带 `udp://`/`both://` 前缀时才起**：不写前缀默认 `tcp://`，光配 `client.forward` 是不够的，入口那条规则的 `listen` 也得带上协议前缀。
 - **路径 A 的 `CONNECT` 不支持**：HTTP 头订阅路径只处理非 `CONNECT` 的 HTTP 请求。
 - **直连打洞失败没有中继回落**：A 的入口连接会直接被关掉，日志打 `nat direct entry ... failed: no path to <email>: <每条候选卡在哪>`。这是设计如此，不是 bug——直连和中继是两条独立路径，互不兜底；要经中继就配 `server.forward`，不要指望 `direct` 失败会自动退回去。
-- **`-send` 打洞失败同理，退出码非零、一个字节都不传**：常见原因是双方都在严格 NAT/CGNAT 后面、所有候选（反射器 v4/v6、端口映射、手工配置的 `directLanAddrs`）连同打洞全灭后的 QUIC 拨号竞速兜底全部失败——终端上会打印 `send: direct connect to <email> failed, nothing was sent: ...`，带着每条候选的失败原因。
+- **`-send` 打洞失败同理，退出码非零、一个字节都不传**：常见原因是双方都在严格 NAT/CGNAT 后面、所有候选（反射器 v4/v6、端口映射、手工配置的 `direct.lanAddrs`）连同打洞全灭后的 QUIC 拨号竞速兜底全部失败——终端上会打印 `send: direct connect to <email> failed, nothing was sent: ...`，带着每条候选的失败原因。
 - **收文件的一端没配 `receive.dir`**：发送端会收到 `peer does not accept files (websocket.client.receive.dir is not set)` 并非零退出；这不是打洞失败，是对端明确拒绝，检查 C 的配置而不是查网络。
 - **`receive.allow` 里 email 对了，但 `uuid` 没抄对**：直连报 `email %s is not in websocket.client.receive.allow, or its uuid does not match`；中继因为 uuid 直接是加密密钥，对不上会在解密阶段失败（错误信息不会明说"uuid 不对"，因为中继路径这一步本来就无法区分"密钥错"和"数据被篡改"，两者都必须一律拒绝）。去发送方的启动日志确认 `websocket.client.uuid` 到底是什么，跟接收方 `receive.allow[].uuid` 逐字比对。
 - **`receive.allow` 留空**：现在语义是"谁都不接受"，不是旧版的"不限制"——uuid 缺失时没法做身份比对，也没法给中继派生密钥，没有"不限制"这个选项了，必须显式配对方。

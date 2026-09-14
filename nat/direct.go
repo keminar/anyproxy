@@ -31,8 +31,17 @@ const (
 	// 去程+回程。早期版本按 150ms/包做等待窗, 在 RTT>150ms 的链路上(跨省/跨境的
 	// 常态)每个 pong 都会迟到几毫秒, 打洞在数学上永远失败 —— 实测 RTT 153ms 的
 	// 国际链路, 6 轮全部差 3~6ms 超时, 而 tcpdump 显示双向包都健康到达。
-	// 2s 覆盖 RTT ~1s 的链路; 成功路径不受影响(健康链路 pong 毫秒级就到)。
-	directPunchWait = 2 * time.Second
+	// 取 3s: 覆盖 RTT ~1s 的链路, 并给 order Y 下"接受方等 nudge/兜底后才打"留出重叠余量
+	// (发起方的打洞窗口要盖住接受方开打的那一刻)。成功路径不受影响(健康链路 pong 毫秒级
+	// 就到, 早早返回)。
+	directPunchWait = 3 * time.Second
+	// directPunchFirstDelay 对端(发起方)声明了 directPunchFirst、要求先打时, 接受方
+	// 推迟自己打洞的**兜底**时长。正常情况下接受方是收到发起方经 B 转来的 d_punching
+	// nudge(发起方一开打就发)才打, 那是确定性的、不靠猜延迟; 这个固定延迟只在 nudge
+	// 丢失(B 抖动/对端没发)时兜底, 到点也打, 退化成"固定延迟"的老行为。取 2s: 盖住
+	// "本侧回 d_ready -> 经 B 转 d_offer -> 发起方开打并把 nudge 发回来"这一小段, 实测
+	// 足够(B 的小信令 RTT 远小于此), B 特别卡可调大。详见 docs/direct-punch-order.md。
+	directPunchFirstDelay = 2 * time.Second
 	// udpReadBufferSize debug 模式下 socket 被包装成 observeConn, quic-go 检测不到
 	// *net.UDPConn 就不会替我们设收包缓冲, 只能自己来。与 quic-go 期望的 7MB 对齐。
 	udpReadBufferSize = 7 << 20
@@ -53,6 +62,13 @@ const (
 	directSessionIdle = 90 * time.Second
 	// directReapEvery 空闲回收的检查间隔。
 	directReapEvery = 30 * time.Second
+
+	// directRelayIdle VPS 盲转发中继绑定的空闲回收阈值: 专用 socket 上这么久没有任何
+	// 转发流量就关掉它和它的读循环。取值明显大于 QUIC 的 KeepAlivePeriod(20s), 好让
+	// 活着的中继(A<->C 的 e2e QUIC 每 20s 有保活包过 socket)永不被误判空闲; 只有 e2e
+	// QUIC 真死了才在这之后被回收。与直连的 directSessionIdle 同一套思路, 但中继上没有
+	// "连接引用计数"可依赖, 只能纯看有没有流量, 所以阈值取得更宽松。
+	directRelayIdle = 30 * time.Minute
 )
 
 // directPeer 一条 websocket 连接对应的直连运行时。挂在 wsClientConn 上(不是 Client),
@@ -91,6 +107,18 @@ type directPeer struct {
 	acceptUse   atomic.Int64 // 最近一次使用时间(unix nano)
 	fingerprint string
 	tokens      *directTokenStore
+
+	// pendingPunch C 侧 order Y(对端设了 directPunchFirst、要求先打)时用: 收到 d_punch
+	// 先不打, 把打洞按 token 停在这里, 等对端的 d_punching nudge(发起方一开打就发,经 B
+	// 转来)再打; nudge 丢了则 directPunchFirstDelay 到点兜底打(见 parkPunch/onPunching)。
+	punchMu      sync.Mutex
+	pendingPunch map[string]*parkedPunch
+
+	// relays VPS 盲转发中继(directRelay)侧: 按 token 索引的活跃中继绑定, 每个绑定持有
+	// 一个专用 UDP socket, 在 A、C 两个居民地址之间盲转发不透明 UDP 包(见 direct_relay.go)。
+	// 只有开了 directRelay 的机器会往里放东西。
+	relayMu sync.Mutex
+	relays  map[string]*relayBinding
 
 	// crypto 打洞会话的加密上下文, 按 token 索引。A、C 两种角色共用同一份: 打洞发生
 	// 在 QUIC 连接建立之前, 此时还没有 directSession 可以挂; 且一个 directPeer 上
@@ -140,7 +168,7 @@ func (d *directPeer) ensureTransport() (*quic.Transport, error) {
 	//   - directPlainUDP(d.cfg): 见 config.DirectPlainUDP 的注释——在部分机器上
 	//     (实测至少一台 Windows)那条"快速路径"本身才是问题根源(丢包、拥塞窗口涨不
 	//     起来), 关掉它反而更快更干净。跟 debug 的区别是不逐包打日志, 可以放心长期
-	//     开着; 每条 websocket.client 各自的 directPlainUdp 配置可以覆盖命令行的
+	//     开着; 每条 websocket.client 各自的 direct.plainUdp 配置可以覆盖命令行的
 	//     全局默认值(不是所有网卡/路径都会撞上这个问题)。
 	// 两条都不触发时保持原生 *net.UDPConn, quic-go 的批量收发优化不受影响。
 	switch {
@@ -169,11 +197,11 @@ func (d *directPeer) ensureTransport() (*quic.Transport, error) {
 }
 
 // directPlainUDP 解出这条 websocket.client 连接是否该绕开 quic-go 的 UDP 快速路径
-// (见 config.DirectPlainUDP 的注释)。cfg.DirectPlainUDP 显式配置优先, 不配(nil)才
+// (见 config.DirectPlainUDP 的注释)。cfg.Direct.PlainUDP 显式配置优先, 不配(nil)才
 // 落到命令行 -direct-plain-udp 的全局默认值——单条连接遇到问题不该拖累其它路径。
 func directPlainUDP(cfg conf.WsClient) bool {
-	if cfg.DirectPlainUDP != nil {
-		return *cfg.DirectPlainUDP
+	if cfg.Direct.PlainUDP != nil {
+		return *cfg.Direct.PlainUDP
 	}
 	return config.DirectPlainUDP
 }
@@ -338,6 +366,7 @@ func newDirectPeer(tag string, cfg conf.WsClient, forward map[uint16]string) *di
 		crypto:   newDirectCryptoTable(),
 		offers:   make(map[uint]chan DirectOffer),
 		sessions: make(map[string]*directSession),
+		relays:   make(map[string]*relayBinding),
 	}
 }
 
@@ -388,8 +417,12 @@ func handleDirectClient(c *Client, msg *Message) bool {
 	switch msg.Method {
 	case METHOD_DIRECT_PUNCH:
 		d.onPunch(msg)
+	case METHOD_DIRECT_PUNCHING:
+		d.onPunching(msg)
 	case METHOD_DIRECT_OFFER:
 		d.onOffer(msg)
+	case METHOD_DIRECT_RELAY_OPEN:
+		d.onRelayOpen(msg)
 	default:
 		d.logf("unexpected %s from server", msg.Method)
 	}
@@ -406,6 +439,12 @@ type directTokenStore struct {
 type directTokenEntry struct {
 	port    uint16
 	expires time.Time
+
+	// relay 为 true 表示这条连接是经 VPS 盲转发来的: VPS 不可信, 光有 token 不够, 进数据面
+	// 前还要在 e2e QUIC 流里做一次 uuid 挑战-应答(见 direct_relay_auth.go)。email 是 B 认证
+	// 过的发起方 A 的 email, C 据此去 receive.allow 查该用哪个 uuid 验(不采信 A 自报)。
+	relay bool
+	email string
 }
 
 func newDirectTokenStore() *directTokenStore {
@@ -413,16 +452,26 @@ func newDirectTokenStore() *directTokenStore {
 }
 
 func (s *directTokenStore) put(token string, port uint16) {
+	s.putEntry(token, directTokenEntry{port: port})
+}
+
+// putRelay 登记一条中继连接的凭证: 除端口外还记下"需 uuid 挑战-应答"及发起方 email。
+func (s *directTokenStore) putRelay(token string, port uint16, email string) {
+	s.putEntry(token, directTokenEntry{port: port, relay: true, email: email})
+}
+
+func (s *directTokenStore) putEntry(token string, e directTokenEntry) {
 	now := time.Now()
+	e.expires = now.Add(directTokenTTL)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// 顺带清掉过期项: 凭证只在 punch 到拨号这段短时间内有用, 不清会随连接数无限增长。
-	for t, e := range s.tokens {
-		if now.After(e.expires) {
+	for t, old := range s.tokens {
+		if now.After(old.expires) {
 			delete(s.tokens, t)
 		}
 	}
-	s.tokens[token] = directTokenEntry{port: port, expires: now.Add(directTokenTTL)}
+	s.tokens[token] = e
 }
 
 // take 校验并消费一个凭证, 一次性: 取走即删, 重放无效。

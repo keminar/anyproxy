@@ -14,7 +14,7 @@ import (
 //
 // 不扫网卡去自动发现本机接口地址: 一台机器常有多张网卡(物理网卡、容器桥接、VPN
 // 虚拟网卡等), 自动枚举出来的地址对对端大多毫无意义, 只会增加候选噪音。同网段场景
-// 改成让用户在 websocket.client.directLanAddrs 里显式配置(见 conf.WsClient.DirectLanAddrs 和
+// 改成让用户在 websocket.client.direct.lanAddrs 里显式配置(见 conf.DirectSettings.LanAddrs 和
 // direct_reflect.go 的 gatherCandidates), candSrcLocal 就是这类候选的来源标签。
 //
 // 多条都通时才谈优先级, 按实测 RTT 选, 并按地址类型给一个偏置(相当于给它减去一点
