@@ -54,13 +54,20 @@ func (s *wsTunnel) transfer() bool {
 		log.Println(trace.ID(s.req.ID), "websocket transfer start")
 	}
 
-	c := nat.ServerHub.GetClient(s.header)
+	// 一次取一份快照, 而不是分别读两个全局量: 后者除了和测试装配/还原构成 data race,
+	// 还可能读成"新 hub 配旧 bridge"。
+	hub, bridge := nat.ServerHubAndBridge()
+	if hub == nil || bridge == nil {
+		log.Println(trace.ID(s.req.ID), "websocket server hub not ready")
+		return false
+	}
+	c := hub.GetClient(s.header)
 	if c == nil {
 		// 走旧转发
 		log.Println(trace.ID(s.req.ID), "websocket subscribe not found")
 		return false
 	}
-	b := nat.ServerBridge.Register(c, s.req.ID, nat.ConnHTTP, s.req.conn)
+	b := bridge.Register(c, s.req.ID, nat.ConnHTTP, s.req.conn)
 	defer func() {
 		b.Unregister()
 	}()

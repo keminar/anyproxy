@@ -27,22 +27,25 @@ const (
 func fileRelayTestServer(t *testing.T, users []conf.ServerUser) string {
 	t.Helper()
 	oldCfg := conf.RouterConfig()
-	oldHub, oldBridge, oldStart := ServerHub, ServerBridge, serverStart
+	oldState := currentServerState()
 	t.Cleanup(func() {
 		conf.SetRouterConfig(oldCfg)
-		ServerHub, ServerBridge, serverStart = oldHub, oldBridge, oldStart
+		setServerState(oldState.hub, oldState.bridge, oldState.started)
 	})
 	conf.SetRouterConfig(&conf.Router{})
 	conf.RouterConfig().Websocket.Server.Users = users
 
-	ServerHub = newHub()
-	go ServerHub.run()
-	ServerBridge = newBridgeHub()
-	go ServerBridge.run()
-	serverStart = true
+	// 装配与还原都走 setServerState(原子整体发布), 不要直接给包级变量赋值: 上一轮
+	// 用例遗留的 serverReadPump goroutine 可能还在跑并且每条消息都读一次 bridge,
+	// 裸赋值就是 data race(-race 下整个 nat 包判失败)。见 conn.go 的 serverState。
+	hub := newHub()
+	go hub.run()
+	bridge := newBridgeHub()
+	go bridge.run()
+	setServerState(hub, bridge, true)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveWs(ServerHub, w, r)
+		serveWs(hub, w, r)
 	}))
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://")
@@ -201,6 +204,9 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 	}
 
 	p := newProgress("test", it.size)
+	// 必须停掉它的渲染 goroutine: 漏掉的话它会一直往 stderr 刷进度行到进程结束,
+	// 把后面用例的输出和失败信息冲乱(见 progress.done 的说明)。
+	defer p.done()
 	sendChunk := func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
 		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, chunkCount, onProgress)
 	}

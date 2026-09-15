@@ -421,6 +421,7 @@ type progress struct {
 	last     time.Time
 	shown    bool
 
+	stopOnce sync.Once
 	stop     chan struct{}
 	loopDone chan struct{}
 }
@@ -479,15 +480,26 @@ func (p *progress) render() {
 
 // done 收尾: 先停掉渲染 goroutine 并等它退出(避免和下面的擦行打印互相踩踏), 再把
 // 进度那一行擦掉, 让后面的结果行从行首开始打。
+//
+// 幂等。传进来的都是"收尾"语义的调用点(正常路径 + 出错路径), 重复调用不该炸: 直接
+// close(p.stop) 第二次就是 close of closed channel 的 panic, 所以整段用 once 包住。
+//
+// 漏调 done 的代价很大, 这一点必须说清楚: 渲染 goroutine 是按 ticker 无限循环的,
+// 没人关 p.stop 它就永远不会退出, 会以 200ms 一次的频率往 stderr 一直打 "\r... ",
+// 直到整个进程结束。在 go test 里就是**当前这个用例早就跑完了、后面的用例还在跑**,
+// 它却一直在刷屏, 把真正的失败信息(--- FAIL / panic 栈)冲得七零八落——CI 上排查问题
+// 时最要命的就是这个。所以新增调用点时必须配一个 done(通常 defer)。
 func (p *progress) done() {
-	close(p.stop)
-	<-p.loopDone
-	p.mu.Lock()
-	shown := p.shown
-	p.mu.Unlock()
-	if shown {
-		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 100))
-	}
+	p.stopOnce.Do(func() {
+		close(p.stop)
+		<-p.loopDone
+		p.mu.Lock()
+		shown := p.shown
+		p.mu.Unlock()
+		if shown {
+			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 100))
+		}
+	})
 }
 
 func rate(n int64, d time.Duration) string {

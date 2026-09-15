@@ -140,11 +140,12 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 		conn.Close()
 		return
 	}
-	if !serverStart || ServerHub == nil {
+	st := currentServerState()
+	if !st.started || st.hub == nil || st.bridge == nil {
 		conn.Close()
 		return
 	}
-	c := ServerHub.GetClientByEmail(r.Email)
+	c := st.hub.GetClientByEmail(r.Email)
 	if c == nil {
 		log.Printf("nat forward %s no subscriber for email %s, close", r.Listen, r.Email)
 		conn.Close()
@@ -158,7 +159,7 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	start := time.Now()
 	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d)", src, r.Email, port))
 
-	b := ServerBridge.Register(c, id, ConnTCP, conn)
+	b := st.bridge.Register(c, id, ConnTCP, conn)
 	defer b.Unregister()
 
 	// 存活心跳: 未关闭的连接每隔 forwardAliveInterval 打一行累计流量+时长, 便于发现长期

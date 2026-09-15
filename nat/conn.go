@@ -49,21 +49,58 @@ var upgrader = websocket.Upgrader{
 // (见 serveWs 的 tag), 方便在同一 email 多次重连/并发中继时把日志行对上号。
 var connSeq atomic.Uint64
 
-// ServerHub 服务端的ws链接信息
-var ServerHub *Hub
+// serverState 服务端(B 侧)的整套全局状态: hub(在线订阅方) + bridge(http/ws 桥接表)
+// + 是否已启动。三者必须一起换、一起看 —— 分开成三个全局变量时, 读方可能读到"新 hub
+// 配旧 bridge"这种半更新的组合。
+//
+// 生产上它只在 NewServer 启动时装配一次, 之后全是只读, 本来不会出问题。真正必须原子化
+// 的是测试: fileRelayTestServer 会在每个用例里重新装配、结束时再还原这套状态, 而上一轮
+// 用例遗留的 serverReadPump goroutine 可能还在跑(它的 websocket 是 hijack 的, httptest
+// 的 Close 收不到它), 于是"用例写全局量、遗留 goroutine 读"就是实打实的 data race ——
+// 看 client.go 的 serverReadPump, 它每条消息都要读 bridge; -race 下整个 nat 包直接判
+// 失败(CI 上就是这么挂的)。打包成一个不可变快照、用原子指针发布: 写方先填好快照再
+// Store, 读方 Load 到指针后再解引用, 原子操作本身提供 happens-before, 竞争检测器认。
+type serverState struct {
+	hub     *Hub
+	bridge  *BridgeHub
+	started bool
+}
 
-// ServerBridge 服务端的http与ws链接
-var ServerBridge *BridgeHub
+var serverStatePtr atomic.Pointer[serverState]
 
-// serverStart 是否开启服务
-var serverStart = false
+// currentServerState 取一份当前服务端全局状态的快照。未启动时各字段为零值
+// (hub/bridge 为 nil, started 为 false), 所以调用方拿到后仍要判 nil。
+func currentServerState() serverState {
+	if s := serverStatePtr.Load(); s != nil {
+		return *s
+	}
+	return serverState{}
+}
+
+// setServerState 原子地整体替换服务端全局状态: 生产在 NewServer 里调一次, 测试 helper
+// 在装配与还原时各调一次。
+func setServerState(hub *Hub, bridge *BridgeHub, started bool) {
+	serverStatePtr.Store(&serverState{hub: hub, bridge: bridge, started: started})
+}
+
+// ServerHubAndBridge 取一份"当前服务端 hub + bridge"的快照, 给包外(proto 的 ws 转发)
+// 用。未启动时两个都是 nil, 调用方必须判空。
+//
+// 以前这里是两个可直接读的导出变量(nat.ServerHub / nat.ServerBridge)。改成访问器是
+// 因为裸读包级变量和测试装配/还原时的写会构成 data race; 而且分两次读还有可能读成
+// "新 hub 配旧 bridge"——一次拿一份快照就没这个问题。
+func ServerHubAndBridge() (*Hub, *BridgeHub) {
+	st := currentServerState()
+	return st.hub, st.bridge
+}
 
 // Eable 检查是否可以发送nat请求
 func Eable() bool {
-	if !serverStart {
+	st := currentServerState()
+	if !st.started {
 		return false
 	}
-	if ServerHub.ClientCount() == 0 {
+	if st.hub == nil || st.hub.ClientCount() == 0 {
 		return false
 	}
 	return true
@@ -71,14 +108,15 @@ func Eable() bool {
 
 // NewServer 开启服务
 func NewServer(addr *string) {
-	ServerHub = newHub()
-	go ServerHub.run()
-	ServerBridge = newBridgeHub()
-	go ServerBridge.run()
-	serverStart = true
+	hub := newHub()
+	go hub.run()
+	bridge := newBridgeHub()
+	go bridge.run()
+	setServerState(hub, bridge, true)
 
+	// 闭包直接捕获本次装配的 hub, 不再每次请求去读全局量 —— 少一次共享读, 语义也更直白。
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(ServerHub, w, r)
+		serveWs(hub, w, r)
 	})
 
 	// 直连用的 UDP 反射器, 绑同一个端口号(TCP/UDP 互不冲突), 订阅方可直接从 websocket
