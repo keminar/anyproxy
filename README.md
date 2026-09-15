@@ -1,5 +1,7 @@
 # Any Proxy
 
+> 🌐 English · [中文](README_CN.md)
+
 anyproxy is a cross-platform (Linux / macOS / Windows) **intelligent traffic forwarding and proxy engine**: it makes an egress decision for every connection at the granularity of domain name / GeoIP — direct locally, or forward through a multi-level upstream proxy (tunneld / socks5 / http) chain, with a single rule set governing "who goes direct, who goes through a proxy, who is denied".
 
 It is also a unified client and server:
