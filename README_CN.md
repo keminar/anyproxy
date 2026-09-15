@@ -1,5 +1,7 @@
 # Any Proxy
 
+> 🌐 中文 · [English](README.md)
+
 anyproxy 是一个跨平台（Linux / macOS / Windows）的**智能流量转发与代理引擎**：以域名 / GeoIP 为粒度对每条连接做出出口决策——本地直连，或经多级上游代理（tunneld / socks5 / http）链路转发，用一套规则统一治理「谁走直连、谁走代理、谁被拒绝」。
 
 它同时是**客户端**与**服务端**的统一体：
