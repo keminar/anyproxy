@@ -252,11 +252,12 @@ func (u *udpRelay) openUplink() {
 		u.upToken = ""
 		u.mu.Unlock()
 	}
-	if !serverStart || ServerHub == nil {
+	st := currentServerState()
+	if !st.started || st.hub == nil {
 		fail("server hub not ready")
 		return
 	}
-	peer := ServerHub.GetClientByEmail(u.rule.Email)
+	peer := st.hub.GetClientByEmail(u.rule.Email)
 	if peer == nil {
 		fail("no subscriber online for email " + u.rule.Email)
 		return

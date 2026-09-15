@@ -193,7 +193,14 @@ func (c *Client) serverReadPump() {
 		if handleFileRelayServer(c, msg) {
 			continue
 		}
-		ServerBridge.broadcast <- msg
+		// 先取一份快照再投递(见 conn.go 的 serverState)。拿不到 bridge 只有两种情况:
+		// 服务没起来, 或者本用例已经收尾、这条连接是上一轮残留的 goroutine。以前这里
+		// 直接解引用全局指针, 那两种情况下就是 nil 崩溃。
+		b := currentServerState().bridge
+		if b == nil {
+			continue
+		}
+		b.broadcast <- msg
 	}
 }
 
