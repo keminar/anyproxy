@@ -118,7 +118,7 @@ func (d *directPeer) onPunch(msg *Message) {
 		return
 	}
 	if !d.cfg.Direct.Accept {
-		reply(DirectReady{Err: "directAccept is not enabled on this peer"})
+		reply(DirectReady{Err: "direct.accept is not enabled on this peer"})
 		return
 	}
 	// 打洞包加密准备: 密钥从 token 派生(见 deriveDirectSessionKeys), 不依赖 uuid/receive.allow。
@@ -282,6 +282,15 @@ func (d *directPeer) serveConn(conn *quic.Conn) {
 // serveStream 一条 stream 对应对端的一条入口 TCP 连接。
 func (dc *directConn) serveStream(stream *quic.Stream) {
 	d := dc.peer
+	// stream.Close() 只关自己这侧的发送方向, 不关接收方向(quic-go 的语义)。如果这个
+	// 函数是提前返回的 —— 比如收文件收到一半本地写盘出错(见 recvFileOver/writeIncoming
+	// 的错误路径)—— 对端还在往这条 stream 写身后剩下的字节, 而这里已经没人再读了:
+	// 数据会一直攒在对端的发送缓冲/flow control window 里, 对端的 Write() 永远堵住,
+	// 我们这边看着像什么都没发生(连接本身靠 keepalive 一直活着, 不会触发空闲超时)。
+	// 用 CancelRead 把接收方向也主动断掉, 会给对端发 STOP_SENDING, 让它卡住的 Write
+	// 立刻报错退出, 而不是无限期卡死。stream 已经被正常读完(EOF)时这是个无操作
+	// (quic-go: errorRead 为真则 CancelRead 直接返回), 不影响正常收发完成的路径。
+	defer stream.CancelRead(0)
 	defer stream.Close()
 	remote := dc.conn.RemoteAddr()
 

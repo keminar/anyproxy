@@ -479,10 +479,25 @@ func onFileRelayOpen(c *Client, msg *Message) {
 	remote := fmt.Sprintf("relay:%s", req.FromEmail)
 	if req.Op == fileRelayOpPull {
 		servePull(secured, cfg, req.FromEmail, remote, logf)
+		fileRelayPipes.Delete(fileRelayKey{c, msg.ID})
 	} else {
-		recvFileOver(secured, cfg.Dir, req.FromEmail, remote, logf, nil)
+		// onDone: 收完/出错都立刻用 s.close 把结果广播成一条 METHOD_CLOSE, 不留给
+		// msgPipe 自己的 60 秒 relayAckTimeout 去自然发现——那是本该只兜底"对端真的
+		// 失联了"的最后防线, 不该是"对端已经主动回过话、只是我们没转达"这种正常错误
+		// 路径的唯一出口。
+		//
+		// 这是直连路径 nat/direct_accept.go serveStream 里 defer stream.CancelRead(0)
+		// 的中继版: 收文件中途出错(比如落盘 ENOSPC)时, A 大概率正卡在 msgPipe.Write
+		// 的 waitWindow 里等确认——C 这边即便已经把详细错误经 reply() 写回去了, 那条
+		// 消息也只是安静地进了 A 本地的 pushCh, A 的 Write 依然干等窗口, 不会主动去看
+		// 一眼有没有新数据。close 里的 METHOD_CLOSE 会让 A 本地的 pipe 触发
+		// closeWithError(此时 r.Err 非空)/Close(r.Err 为空即成功), 直接关掉 p.done——
+		// 那正是 waitWindow 的 select 里等着的信号之一, 一到就立刻返回, 不必再等满
+		// 60 秒。成功的一路也顺带把 A 那侧原本从未清理过的 fileRelayPipes 记录收掉。
+		recvFileOver(secured, cfg.Dir, req.FromEmail, remote, logf, func(r fileReply) {
+			s.close(r.Err)
+		})
 	}
-	fileRelayPipes.Delete(fileRelayKey{c, msg.ID})
 }
 
 // openRelayConn 建一次中继会话并返回加好密的通道: 走一遍 open/ready 信令, 派生会话

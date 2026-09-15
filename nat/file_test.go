@@ -645,6 +645,60 @@ func TestFileRefusedWhenNoReceiveDir(t *testing.T) {
 	}
 }
 
+// 同一种拒绝, 但文件大到超过 QUIC 初始流接收窗口(direct_accept.go 里的 2MB) ——
+// 对端(c)在读文件首部之前就已经拒绝、从没读过 a 写的任何一个字节, a 这次
+// io.CopyBuffer 必然会写到卡住。这是在回归 serveStream 那个死锁: c 在拒绝之后如果只
+// Close() 不 CancelRead(), a 会永远卡在这次 Write 里, 既不报错也不超时(整条 QUIC
+// 连接本身靠 keepalive 撑着, 不会触发空闲超时)。真实场景见几百 MB~几 GB 的大文件
+// 传输——所以这里用一个刻意超过窗口的文件大小复现, 而不是像上面那个测试用几个字节
+// 侥幸落在窗口内、掩盖了这个问题。
+func TestFileRefusedWhenNoReceiveDirLargeFile(t *testing.T) {
+	c := newAcceptPeer(t, nil) // 不设 Receive.Dir
+	a := newDialPeer(t)
+	a.cfg.Email, a.cfg.UUID = "a@example.com", testUUIDA
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	const token = "test-token-noreceive-large"
+	c.tokens.put(token, directFilePort)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+
+	src := filepath.Join(t.TempDir(), "big.bin")
+	if err := os.WriteFile(src, make([]byte, 8<<20), 0o644); err != nil { // 8MB > 2MB 初始窗口
+		t.Fatalf("write src: %v", err)
+	}
+	items, err := collectFiles([]string{src})
+	if err != nil {
+		t.Fatalf("collectFiles: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := a.sendFile(sess, items[0], nil)
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("a peer without receive.dir must refuse")
+		}
+		if !strings.Contains(err.Error(), "receive.dir") {
+			t.Fatalf("the error should say what to configure (not a raw QUIC/stream error), got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("sendFile hung: receiver rejected but never freed the sender's blocked Write (missing CancelRead?)")
+	}
+}
+
 // receive.allow 限定谁能发过来。email 在直连路径下由发送方自己在 fileAuth 里声明
 // (见 nat/file.go), 但真正把关的是 uuid——一个不在列表里的 email 直接被拒。
 func TestFileReceiveAllowList(t *testing.T) {

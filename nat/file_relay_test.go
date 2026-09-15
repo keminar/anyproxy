@@ -171,6 +171,65 @@ func TestFileRelayLargeFileCrossesWindow(t *testing.T) {
 	}
 }
 
+// 回归: C 收到 fileHead 之后、真正落盘之前出错(现实中是磁盘满, 这里换一个不依赖
+// 具体磁盘状态、能确定性触发的错误——目标目录里有一个同名的普通文件, 撞上落盘要用
+// 的子目录名, MkdirAll 必然失败), A 应该很快就能拿到这条具体的错误, 而不是傻等
+// msgPipe 自己的 relayAckTimeout(60s)自然到期。
+//
+// 这是中继版的"发送端卡死"回归测试, 对应直连路径的
+// TestFileRefusedWhenNoReceiveDirLargeFile——文件故意选得比 relayWindow 大, 保证 A
+// 这时大概率正卡在 waitWindow 里等确认, 需要 C 主动用 METHOD_CLOSE(见
+// nat/file_relay.go onFileRelayOpen 里 recvFileOver 的 onDone)把它打断, 而不是靠
+// 60 秒的自然超时。
+func TestFileRelayReceiverErrorUnblocksSenderPromptly(t *testing.T) {
+	connect := fileRelayTestServer(t, []conf.ServerUser{
+		{User: "a", Pass: testPassA},
+		{User: "c", Pass: testPassC},
+	})
+
+	recvDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(recvDir, "sub"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed conflicting name: %v", err)
+	}
+	_ = fileRelayTestClient(t, connect, "c", testPassC, "c@example.com", "",
+		conf.ClientReceive{Dir: recvDir, Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}})
+	a := fileRelayTestClient(t, connect, "a", testPassA, "a@example.com", testUUIDA, conf.ClientReceive{})
+
+	body := make([]byte, relayWindow*2)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(t.TempDir(), "x.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	// name 带 "sub/" 前缀, 让接收端落盘时 MkdirAll(recvDir/sub) 撞上前面占的那个同名
+	// 普通文件。
+	it := fileItem{path: srcPath, name: "sub/x.bin", size: info.Size(), mode: uint32(info.Mode().Perm())}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := sendFileViaRelay(a.client, "c@example.com", it, nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected an error: the receiving directory has a name collision")
+		}
+		if !strings.Contains(err.Error(), "mkdir") {
+			t.Fatalf("expected the receiver's actual error (mkdir failure), got: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("sendFileViaRelay hung: sender only unblocks after the 60s relayAckTimeout (missing s.close on recvFileOver's onDone?)")
+	}
+}
+
 // 单文件分块并行传输在中继路径下的端到端: 每一块各开一次 openRelayConn(各自独立的
 // salt/密钥), 并行发, C 端按 TransferID 把它们拼回同一个文件。
 func TestChunkedFileTransferRelay(t *testing.T) {

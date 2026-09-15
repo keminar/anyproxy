@@ -920,6 +920,14 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 	buf := make([]byte, fileCopyBuf)
 	sent, err := io.CopyBuffer(conn, io.LimitReader(src, length), buf)
 	if err != nil {
+		// 对端可能提前拒绝了(权限/配置)或收到一半自己出错(比如落盘失败): 它会先写好
+		// 一条 fileReply 再断开接收方向(见 nat/direct_accept.go serveStream 的
+		// CancelRead), 我们这里的 Write 因此被对端 reset、报出的是 QUIC 层的
+		// "stream canceled" 之类的话, 说不清真正原因。趁 conn 的接收方向还活着, 抓紧
+		// 看一眼对端是不是已经把那条更明白的回复写过来了, 有就换上它。
+		if reason := peerRejectReason(conn); reason != "" {
+			return "", errors.New(reason)
+		}
 		return "", fmt.Errorf("send body: %w", err)
 	}
 	if sent != length {
@@ -927,6 +935,9 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 		return "", fmt.Errorf("file shrank while sending: sent %d of %d bytes", sent, length)
 	}
 	if err := writeFrame(conn, fileTrailer{SHA256: hex.EncodeToString(h.Sum(nil))}); err != nil {
+		if reason := peerRejectReason(conn); reason != "" {
+			return "", errors.New(reason)
+		}
 		return "", fmt.Errorf("send checksum: %w", err)
 	}
 
@@ -939,6 +950,23 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 		return "", errors.New(reply.Err)
 	}
 	return reply.Saved, nil
+}
+
+// peerRejectReason 在给对端写 body/trailer 失败后, 短时间内探一下对端是不是已经把
+// 一条 fileReply 写回来了——见 sendFileOverRange 里两处调用点的注释。读不到(真断线,
+// 或对端根本没来得及回复)就返回空串, 调用方据此退回原始的底层错误。
+//
+// 5 秒够用: 对端在我们这次 Write 出错之前就已经调过 reply(), 那条回复早就交给它自己
+// 的发送方向了, 这里等的只是"已经在路上的几十字节几时到", 不是要它现算什么。
+func peerRejectReason(conn fileConn) string {
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var reply fileReply
+	err := readFrame(conn, &reply, fileFrameMax)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil || reply.Err == "" {
+		return ""
+	}
+	return reply.Err
 }
 
 // progressReader 在读的过程中回调已读字节数。
