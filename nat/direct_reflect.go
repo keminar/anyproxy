@@ -322,17 +322,31 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 		}(r.addr, r.src)
 	}
 
-	// 端口映射不依赖反射器, 一起并行。
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ep, err := mapPort(port)
-		if err != nil {
-			fail(candSrcPortmap, err)
-			return
+	// 端口映射不依赖反射器, 一起并行。默认关闭(见 conf.DirectSettings.Portmap): 命中率低
+	// 又要等三个协议的超时, 多数机器上只是白等一两秒。
+	if d.cfg.Direct.Portmap {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ep, err := mapPort(port)
+			if err != nil {
+				fail(candSrcPortmap, err)
+				return
+			}
+			add(directCandidate{Addr: ep, Source: candSrcPortmap})
+		}()
+	}
+
+	// 用户手工配置的局域网地址(websocket.client.direct.lanAddrs), 不用探测, 直接拼上
+	// 本机当前 QUIC 端口就是一条候选——不做网卡扫描(见 conf.DirectSettings.LanAddrs
+	// 的注释)。
+	for _, ip := range d.cfg.Direct.LanAddrs {
+		if net.ParseIP(ip) == nil {
+			fail(candSrcLocal, fmt.Errorf("%q is not a valid IP literal", ip))
+			continue
 		}
-		add(directCandidate{Addr: ep, Source: candSrcPortmap})
-	}()
+		add(directCandidate{Addr: net.JoinHostPort(ip, fmt.Sprintf("%d", port)), Source: candSrcLocal})
+	}
 
 	wg.Wait()
 	cands = dedupCandidates(cands)
@@ -357,7 +371,7 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 //
 // 不串行逐条试: 串行的话前面几条不通就要各等一个超时, 等到能用的那条时入口连接早
 // 超时了。并行发出去, 谁先回谁先被观测到。
-func (d *directPeer) punchAll(cands []directCandidate) []candidateResult {
+func (d *directPeer) punchAll(token string, cands []directCandidate) []candidateResult {
 	tr, err := d.ensureTransport()
 	if err != nil {
 		out := make([]candidateResult, 0, len(cands))
@@ -379,7 +393,7 @@ func (d *directPeer) punchAll(cands []directCandidate) []candidateResult {
 		wg.Add(1)
 		go func(i int, addr *net.UDPAddr) {
 			defer wg.Done()
-			rtt, err := d.punchOne(tr, addr)
+			rtt, err := d.punchOne(tr, token, addr)
 			results[i].RTT, results[i].Err = rtt, err
 		}(i, addr)
 	}
@@ -387,9 +401,14 @@ func (d *directPeer) punchAll(cands []directCandidate) []candidateResult {
 	return results
 }
 
-// punchOnly 朝所有候选打洞但不等回执。C 侧用: 它不需要知道哪条更快(择优由 A 做),
-// 只需要把每条路上的返回通道开出来。等回执会白白拖住给 A 的应答近一秒。
-func (d *directPeer) punchOnly(cands []directCandidate) {
+// punchOnly 朝所有候选各连发几个打洞包, 不等回执。C 侧用: 它不需要知道哪条更快(择优
+// 由 A 做), 只需要把每条路上的返回通道开出来。等回执会白白拖住给 A 的应答近一秒。
+//
+// 只发 directPunchCount 个就够, 不必持续打: 打洞在本机 NAT/安全组上开出的表项是有状态
+// 的映射, 一旦建立能存活数十秒(CGNAT)乃至更久, A 随后的 QUIC Initial 到达时洞仍在。
+// 真正决定成败的是**顺序**——必须让受限 CGNAT 侧先发第一个包, 见 docs/direct-punch-order.md
+// 与 direct_accept.go 的 onPunch(order Y 时本侧会等对端 nudge 再调本函数)。
+func (d *directPeer) punchOnly(token string, cands []directCandidate) {
 	tr, err := d.ensureTransport()
 	if err != nil {
 		d.logf("punch: no transport: %v", err)
@@ -404,8 +423,9 @@ func (d *directPeer) punchOnly(cands []directCandidate) {
 		go func(addr *net.UDPAddr, c directCandidate) {
 			for i := 0; i < directPunchCount; i++ {
 				// 经 Transport 发: 这个 socket 已经交给 quic-go 了, 直接 WriteToUDP 是
-				// 它明确禁止的用法。带 magic 前缀, 对端才能从 ReadNonQUICPacket 收到。
-				if _, err := tr.WriteTo(directPacket(verbPunch+" "+newNonce()), addr); err != nil {
+				// 它明确禁止的用法。encodeDirectPacket 按 token 是否配了加密会话决定
+				// 加密还是走现有的明文 magic 前缀。
+				if _, err := tr.WriteTo(d.encodeDirectPacket(token, verbPunch+" "+newNonce()), addr); err != nil {
 					// 发不出去多半是本机根本没有那一族的地址, 重试无益。
 					d.logf("punch to %s failed: %v", c, err)
 					return
@@ -421,14 +441,14 @@ func (d *directPeer) punchOnly(cands []directCandidate) {
 // 连发而不是只发一个: UDP 会丢包, 而且对端可能还没起好监听 —— 头一两个包打空是常态。
 // 等待用**总预算**而不是逐包短窗: pong 要走完整条链路的往返, 按 150ms/包做窗口的话,
 // RTT>150ms 的链路(跨省/跨境的常态)上每个 pong 都会迟到几毫秒, 打洞永远失败。
-func (d *directPeer) punchOne(tr *quic.Transport, addr *net.UDPAddr) (time.Duration, error) {
+func (d *directPeer) punchOne(tr *quic.Transport, token string, addr *net.UDPAddr) (time.Duration, error) {
 	deadline := time.Now().Add(directPunchWait)
 	replies := make(chan probeReply, directPunchCount)
 
 	for i := 0; i < directPunchCount; i++ {
 		nonce := newNonce()
 		ch, done := d.addWaiter(nonce)
-		if _, err := tr.WriteTo(directPacket(verbPunch+" "+nonce), addr); err != nil {
+		if _, err := tr.WriteTo(d.encodeDirectPacket(token, verbPunch+" "+nonce), addr); err != nil {
 			done()
 			// 发不出去多半是路由层面就不通(如本机没有 IPv6 却有 IPv6 候选), 重试无益。
 			return 0, fmt.Errorf("send punch: %w", err)
@@ -475,14 +495,47 @@ func (d *directPeer) drainNonQUIC(tr *quic.Transport) {
 		if err != nil {
 			return
 		}
-		payload, ok := directPayload(buf[:n])
-		if !ok {
-			continue // 不是我们的包
-		}
+		raw := buf[:n]
 		from := ""
 		if addr != nil {
 			from = addr.String()
 		}
+
+		var payload, token string
+		var encrypted bool
+		switch {
+		case len(raw) > 0 && raw[0] == directPacketMagic:
+			p, ok := directPayload(raw)
+			if !ok {
+				continue // 不是我们的包
+			}
+			payload = p
+		case len(raw) > 0 && raw[0] == directCryptedMagic:
+			tok, ok := peekDirectToken(raw)
+			if !ok {
+				d.logf("dropped malformed encrypted control packet from %s (too short to contain a token)", from)
+				continue
+			}
+			sess, ok := d.crypto.get(tok)
+			if !ok {
+				// 最常见的两个原因: 对端配了 encrypt 但本机没在 receive.allow 里配对方
+				// 的 uuid(或反过来), 或者会话已经过了 directCryptoSessionTTL——两者都
+				// 值得打成日志, 不能静默丢掉让人误以为是网络问题。
+				d.logf("dropped encrypted control packet from %s: unknown or expired session token %s "+
+					"(peer uuid not configured in receive.allow? or session already timed out?)", from, shortToken(tok))
+				continue
+			}
+			pt, err := openDirectPacket(sess, raw)
+			if err != nil {
+				d.logf("dropped encrypted control packet from %s: %v", from, err)
+				continue
+			}
+			payload, token = pt, tok
+			encrypted = true
+		default:
+			continue // 既不是明文也不是加密的我们的包
+		}
+
 		verb, nonce, arg := splitPacket(payload)
 		switch verb {
 		case verbSeen:
@@ -496,9 +549,12 @@ func (d *directPeer) drainNonQUIC(tr *quic.Transport) {
 			// 它测这条路 RTT 的依据。我们自己也顺带知道对端确实发过包了。
 			// 这行日志是排查"punch 无应答"的关键证据: 有它说明包穿过了 quic-go 的
 			// 过滤与 magic 校验; 没有它说明包根本没到本进程, 或者被当噪音丢了。
-			d.logf("got punch from %s, replying pong", from)
+			d.logf("got punch from %s (encrypted=%v), replying pong", from, encrypted)
 			if addr != nil {
-				if _, err := tr.WriteTo(directPacket(verbPong+" "+nonce), addr); err != nil {
+				// 回包格式跟随收到包的格式: token=="" 时(收到的是明文) encodeDirectPacket
+				// 会自动退回明文, 不会给一个不认识加密协议的旧版对端回一个它解不了的包。
+				pkt := d.encodeDirectPacket(token, verbPong+" "+nonce)
+				if _, err := tr.WriteTo(pkt, addr); err != nil {
 					d.logf("pong to %s failed: %v", from, err)
 				}
 			}

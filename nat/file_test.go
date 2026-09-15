@@ -72,20 +72,35 @@ func TestSafeJoinRejectsEscapes(t *testing.T) {
 }
 
 // 已存在的文件不能被悄悄覆盖 —— 那会毁掉收方已有的数据, 代价远大于多一个带序号的名字。
-func TestUniquePath(t *testing.T) {
+func TestClaimName(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "x.zip")
-	if got := uniquePath(p); got != p {
+	got, err := claimName(p)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if got != p {
 		t.Fatalf("a free name should be used as is, got %q", got)
 	}
-	os.WriteFile(p, []byte("old"), 0o644)
-	got := uniquePath(p)
-	if got != filepath.Join(dir, "x (1).zip") {
-		t.Fatalf("got %q, want x (1).zip", got)
-	}
+	// claimName 认领的是一个占位文件, 不是"看一眼就完事"——调用方后续会把真正内容
+	// rename 过去覆盖它。这里模拟那个覆盖, 好继续测下一次认领时 p 已经"名花有主"。
 	os.WriteFile(got, []byte("old"), 0o644)
-	if got := uniquePath(p); got != filepath.Join(dir, "x (2).zip") {
-		t.Fatalf("got %q, want x (2).zip", got)
+
+	got2, err := claimName(p)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if got2 != filepath.Join(dir, "x (1).zip") {
+		t.Fatalf("got %q, want x (1).zip", got2)
+	}
+	os.WriteFile(got2, []byte("old"), 0o644)
+
+	got3, err := claimName(p)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if got3 != filepath.Join(dir, "x (2).zip") {
+		t.Fatalf("got %q, want x (2).zip", got3)
 	}
 	// 原文件必须原封不动。
 	if b, _ := os.ReadFile(p); string(b) != "old" {
@@ -96,8 +111,42 @@ func TestUniquePath(t *testing.T) {
 	// 序号要加在整个文件名后面, 不能拆进版本号中间。
 	vp := filepath.Join(dir, "anyproxy-amd64-v2.1")
 	os.WriteFile(vp, []byte("old"), 0o644)
-	if got := uniquePath(vp); got != filepath.Join(dir, "anyproxy-amd64-v2.1 (1)") {
-		t.Fatalf("got %q, want %q", got, "anyproxy-amd64-v2.1 (1)")
+	if got, err := claimName(vp); err != nil || got != filepath.Join(dir, "anyproxy-amd64-v2.1 (1)") {
+		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, "anyproxy-amd64-v2.1 (1)")
+	}
+}
+
+// TestClaimNameConcurrent 是这次 bug 的回归测试: 两次并发的"同名传输"必须落到两个
+// 不同的最终文件名上, 谁都不能覆盖谁——这正是 claimName 要替掉旧版 uniquePath(先
+// os.Stat 探测、调用方再另外一步 Rename)的原因: 探测和占用分成两步, 在两个独立的
+// goroutine/进程之间就不是原子的, 并发时会都探测到"名字空闲", 都去用同一个名字,
+// 后一个的 Rename 把前一个已经落盘、已经回复过"Saved"的文件悄悄覆盖掉。
+func TestClaimNameConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "same.bin")
+
+	const n = 20
+	names := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			names[i], errs[i] = claimName(dest)
+		}(i)
+	}
+	wg.Wait()
+
+	seen := make(map[string]bool, n)
+	for i, name := range names {
+		if errs[i] != nil {
+			t.Fatalf("claim %d: %v", i, errs[i])
+		}
+		if seen[name] {
+			t.Fatalf("two concurrent claims both got %q — one would silently overwrite the other's finished file", name)
+		}
+		seen[name] = true
 	}
 }
 
@@ -161,9 +210,10 @@ func TestWriteIncomingChecksAndRenames(t *testing.T) {
 	if b, _ := os.ReadFile(saved); !bytes.Equal(b, body) {
 		t.Fatalf("content mismatch")
 	}
-	// .part 不能留下来: 留着会让人以为还有一个没传完的文件。
-	if _, err := os.Stat(dest + filePartSuffix); !os.IsNotExist(err) {
-		t.Fatal("the .part file was left behind")
+	// .part 不能留下来: 留着会让人以为还有一个没传完的文件。part 名字带随机 token
+	// (见 writeIncoming 的注释), 用 glob 而不是拼一个固定路径去检查。
+	if matches, _ := filepath.Glob(dest + ".*" + filePartSuffix); len(matches) != 0 {
+		t.Fatalf("the .part file was left behind: %v", matches)
 	}
 
 	// 声称的长度比实际给的多 -> 必须报错, 且不留下半截文件。
@@ -185,6 +235,59 @@ func TestWriteIncomingChecksAndRenames(t *testing.T) {
 	}
 	if fi, _ := os.Stat(saved); fi.Size() != 10 {
 		t.Fatalf("wrote %d bytes, want exactly the announced 10", fi.Size())
+	}
+}
+
+// TestWriteIncomingConcurrentSameName 是"两个终端同时发同名文件"这个场景的回归
+// 测试。两次 writeIncoming 各自的 .part 名字已经带了独立的随机 token, 不会像最早
+// 那版那样在写的过程中撞名; 这里要验证的是后半段——两次都完整收完之后, 各自选定
+// 最终文件名(uniquePath 曾经的做法)不能有"都探测到同一个名字空闲、都 rename 过去、
+// 后一个悄悄覆盖前一个"的窗口。写两份不同内容的文件, 收完后两份内容都必须完整、
+// 分别可查, 不能有一份丢失或被覆盖。
+func TestWriteIncomingConcurrentSameName(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "race.bin")
+
+	bodyA := bytes.Repeat([]byte("A"), 64*1024)
+	bodyB := bytes.Repeat([]byte("B"), 64*1024)
+
+	var wg sync.WaitGroup
+	var savedA, savedB string
+	var errA, errB error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		savedA, _, errA = writeIncoming(dest, bytes.NewReader(bodyA), fileHead{Name: "race.bin", Size: int64(len(bodyA))})
+	}()
+	go func() {
+		defer wg.Done()
+		savedB, _, errB = writeIncoming(dest, bytes.NewReader(bodyB), fileHead{Name: "race.bin", Size: int64(len(bodyB))})
+	}()
+	wg.Wait()
+
+	if errA != nil {
+		t.Fatalf("write A: %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("write B: %v", errB)
+	}
+	if savedA == savedB {
+		t.Fatalf("both concurrent transfers were saved as %q — one must have overwritten the other", savedA)
+	}
+
+	got := map[string][]byte{}
+	for _, p := range []string{savedA, savedB} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %q: %v", p, err)
+		}
+		got[p] = b
+	}
+	if !bytes.Equal(got[savedA], bodyA) {
+		t.Fatalf("%q: content does not match what A sent", savedA)
+	}
+	if !bytes.Equal(got[savedB], bodyB) {
+		t.Fatalf("%q: content does not match what B sent", savedB)
 	}
 }
 
@@ -218,7 +321,7 @@ func TestFileTransferEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -284,7 +387,7 @@ func TestFilePullDirectEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -360,7 +463,7 @@ func TestFileReceiveReadOnlyServesButRefusesWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -432,7 +535,7 @@ func TestFilePullDirectRejectsStranger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -479,7 +582,7 @@ func TestDirectQUICStatsCollected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	items, err := collectFiles([]string{srcPath})
@@ -526,7 +629,7 @@ func TestFileRefusedWhenNoReceiveDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -561,7 +664,7 @@ func TestFileReceiveAllowList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -595,7 +698,7 @@ func TestFileReceiveAllowRequiresMatchingUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -627,7 +730,7 @@ func TestFileSendRefusesEmptyUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -656,7 +759,7 @@ func TestFileSendRefusesMalformedOwnUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -687,7 +790,7 @@ func TestFileReceiveRefusesMalformedConfiguredUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -881,7 +984,7 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -914,8 +1017,8 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 	if !bytes.Equal(got, body) {
 		t.Fatalf("received %d bytes, content differs from the %d sent", len(got), len(body))
 	}
-	if _, err := os.Stat(filepath.Join(recvDir, "chunked.bin"+filePartSuffix)); !os.IsNotExist(err) {
-		t.Fatal("the .part file was left behind")
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "chunked.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("the .part file was left behind: %v", matches)
 	}
 }
 
@@ -965,7 +1068,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort); err != nil {
+	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -1022,7 +1125,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	if _, err := os.Stat(dest); !os.IsNotExist(err) {
 		t.Fatal("a failed chunked transfer must not leave the final file behind")
 	}
-	if _, err := os.Stat(dest + filePartSuffix); !os.IsNotExist(err) {
-		t.Fatal("a failed chunked transfer must not leave the .part file behind")
+	if matches, _ := filepath.Glob(dest + ".*" + filePartSuffix); len(matches) != 0 {
+		t.Fatalf("a failed chunked transfer must not leave the .part file behind: %v", matches)
 	}
 }

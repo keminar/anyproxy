@@ -145,8 +145,9 @@ if p.srcPort >= proto.EgressPortLo && p.srcPort <= proto.EgressPortHi {
 
 **3. SOCKS Guard 降级为兜底**
 
-只兜两种情况：① egress 段耗尽时的无绑定回退拨号；② 通过 `SocksProcessNames`
-配置的外部代理进程（不经 anyproxy 拨号器）。
+只兜两种情况：① egress 段耗尽时的无绑定回退拨号；② 通过 `tun.windows.excludeProcs`
+配置的外部代理进程（不经 anyproxy 拨号器；配置字段名为 `excludeProcs`，引擎内部再填进
+`SocksProcessNames` 供 SOCKS Guard 匹配）。
 
 ### 为什么这能根治
 

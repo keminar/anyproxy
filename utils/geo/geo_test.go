@@ -325,3 +325,86 @@ func TestLoadSiteFile(t *testing.T) {
 		t.Error("cats 留空应加载全部 geosite 类别")
 	}
 }
+
+// TestDatSiteCatsSkipsUnwanted 校验指定 cats 时, 未请求类别的域名不会被解码进结果
+// (避免大文件只用一个类别时仍解码全部类别、造成内存/CPU 浪费)。
+func TestDatSiteCatsSkipsUnwanted(t *testing.T) {
+	data := list(
+		geoSiteMsg("cn", domainMsg(2, "baidu.com")),
+		geoSiteMsg("google", domainMsg(2, "google.com")),
+	)
+	all, err := datSiteCats(data, []string{"cn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("只请求 cn 时应只解码 1 个类别, got %d: %v", len(all), all)
+	}
+	if _, ok := all["cn"]; !ok {
+		t.Error("缺少请求的 cn 类别")
+	}
+	if _, ok := all["google"]; ok {
+		t.Error("不应解码未请求的 google 类别")
+	}
+}
+
+// TestDomainIndex 校验"排序数组+原始字节偏移"这个压缩存储本身的正确性:
+// 空集合、前缀互相包含(baidu.com / baidu.com.cn)、构建后再次合并去重。
+func TestDomainIndex(t *testing.T) {
+	empty := domainIndex{}
+	if empty.contains("a.com") {
+		t.Error("空索引不应命中任何域名")
+	}
+
+	idx := buildDomainIndex(map[string]struct{}{
+		"baidu.com":    {},
+		"baidu.com.cn": {}, // 与 baidu.com 互为前缀, 但应各自独立
+		"qq.com":       {},
+		"a.com":        {},
+	})
+	for _, d := range []string{"baidu.com", "baidu.com.cn", "qq.com", "a.com"} {
+		if !idx.contains(d) {
+			t.Errorf("contains(%q)=false, want true", d)
+		}
+	}
+	for _, d := range []string{"baidu.co", "baidu.com.c", "aa.com", "", "z"} {
+		if idx.contains(d) {
+			t.Errorf("contains(%q)=true, want false", d)
+		}
+	}
+
+	merged := mergeIndex(idx, map[string]struct{}{
+		"qq.com":  {}, // 已存在, 应去重不影响结果
+		"163.com": {}, // 新增
+	})
+	if len(merged.entries) != 5 {
+		t.Fatalf("合并去重后应有 5 条, got %d", len(merged.entries))
+	}
+	if !merged.contains("163.com") || !merged.contains("qq.com") {
+		t.Error("合并后应同时命中旧域名与新域名")
+	}
+	if len(idx.entries) != 4 {
+		t.Error("mergeIndex 不应修改原索引(old 应保持不变)")
+	}
+}
+
+// TestDatIPCatsSkipsUnwanted 同上, 校验 geoip 一侧同样的过滤行为。
+func TestDatIPCatsSkipsUnwanted(t *testing.T) {
+	data := list(
+		geoIPMsg("cn", cidrMsg([]byte{1, 2, 3, 0}, 24)),
+		geoIPMsg("us", cidrMsg([]byte{4, 5, 6, 0}, 24)),
+	)
+	all, err := datIPCats(data, []string{"cn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("只请求 cn 时应只解码 1 个类别, got %d: %v", len(all), all)
+	}
+	if _, ok := all["cn"]; !ok {
+		t.Error("缺少请求的 cn 类别")
+	}
+	if _, ok := all["us"]; ok {
+		t.Error("不应解码未请求的 us 类别")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/keminar/anyproxy/utils/trace"
@@ -109,8 +110,21 @@ func (d *directPeer) onPunch(msg *Message) {
 		reply(DirectReady{Err: "incomplete punch"})
 		return
 	}
-	if !d.cfg.DirectAccept {
+	// VPS 中继腿: 本机已为该 token 开好中继绑定(onRelayOpen), 这条 d_punch 是 B 转来的
+	// 某条腿(A 或 C, 由 p.Email 标明)的候选, 让 VPS 朝它打洞。VPS 不接受 QUIC 监听、不回
+	// d_ready(B 已从 relay-open 拿到 E), 只登记这条腿。见 direct_relay.go。
+	if p.Relay && d.cfg.Direct.Relay && d.hasRelay(p.Token) {
+		d.registerRelayLeg(p.Token, p.Email, peerCands)
+		return
+	}
+	if !d.cfg.Direct.Accept {
 		reply(DirectReady{Err: "directAccept is not enabled on this peer"})
+		return
+	}
+	// 打洞包加密准备: 密钥从 token 派生(见 deriveDirectSessionKeys), 不依赖 uuid/receive.allow。
+	if errMsg := d.prepareDirectCrypto(p.Token, p.Encrypt, false); errMsg != "" {
+		d.logf("punch from email %s: %s", p.Email, errMsg)
+		reply(DirectReady{Err: errMsg})
 		return
 	}
 	// 按需起监听: 没起过就现起, 起着就复用。
@@ -127,12 +141,102 @@ func (d *directPeer) onPunch(msg *Message) {
 	d.setMyCandidates(myCands)
 	d.touchAccept()
 
-	d.tokens.put(p.Token, p.Port)
-	// 朝对端的**所有**候选一起打, 不等回执: C 这侧不需要知道哪条更快(择优是 A 做的),
-	// 只需要把每条路上的返回通道都开出来。等回执会白白拖住 ready, 让 A 多等近一秒。
-	d.punchOnly(peerCands)
-	d.logf("my candidates %v, punching toward %v for port %d", myCands, peerCands, p.Port)
+	// 中继连接经不可信 VPS 盲转发, 光有 token 不够: 登记时标为 relay 并记下 B 认证过的发起方
+	// email, 进数据面前还要在 e2e QUIC 流里做一次 uuid 挑战-应答(见 direct_relay_auth.go)。
+	if p.Relay {
+		d.tokens.putRelay(p.Token, p.Port, p.Email)
+	} else {
+		d.tokens.put(p.Token, p.Port)
+	}
+	// 朝对端的**所有**候选各连发几个打洞包, 不等回执: C 这侧不需要知道哪条更快(择优是
+	// A 做的), 只需要把每条路上的返回通道开出来。等回执会白白拖住 ready, 让 A 多等近一秒。
+	//
+	// p.PunchFirst: 发起方 A 声明它在受限 CGNAT 后、必须先发第一个包(它配了 directPunchFirst)。
+	// 此时本侧**先不打**, 把打洞停下(parkPunch), 等 A 开打后经 B 转来的 d_punching nudge
+	// 再打——这样 A 必先发出第一个包, 否则本侧的包先到 A 的 CGNAT, A 的映射会被毒化、双向
+	// 全灭(见 docs/direct-punch-order.md)。nudge 丢了则 directPunchFirstDelay 到点兜底。
+	// 不管哪种, d_ready 都照常立即回(下面 reply), 不拖慢 A 拿 offer。
+	switch {
+	case p.Relay:
+		// C 中继腿: peerCands 是 VPS 的中继端点 E。本侧是居民、必须先打, 所以立即朝 E 打洞
+		// (不 park), 再发一个 nudge 让 VPS 知道可以朝本侧打回来了(见 sendRelayNudge、
+		// direct_relay.go)。之后照常 accept 经 VPS 盲转发过来的 e2e QUIC。
+		d.punchOnly(p.Token, peerCands)
+		d.sendRelayNudge(p.Token)
+	case p.PunchFirst:
+		d.parkPunch(p.Token, peerCands)
+	default:
+		d.punchOnly(p.Token, peerCands)
+	}
+	d.logf("my candidates %v, punching toward %v for port %d, encrypt=%v, peerPunchFirst=%v, relay=%v", myCands, peerCands, p.Port, p.Encrypt, p.PunchFirst, p.Relay)
 	reply(DirectReady{Candidates: myCands, Endpoint: firstAddr(myCands), Fingerprint: d.fingerprint})
+}
+
+// parkedPunch order Y 下一次"停着等信号"的打洞: fire 被关闭(收到 nudge)或兜底超时后打。
+type parkedPunch struct {
+	fire chan struct{}
+	once sync.Once
+}
+
+// parkPunch 对端要求"它先打"时, 本侧先不打, 把打洞按 token 停在这里, 等 A 的 d_punching
+// nudge(onPunching 触发)再打; nudge 丢了则 directPunchFirstDelay 到点兜底打。无论哪条,
+// punchOnly 只会被调一次。
+func (d *directPeer) parkPunch(token string, cands []directCandidate) {
+	pp := &parkedPunch{fire: make(chan struct{})}
+	d.punchMu.Lock()
+	if d.pendingPunch == nil {
+		d.pendingPunch = map[string]*parkedPunch{}
+	}
+	d.pendingPunch[token] = pp
+	d.punchMu.Unlock()
+
+	d.logf("peer wants to punch first; holding our punch until its nudge (or %s fallback)", directPunchFirstDelay)
+	go func() {
+		select {
+		case <-pp.fire:
+			d.logf("got punch-first nudge, punching now")
+		case <-time.After(directPunchFirstDelay):
+			d.logf("punch-first nudge not received in %s, punching anyway (fallback)", directPunchFirstDelay)
+		}
+		d.punchMu.Lock()
+		if d.pendingPunch[token] == pp {
+			delete(d.pendingPunch, token)
+		}
+		d.punchMu.Unlock()
+		d.punchOnly(token, cands)
+	}()
+}
+
+// onPunching 收到经 B 转来的 d_punching nudge。两种角色:
+//   - VPS 中继: 本机已为该 token 开好中继绑定, nudge 里的 Email 是"哪条腿"(B 保留的
+//     发出方 email), 触发 VPS 朝那条腿打洞(fireRelayLeg)。
+//   - 普通 C: A 已开打, 触发本侧停着的那次打洞(order Y)。
+func (d *directPeer) onPunching(msg *Message) {
+	var p DirectPunching
+	if err := decodeDirect(msg.Body, &p); err != nil {
+		d.logf("bad punching nudge: %v", err)
+		return
+	}
+	if d.cfg.Direct.Relay && d.hasRelay(p.Token) {
+		d.fireRelayLeg(p.Token, p.Email)
+		return
+	}
+	d.punchMu.Lock()
+	pp, ok := d.pendingPunch[p.Token]
+	d.punchMu.Unlock()
+	if !ok {
+		return // 没有对应的停着的打洞(已打/已超时清掉, 或 token 不对), 静默忽略
+	}
+	pp.once.Do(func() { close(pp.fire) })
+}
+
+// sendRelayNudge C 中继腿朝 E 打洞后发的 nudge: 经 B 转给 VPS(B 认出这是中继会话, 保留
+// 本机 email 当"腿"标签), 让 VPS 知道本侧已先打、可以朝本侧打回来了。Email 填本机自己的
+// (B 会用它认证过的 c.Email 覆盖/核对, 不可伪造成别的腿)。
+func (d *directPeer) sendRelayNudge(token string) {
+	if err := d.send(METHOD_DIRECT_PUNCHING, 0, DirectPunching{Email: d.cfg.Email, Token: token}); err != nil {
+		d.logf("relay: send nudge for token %s failed: %v", shortToken(token), err)
+	}
 }
 
 // acceptLoop 监听参数取自起监听时那一个: stopAccept 会把字段置空, 用字段会误退出。
@@ -190,8 +294,8 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 	}
 	_ = stream.SetReadDeadline(time.Time{})
 
-	if !dc.authorize(head.Token, head.Port) {
-		d.logf("stream from %s: rejected (token invalid/expired, or connection not authenticated)", remote)
+	if err := dc.authorize(stream, head); err != nil {
+		d.logf("stream from %s: rejected (%v)", remote, err)
 		return
 	}
 	if head.Kind == directStreamAuth {

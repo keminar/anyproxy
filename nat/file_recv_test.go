@@ -44,6 +44,28 @@ func TestSplitRecvSpec(t *testing.T) {
 	}
 }
 
+// resolveVia 把 -via 解成"关键字"或"当作 VPS email 的盲转发直连"两类, 且不能与
+// 两个保留关键字冲突。
+func TestResolveVia(t *testing.T) {
+	cases := []struct {
+		via          string
+		wantVia      string
+		wantRelayVia string
+	}{
+		{ViaDirect, ViaDirect, ""},
+		{ViaRelay, ViaRelay, ""},
+		{"", ViaDirect, ""}, // 空值等价于默认的 direct
+		{"vps@example.com", ViaDirect, "vps@example.com"},
+		{"sideways", ViaDirect, "sideways"}, // 任意非关键字都当 VPS email, 不再报"-via 非法"
+	}
+	for _, c := range cases {
+		gotVia, gotRelayVia := resolveVia(c.via)
+		if gotVia != c.wantVia || gotRelayVia != c.wantRelayVia {
+			t.Errorf("resolveVia(%q) = (%q, %q), want (%q, %q)", c.via, gotVia, gotRelayVia, c.wantVia, c.wantRelayVia)
+		}
+	}
+}
+
 func TestRecvFilesValidatesArgs(t *testing.T) {
 	base := conf.WsClient{
 		Connect: "127.0.0.1:1",
@@ -60,8 +82,10 @@ func TestRecvFilesValidatesArgs(t *testing.T) {
 		{"no path", "a@example.com", ViaRelay, "does not say what to fetch"},
 		{"self recv", "c@example.com:x", ViaRelay, "own email"},
 		{"empty email", ":x", ViaRelay, "empty email"},
-		{"bad via", "a@example.com:x", "sideways", "-via"},
 		{"escaping path", "a@example.com:../x", ViaRelay, "escapes"},
+		// via 填一台 VPS 的 email 时(盲转发直连打洞): 不能是自己, 也不能和取件对象相同。
+		{"via-vps is self", "a@example.com:x", "c@example.com", "own email"},
+		{"via-vps equals target", "a@example.com:x", "a@example.com", "different subscriber"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

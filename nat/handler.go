@@ -111,12 +111,23 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 		w.uplink = newUDPUplink(w.tag, cfg.Connect, w.forward)
 	}
 
-	if cfg.DirectAccept || len(cfg.Direct) > 0 {
+	if cfg.Direct.Accept || len(cfg.Direct.Rules) > 0 || cfg.Direct.Relay {
+		// direct.accept 与 direct.relay 是两种不同的角色, 一台机器同时开着不常见且值得留意:
+		// accept 把本机自己的 forward 目标暴露给别人; relay 让本机替别人盲转发到第三方
+		// (近似开放中继)。多数部署里两者应分开——纯中继 VPS 只开 relay 即可, 不必开
+		// accept。这里只是提醒, 不阻止(确有既当接受方又当中继的合理场景)。
+		if cfg.Direct.Accept && cfg.Direct.Relay {
+			w.logf("warning: both direct.accept and direct.relay are enabled; this machine will BOTH accept direct connections to its own forward targets AND blindly relay others' traffic to third parties (open-relay-like). Enable only direct.relay for a dedicated relay VPS, or only direct.accept for a normal target host, unless you intentionally want both roles")
+		}
 		w.direct = newDirectPeer(w.tag, cfg, w.forward)
-		w.direct.startEntries(cfg.Direct)
+		w.direct.startEntries(cfg.Direct.Rules)
 		go w.direct.reapSessions()
-		if cfg.DirectAccept {
+		if cfg.Direct.Accept {
 			go w.direct.reapAccept()
+		}
+		if cfg.Direct.Relay {
+			// VPS 盲转发中继: 周期回收空闲的中继绑定(见 direct_relay.go)。
+			go w.direct.reapRelay()
 		}
 	}
 
@@ -162,7 +173,12 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 		h.Add("Host", live.Host)
 	}
 	wsDialer := &websocket.Dialer{
-		NetDial:          func(network, addr string) (net.Conn, error) { return bypassDial(network, addr, 30*time.Second) },
+		NetDial: func(network, addr string) (net.Conn, error) {
+			if w.cfg.Proxy != "" {
+				return dialThroughProxy(w.cfg.Proxy, network, addr, 30*time.Second)
+			}
+			return bypassDial(network, addr, 30*time.Second)
+		},
 		HandshakeTimeout: 45 * time.Second,
 	}
 	c, resp, err := wsDialer.Dial(u.String(), h)

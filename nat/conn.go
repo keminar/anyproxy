@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -43,6 +44,10 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
+
+// connSeq 服务端(B)连接序号, 用于给每条连接生成一个贯穿其生命周期的日志前缀
+// (见 serveWs 的 tag), 方便在同一 email 多次重连/并发中继时把日志行对上号。
+var connSeq atomic.Uint64
 
 // ServerHub 服务端的ws链接信息
 var ServerHub *Hub
@@ -112,6 +117,9 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// tag 贯穿这条连接生命周期的日志前缀, 见 connSeq 的注释。
+	tag := fmt.Sprintf("#%d", connSeq.Add(1))
+
 	// 认证
 	var user AuthMessage
 	err = conn.ReadJSON(&user)
@@ -158,9 +166,9 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	}
 	if len(subscribe) == 0 {
 		if reason, ok := emptySubscribeAllowed(user); ok {
-			log.Printf("serveWs client email %s empty subscribe, allowed for %s\n", user.Email, reason)
+			log.Printf("[%s] serveWs client email %s empty subscribe, allowed for %s\n", tag, user.Email, reason)
 		} else {
-			log.Printf("serveWs client email %s ignore, subscribe is empty\n", user.Email)
+			log.Printf("[%s] serveWs client email %s ignore, subscribe is empty\n", tag, user.Email)
 			conn.WriteMessage(websocket.TextMessage, []byte("subscribe empty err"))
 			return
 		}
@@ -169,12 +177,12 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 
 	clientNum := hub.ClientCount()
 	// 注册连接
-	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Email: user.Email, Subscribe: subscribe}
+	client := &Client{hub: hub, conn: conn, send: make(chan *Message, SEND_CHAN_LEN), User: user.User, Email: user.Email, Subscribe: subscribe, tag: tag}
 	client.hub.register <- client
 	clientNum++ //这里不用len计算是因为chan异步不确认谁先执行
 
 	remote := getIPAdress(r, []string{"X-Real-IP"})
-	log.Printf("serveWs client email %s user %s ip %s connected, subscribe %v, total client nums %d\n", user.Email, user.User, remote, subscribe, clientNum)
+	log.Printf("[%s] serveWs client email %s user %s ip %s connected, subscribe %v, total client nums %d\n", tag, user.Email, user.User, remote, subscribe, clientNum)
 
 	go client.writePump()
 	go client.serverReadPump()
@@ -197,16 +205,20 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 // 三者都没有的连接才是真的"什么都不做"——继续放行的话服务端也无法把它路由给任何
 // 请求方, 保留这条连接纯属陪跑。
 func emptySubscribeAllowed(user AuthMessage) (reason string, ok bool) {
-	switch {
-	case isForwardEmail(user.Email):
-		return "forward", true
-	case user.Direct:
-		return "direct", true
-	case user.Receive:
-		return "receive", true
-	default:
+	var reasons []string
+	if isForwardEmail(user.Email) {
+		reasons = append(reasons, "forward")
+	}
+	if user.Direct {
+		reasons = append(reasons, "direct")
+	}
+	if user.Receive {
+		reasons = append(reasons, "receive")
+	}
+	if len(reasons) == 0 {
 		return "", false
 	}
+	return strings.Join(reasons, ","), true
 }
 
 // getIPAdress 客户端IP

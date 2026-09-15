@@ -27,6 +27,8 @@
 - [tun-dns-resolution.md](tun-dns-resolution.md) — TUN 下域名解析优先级：系统 hosts / anyproxy 配置 hosts / DoH-DoT 三条路径谁生效；解析阶段(UDP53 劫持) vs 转发阶段(按 SNI 重查配置、`host.IP` 覆盖、TUN 不做本地 DNS 重解析)；DoH 绕过与 `ip:` 才能强制改写的边界；及私网/LAN 目标 `BypassPrivate`(Windows 默认 true)在捕获阶段就直连、不进引擎的例外。
 - [blackhole-sentinel.md](blackhole-sentinel.md) — **黑洞哨兵 IP 专题**（`default.blackholeIP`, 默认 192.0.0.0）：把域名指向不可路由的哨兵 IP，一举同时解决「**没开代理时本地屏蔽某域名**」和「**开了 anyproxy 时该域名又能经下级代理远程解析访问**」；含哨兵为何必须用 192.0.0.0(而非 loopback/私网)、两阶段原理(捕获强制进引擎 + 转发强制 remote+remote)、检测靠 dstIP/SNI 只为还原域名、系统 hosts vs 配置 hosts(对 DoH 是否生效)、完整示例与排错 FAQ。
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治(仅Linux)、`loopGuard` 熔断器兜底、macOS/Windows 替代方案。
+- [direct-punch-order.md](direct-punch-order.md) — NAT 直连打洞顺序专题：跨"运营商 CGNAT 家宽 ↔ 公网云主机"时居民/CGNAT 侧必须先发第一个包，否则 NAT 映射被毒化、双向全灭；含 `direct.punchFirst` 配置由来与排查清单。
+- [direct-relay-design.md](direct-relay-design.md) — VPS 盲转发中继(TURN 式 direct relay)设计：两端都在 CGNAT 后时经公网 VPS 中转，QUIC/TLS 端到端、VPS 只盲转发不透明 UDP；信令/鉴权/数据面/失败语义。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。
 - [windows-winDivert.md](windows-winDivert.md) — Windows WinDivert 运行依赖：`WinDivert.dll`/`.sys` 放置、管理员权限、路径含空格/中文的驱动加载问题、bypass 模式在 Windows 已移除。
 - [todo.md](todo.md) — 待办/待确认：PR #22 审查中暂留未处理的项（透明代理嗅探 `Peek(1)` 无超时 + 实现分叉、`HostBlocksUDP` 热路径线性扫描）。

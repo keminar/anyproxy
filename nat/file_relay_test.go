@@ -89,15 +89,24 @@ func TestFileRelayEndToEnd(t *testing.T) {
 	}
 
 	var lastProgress int64
-	saved, err := sendFileViaRelay(a.client, "c@example.com", items[0], func(n int64) { lastProgress = n })
+	saved, err := sendFileViaRelay(a.client, "c@example.com", items[0], func(n int64) {
+		if n < lastProgress {
+			t.Fatalf("progress went backwards: %d -> %d", lastProgress, n)
+		}
+		lastProgress = n
+	})
 	if err != nil {
 		t.Fatalf("send via relay: %v", err)
 	}
 	if saved != "relay.bin" {
 		t.Fatalf("peer saved it as %q", saved)
 	}
-	if lastProgress != int64(len(body)) {
-		t.Fatalf("progress ended at %d, want %d", lastProgress, len(body))
+	// 进度现在挂在对端 ACK 上(见 nat/file_relay.go 的 sendFileViaRelay), 不再是
+	// 精确的本地读盘计数: ACK 按 relayAckEvery(1MB) 门槛触发, 文件体最后不满 1MB
+	// 的尾巴通常等不到下一次确认就传完了, 所以只要求落在合理区间, 不要求精确等于
+	// len(body)——下界给足容忍度(90%), 上界放宽一点余量(AEAD 分帧 + 文件头尾开销)。
+	if want := int64(len(body)); lastProgress < want*9/10 || lastProgress > want+4096 {
+		t.Fatalf("progress ended at %d, want roughly close to %d", lastProgress, want)
 	}
 	got, err := os.ReadFile(filepath.Join(recvDir, "relay.bin"))
 	if err != nil {
@@ -524,14 +533,35 @@ func TestFileRelayDoesNotStealSameIDForwardMessages(t *testing.T) {
 	}
 }
 
-// SendFiles 的 via 参数必须显式声明合法值, 传别的既不报错也不生效是最坏的情况。
-func TestSendFilesRejectsUnknownVia(t *testing.T) {
+// TestSendFilesRejectsBadViaVps -via 填一台 VPS 的 email(盲转发直连打洞)时的几种误用要
+// 在真去拨号之前就拒绝并说清楚原因: 指了自己、指了和 -to 相同的对端、以及 uuid 不合法
+// (中继连接要靠它在 e2e QUIC 流里应答挑战, 见 direct_relay_auth.go)。任意非 "direct"/
+// "relay" 关键字的 -via 值都被当作 VPS email, 不再有"未知 via"这类错误(见 resolveVia)。
+func TestSendFilesRejectsBadViaVps(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "x.txt")
 	os.WriteFile(src, []byte("hi"), 0o644)
-	cfg := conf.WsClient{Connect: "127.0.0.1:1", User: "a", Pass: testPassA, Email: "a@example.com"}
-	err := SendFiles(cfg, "c@example.com", []string{src}, "sideways", 1)
-	if err == nil || !strings.Contains(err.Error(), "-via") {
-		t.Fatalf("want a clear -via error, got %v", err)
+
+	cases := []struct {
+		name       string
+		cfg        conf.WsClient
+		to         string
+		via        string
+		wantErrSub string
+	}{
+		{"via-vps is self", conf.WsClient{Connect: "127.0.0.1:1", Email: "a@example.com", UUID: testUUIDA},
+			"c@example.com", "a@example.com", "own email"},
+		{"via-vps equals target", conf.WsClient{Connect: "127.0.0.1:1", Email: "a@example.com", UUID: testUUIDA},
+			"c@example.com", "c@example.com", "different subscriber"},
+		{"via-vps with invalid own uuid", conf.WsClient{Connect: "127.0.0.1:1", Email: "a@example.com", UUID: ""},
+			"c@example.com", "vps@example.com", "uuid"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := SendFiles(c.cfg, c.to, []string{src}, c.via, 1)
+			if err == nil || !strings.Contains(err.Error(), c.wantErrSub) {
+				t.Fatalf("want error containing %q, got %v", c.wantErrSub, err)
+			}
+		})
 	}
 }
 

@@ -20,22 +20,62 @@ import (
 // directPendingTTL B 等 C 回 d_ready 的上限。超时即回错误给 A, 不让入口连接干等。
 const directPendingTTL = 15 * time.Second
 
+// directRelaySessionTTL 中继会话在 B 上的登记存活时间: 覆盖"open->两腿打洞->A 拨号"整段,
+// 期间要靠它把 A、C 的 nudge 路由到 VPS。取值给足并明显大于 directPendingTTL。
+const directRelaySessionTTL = 60 * time.Second
+
 // directBroker 记录已转交给 C、还在等 C 回话的请求。
 type directBroker struct {
 	mu      sync.Mutex
 	pending map[uint]*directPending
 	nextID  uint
+
+	// relays 进行中的中继会话, 按 token 索引。B 只用它做两件事: 把 open/punch 的 d_ready
+	// 归位到正确的会话, 以及把两腿的 d_punching nudge 路由给 VPS(见 onPunching)。数据面
+	// 完全不经 B。
+	relays map[string]*relaySession
 }
 
 // directPending 一次转交的上下文: 记住是谁问的, 以便把 C 的回复送回去。
+//
+// 中继场景下同一个会话会产生两条 pending(向 VPS 的 relay-open、向 C 的 punch), 各自的
+// d_ready 回来时靠 relay!=nil + role 分派到中继状态机(见 onReady), 不再走"直接回 offer 给
+// A"那条路。
 type directPending struct {
 	asker    *Client
 	askerID  uint // A 那侧的请求 ID, 回 offer 时要原样带回, A 才能对上是哪条入口连接
 	email    string
 	deadline time.Time
+
+	relay *relaySession // 非空表示这条 pending 属于一次中继会话
+	role  int           // relayRoleOpen(VPS 回 E) / relayRolePunchC(C 回候选+指纹)
 }
 
-var serverBroker = &directBroker{pending: make(map[uint]*directPending)}
+const (
+	relayRoleOpen   = iota // 向 VPS 发的 relay-open, 等它回 E
+	relayRolePunchC        // 向 C 发的 punch, 等它回候选+指纹
+)
+
+// relaySession B 侧一次中继会话的上下文。只保存路由/协调需要的最少信息。
+type relaySession struct {
+	token    string  // 本次会话标识(A 生成)
+	asker    *Client // A
+	askerID  uint    // A 侧请求 ID
+	aEmail   string  // A 的 email(B 认证过的 c.Email)
+	cEmail   string  // 最终目标 C
+	vpsEmail string  // 中继 VPS
+	vps      *Client // VPS 连接
+	aCands   []directCandidate
+	endpoint []directCandidate // VPS 报回的中继端点 E
+	port     uint16
+	encrypt  bool
+	deadline time.Time
+}
+
+var serverBroker = &directBroker{
+	pending: make(map[uint]*directPending),
+	relays:  make(map[string]*relaySession),
+}
 
 // handleDirectServer 处理订阅方发来的直连信令(在 B 上执行)。返回 true 表示消息已被
 // 直连逻辑消费, 调用方不应再送进数据面的 BridgeHub。
@@ -48,11 +88,52 @@ func handleDirectServer(c *Client, msg *Message) bool {
 		serverBroker.onRequest(c, msg)
 	case METHOD_DIRECT_READY:
 		serverBroker.onReady(c, msg)
+	case METHOD_DIRECT_PUNCHING:
+		serverBroker.onPunching(c, msg)
 	default:
 		// d_punch / d_offer 是 B 下发给订阅方的方向, 订阅方不该往上发。
 		log.Printf("nat direct: unexpected %s from client email %s", msg.Method, c.Email)
 	}
 	return true
+}
+
+// onPunching 把 A 的 d_punching nudge 转给目标 C(按 A 声明的 Email 路由)。B 不做别的:
+// C 只在 Token 对上自己停着的那次打洞时才动作, 而 Token 是本次会话的一次性秘密, 伪造不了。
+func (b *directBroker) onPunching(c *Client, msg *Message) {
+	var p DirectPunching
+	if err := decodeDirect(msg.Body, &p); err != nil {
+		log.Printf("nat direct: bad punching from email %s: %v", c.Email, err)
+		return
+	}
+	if p.Token == "" {
+		return
+	}
+	// 中继会话的 nudge: 不按 p.Email 路由给对端, 而是转给这次会话的 VPS, 并**用发出方
+	// B 认证过的 c.Email 当"腿"标签**(不采信 p.Email, 免得被伪造成别的腿)。VPS 靠它认出
+	// 该朝 A 还是 C 打回去(见 nat/direct_relay.go 的 fireRelayLeg)。
+	if rs := b.relaySession(p.Token); rs != nil {
+		if rs.vps == nil {
+			return
+		}
+		body, err := encodeDirect(DirectPunching{Email: c.Email, Token: p.Token})
+		if err != nil {
+			return
+		}
+		rs.vps.hub.broadcast <- &CMessage{client: rs.vps, message: &Message{Type: ConnTCP, Method: METHOD_DIRECT_PUNCHING, Body: body}}
+		return
+	}
+	if p.Email == "" {
+		return
+	}
+	peer := c.hub.GetClientByEmail(p.Email)
+	if peer == nil {
+		return // 对端不在线; C 那边有 directPunchFirstDelay 兜底, 这里静默即可
+	}
+	body, err := encodeDirect(DirectPunching{Token: p.Token})
+	if err != nil {
+		return
+	}
+	peer.hub.broadcast <- &CMessage{client: peer, message: &Message{Type: ConnTCP, Method: METHOD_DIRECT_PUNCHING, Body: body}}
 }
 
 // onRequest A 请求连接某 email: 转交给 C, 等它回端点。
@@ -76,6 +157,11 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 		replyOffer(c, msg.ID, DirectOffer{Err: "cannot direct-connect to self"})
 		return
 	}
+	// 中继模式: A 指定了经某 VPS(req.Via)盲转发到 C。走另一套三方协调状态机。
+	if req.Via != "" {
+		b.onRelayRequest(c, msg, req, reqCands)
+		return
+	}
 	peer := c.hub.GetClientByEmail(req.Email)
 	if peer == nil {
 		replyOffer(c, msg.ID, DirectOffer{Err: fmt.Sprintf("no subscriber online for email %s", req.Email)})
@@ -84,8 +170,11 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 
 	// 用 B 自己的 ID 与 C 通信: A 那侧的 ID 是各 A 自行采番的, 不同 A 会撞号。
 	id := b.track(c, msg.ID, req.Email)
+	// Email 用 c.Email(B 自己认证过的身份), 不是 req 里的字段——A 没法在这里伪造成
+	// 别的 email, C 才能放心拿它去查 receive.allow 派生打洞加密密钥(见 DirectPunch
+	// 的字段注释)。
 	punch := DirectPunch{PeerAddrs: reqCands, PeerAddr: firstAddr(reqCands),
-		Token: req.Token, Port: req.Port}
+		Token: req.Token, Port: req.Port, Email: c.Email, Encrypt: req.Encrypt, PunchFirst: req.PunchFirst}
 	body, err := encodeDirect(punch)
 	if err != nil {
 		b.take(id)
@@ -108,6 +197,10 @@ func (b *directBroker) onReady(c *Client, msg *Message) {
 		log.Printf("nat direct: ready from email %s for unknown/expired request %d", c.Email, msg.ID)
 		return
 	}
+	if p.relay != nil {
+		b.onRelayReady(c, p, ready)
+		return
+	}
 	if ready.Err != "" {
 		replyOffer(p.asker, p.askerID, DirectOffer{Err: fmt.Sprintf("peer %s cannot accept a direct connection: %s", p.email, ready.Err)})
 		return
@@ -124,6 +217,175 @@ func (b *directBroker) onReady(c *Client, msg *Message) {
 	log.Printf("nat direct: email %s is ready with candidates %v", c.Email, readyCands)
 	replyOffer(p.asker, p.askerID, DirectOffer{
 		PeerAddrs: readyCands, PeerAddr: firstAddr(readyCands), Fingerprint: ready.Fingerprint})
+}
+
+// onRelayRequest A 请求经 VPS(req.Via)盲转发到 C(req.Email): 起中继会话, 先让 VPS 开
+// 中继 socket 探端点 E(见 docs/direct-relay-design.md 的信令流程)。
+func (b *directBroker) onRelayRequest(c *Client, msg *Message, req DirectRequest, aCands []directCandidate) {
+	if req.Via == c.Email {
+		replyOffer(c, msg.ID, DirectOffer{Err: "relay via cannot be self"})
+		return
+	}
+	if req.Via == req.Email {
+		replyOffer(c, msg.ID, DirectOffer{Err: "relay via and target must be different peers"})
+		return
+	}
+	vps := c.hub.GetClientByEmail(req.Via)
+	if vps == nil {
+		replyOffer(c, msg.ID, DirectOffer{Err: fmt.Sprintf("no relay subscriber online for email %s", req.Via)})
+		return
+	}
+	target := c.hub.GetClientByEmail(req.Email)
+	if target == nil {
+		replyOffer(c, msg.ID, DirectOffer{Err: fmt.Sprintf("no subscriber online for email %s", req.Email)})
+		return
+	}
+	rs := &relaySession{
+		token: req.Token, asker: c, askerID: msg.ID, aEmail: c.Email, cEmail: req.Email,
+		vpsEmail: req.Via, vps: vps, aCands: aCands, port: req.Port, encrypt: req.Encrypt,
+		deadline: time.Now().Add(directRelaySessionTTL),
+	}
+	b.mu.Lock()
+	now := time.Now()
+	for t, s := range b.relays {
+		if now.After(s.deadline) {
+			delete(b.relays, t)
+		}
+	}
+	b.relays[req.Token] = rs
+	b.mu.Unlock()
+
+	// 第一步: 让 VPS 开中继 socket、探端点 E, 用 d_ready 回来(role=open)。
+	id := b.trackRelay(rs, relayRoleOpen)
+	body, err := encodeDirect(DirectRelayOpen{Token: req.Token})
+	if err != nil {
+		b.take(id)
+		b.dropRelay(req.Token)
+		replyOffer(c, msg.ID, DirectOffer{Err: "server encode relay-open failed"})
+		return
+	}
+	vps.hub.broadcast <- &CMessage{client: vps, message: &Message{ID: id, Type: ConnTCP, Method: METHOD_DIRECT_RELAY_OPEN, Body: body}}
+	log.Printf("nat direct relay: email %s -> %s via %s, asked relay to open an endpoint", c.Email, req.Email, req.Via)
+}
+
+// onRelayReady 分派中继会话里两类 d_ready: VPS 报回的中继端点 E(role=open), C 报回的候选
+// +证书指纹(role=punchC)。
+func (b *directBroker) onRelayReady(c *Client, p *directPending, ready DirectReady) {
+	rs := p.relay
+	switch p.role {
+	case relayRoleOpen:
+		if ready.Err != "" {
+			b.failRelay(rs, fmt.Sprintf("relay %s cannot open an endpoint: %s", rs.vpsEmail, ready.Err))
+			return
+		}
+		eCands, err := checkDirectCandidates(mergeCandidates(ready.Candidates, ready.Endpoint))
+		if err != nil {
+			b.failRelay(rs, fmt.Sprintf("relay %s reported no usable endpoint: %v", rs.vpsEmail, err))
+			return
+		}
+		rs.endpoint = eCands
+		log.Printf("nat direct relay: %s opened endpoint %v for %s<->%s", rs.vpsEmail, eCands, rs.aEmail, rs.cEmail)
+		// 在 VPS 上登记 A 腿(此刻已有 A 的候选): VPS 收到 A 的 nudge 后朝 A 打洞。
+		b.sendRelayLeg(rs, rs.aEmail, rs.aCands)
+		// 让 C 朝 E 打洞(Relay=true: C 立即打并发 nudge)并回自己的候选+指纹(role=punchC)。
+		punch := DirectPunch{PeerAddrs: eCands, PeerAddr: firstAddr(eCands), Token: rs.token,
+			Port: rs.port, Email: rs.aEmail, Encrypt: rs.encrypt, Relay: true}
+		body, err := encodeDirect(punch)
+		if err != nil {
+			b.failRelay(rs, "server encode relay punch failed")
+			return
+		}
+		id := b.trackRelay(rs, relayRolePunchC)
+		cClient := b.clientByEmail(c, rs.cEmail)
+		if cClient == nil {
+			b.take(id)
+			b.failRelay(rs, fmt.Sprintf("no subscriber online for email %s", rs.cEmail))
+			return
+		}
+		cClient.hub.broadcast <- &CMessage{client: cClient, message: &Message{ID: id, Type: ConnTCP, Method: METHOD_DIRECT_PUNCH, Body: body}}
+
+	case relayRolePunchC:
+		if ready.Err != "" {
+			b.failRelay(rs, fmt.Sprintf("peer %s cannot accept a relayed connection: %s", rs.cEmail, ready.Err))
+			return
+		}
+		cCands, err := checkDirectCandidates(mergeCandidates(ready.Candidates, ready.Endpoint))
+		if err != nil {
+			b.failRelay(rs, fmt.Sprintf("peer %s reported no usable endpoint: %v", rs.cEmail, err))
+			return
+		}
+		if ready.Fingerprint == "" {
+			b.failRelay(rs, fmt.Sprintf("peer %s reported no certificate fingerprint", rs.cEmail))
+			return
+		}
+		// 在 VPS 上登记 C 腿: VPS 收到 C 的 nudge 后朝 C 打洞。
+		b.sendRelayLeg(rs, rs.cEmail, cCands)
+		// 把中继端点 E + C 的指纹回给 A: A 朝 E 打洞并拨号, TLS 期望 C 的指纹, e2e QUIC 经
+		// VPS 盲转发在 A<->C 完成。
+		replyOffer(rs.asker, rs.askerID, DirectOffer{
+			PeerAddrs: rs.endpoint, PeerAddr: firstAddr(rs.endpoint), Fingerprint: ready.Fingerprint})
+		log.Printf("nat direct relay: session %s ready, offered endpoint %v to %s", shortToken(rs.token), rs.endpoint, rs.aEmail)
+	}
+}
+
+// sendRelayLeg 通知 VPS 登记一条腿(A 或 C)的候选, 让它朝那腿打洞。复用 d_punch 的形状,
+// Relay=true + Email 标明是哪条腿。fire-and-forget(VPS 不回 d_ready)。
+func (b *directBroker) sendRelayLeg(rs *relaySession, legEmail string, cands []directCandidate) {
+	if rs.vps == nil {
+		return
+	}
+	punch := DirectPunch{PeerAddrs: cands, PeerAddr: firstAddr(cands), Token: rs.token, Email: legEmail, Relay: true}
+	body, err := encodeDirect(punch)
+	if err != nil {
+		return
+	}
+	rs.vps.hub.broadcast <- &CMessage{client: rs.vps, message: &Message{Type: ConnTCP, Method: METHOD_DIRECT_PUNCH, Body: body}}
+}
+
+// clientByEmail 经任一在线连接的 hub 按 email 查订阅方(hub 是全局共享的)。
+func (b *directBroker) clientByEmail(any *Client, email string) *Client {
+	return any.hub.GetClientByEmail(email)
+}
+
+// relaySession 取一个未过期的中继会话。
+func (b *directBroker) relaySession(token string) *relaySession {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rs, ok := b.relays[token]
+	if !ok || time.Now().After(rs.deadline) {
+		return nil
+	}
+	return rs
+}
+
+func (b *directBroker) dropRelay(token string) {
+	b.mu.Lock()
+	delete(b.relays, token)
+	b.mu.Unlock()
+}
+
+// failRelay 中继会话任一步失败: 回错误给 A, 并摘除会话。按直连一贯约定直接失败、不兜底。
+func (b *directBroker) failRelay(rs *relaySession, reason string) {
+	b.dropRelay(rs.token)
+	replyOffer(rs.asker, rs.askerID, DirectOffer{Err: reason})
+}
+
+// trackRelay 登记一条属于中继会话的 pending(等 VPS 或 C 回 d_ready)。
+func (b *directBroker) trackRelay(rs *relaySession, role int) uint {
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, p := range b.pending {
+		if now.After(p.deadline) {
+			delete(b.pending, id)
+			go replyOffer(p.asker, p.askerID, DirectOffer{Err: fmt.Sprintf("peer %s did not respond in time", p.email)})
+		}
+	}
+	b.nextID++
+	id := b.nextID
+	b.pending[id] = &directPending{asker: rs.asker, askerID: rs.askerID, email: rs.cEmail,
+		deadline: now.Add(directPendingTTL), relay: rs, role: role}
+	return id
 }
 
 func (b *directBroker) track(asker *Client, askerID uint, email string) uint {

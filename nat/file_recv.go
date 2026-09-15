@@ -55,8 +55,10 @@ func splitRecvSpec(recv string) (email, remotePath string, err error) {
 // 文件"现在同时意味着"允许他读我这个目录"——沿用同一份配置是有意的(一个对称的动作
 // 不值得维护两份几乎一样的名单), 但这个含义在 conf/router.yaml 和文档里都写明了。
 //
-// via 与 -send 对称, 且是硬限制而不是提示: 选 direct 就打洞直连、打不通直接失败,
-// 选 relay 就经服务端 B 中继。注意中继取件要求 B 也升级到本版本(见 FileRelayOpen.Op)。
+// via 与 -send 对称、三选一(见 resolveVia), 且是硬限制而不是提示: "direct" 打洞直连、
+// 打不通直接失败, "relay" 经服务端 B 中继(注意中继取件要求 B 也升级到本版本, 见
+// FileRelayOpen.Op), 填一台公网 VPS 的 email 则打洞直连但打洞对象换成该 VPS 的盲转发
+// 中继端点(见 SendFiles 的注释与 docs/direct-relay-design.md)。
 //
 // to 是本地存放目录, 与 -send 的 -to 共用同一个命令行参数、按场景解释成不同的东西:
 // -send 时是"发给谁", -recv 时是"存哪儿"。留空则存到当前目录。
@@ -80,10 +82,17 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	if from == cfg.Email {
 		return fmt.Errorf("-recv %s is this machine's own email", from)
 	}
-	if via != ViaDirect && via != ViaRelay {
-		return fmt.Errorf("-via must be %q or %q, got %q", ViaDirect, ViaRelay, via)
+	actualVia, relayVia := resolveVia(via)
+	if relayVia != "" {
+		if relayVia == cfg.Email {
+			return fmt.Errorf("-via %s is this machine's own email", relayVia)
+		}
+		if relayVia == from {
+			return fmt.Errorf("-via %s must be a different subscriber from %s", relayVia, from)
+		}
 	}
 	// 自己的 uuid 是对端认人的唯一凭证, 不合法就没必要跑一趟网络才被拒(同 sendFile)。
+	// 中继连接还要靠它在 e2e QUIC 流里应答挑战(见 direct_relay_auth.go), 同一处校验够用。
 	if !conf.IsValidUUID(cfg.UUID) {
 		return errors.New("websocket.client.uuid is empty or not a valid uuid, refusing to pull")
 	}
@@ -112,14 +121,24 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	// openPull 每次给出一条新的取件通道, 之后的清单/取件循环共用 —— 与 SendFiles 里
 	// 那个 send 函数完全同构, 两条路径的差别只在这一层。
 	var openPull func() (fileConn, error)
-	switch via {
+	switch actualVia {
 	case ViaDirect:
-		// 一次直连, 所有文件共用 —— 每个文件占一条 stream, 不必反复打洞。
-		rule := conf.ClientDirect{Email: from, Port: directFilePort}
+		// 一次直连, 所有文件共用 —— 每个文件占一条 stream, 不必反复打洞。打洞/握手的
+		// 过程日志挂在 quiet 后面不显示(见 nat/file_send.go 里同一处改动的说明), 这
+		// 两行独立于那套调试日志之外, 让一次性命令不至于在打洞期间空等无输出。
+		if relayVia != "" {
+			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch, blind-relayed through %s)...\n", from, relayVia)
+		} else {
+			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", from)
+		}
+		punchStart := time.Now()
+		rule := conf.ClientDirect{Email: from, ForwardPort: directFilePort, Via: relayVia}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was fetched: %w", from, err)
 		}
+		fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
+			from, sess.addr, time.Since(punchStart).Round(time.Millisecond))
 		openPull = func() (fileConn, error) { return sender.peer.openPullStream(sess) }
 	case ViaRelay:
 		openPull = func() (fileConn, error) {

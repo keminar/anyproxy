@@ -389,11 +389,10 @@ func genWebsocketServer() string {
     allowIP:
     #  - 172.17.0.0/16
     # 端口转发入口: 在本机 listen 收连接, 转给该 email 的订阅方, 由对方按端口查它的 client.forward
-    # protocol: tcp(默认) / udp / both, both 适合 RDP(TCP 3389 + UDP 3389)
+    # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
     forward:
-    #  - listen: ":2222"
+    #  - listen: "tcp://:2222"
     #    email: someone@example.com
-    #    protocol: tcp
 `
 }
 
@@ -421,14 +420,22 @@ func genWebsocketClient() string {
     forward:
     #  - port: 2222
     #    target: 127.0.0.1:22
-    # 允许别的订阅方 QUIC 直连本机(数据不经服务端), 监听按需起, 平时不占端口
-    directAccept: false
-    # 本机直连入口: 在 listen 收连接, 直接送给 email 对应的订阅方, 由对方按 port 查它的 forward
+    # QUIC 直连(数据不经服务端)与盲转发中继相关的全部配置, 都挂在这一个块下
     direct:
-    #  - listen: ":13389"
-    #    email: someone@example.com
-    #    port: 3389
-    #    protocol: both
+      # 允许别的订阅方 QUIC 直连本机, 监听按需起, 平时不占端口
+      accept: false
+      # 本机直连入口: 在 listen 收连接, 直接送给 email 对应的订阅方, 由对方按 forwardPort 查它的 forward
+      # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
+      rules:
+      #  - listen: "both://:13389"
+      #    email: someone@example.com
+      #    forwardPort: 3389  # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个端口就拒绝(白名单), 别人不能靠瞎填端口探到对方的其它转发目标
+      #    via: relay-vps     # 可选: 经这个 email 对应的公网 VPS(需开 direct.relay)盲转发中继, 打洞直连打不通时用
+      # 直连(QUIC)默认吃 quic-go 对 UDP 的批量收发/ECN 优化; 极少数机器上(常见于某些
+      # 网卡驱动/虚拟网卡)这条优化本身会导致丢包、拥塞窗口涨不起来, 症状是直连传输
+      # 明显偏慢且丢包率异常高。不配则跟随命令行 -direct-plain-udp 的全局默认值,
+      # 显式配了 true/false 只影响这一条连接
+      #plainUdp: false
     # 与别人收发文件(anyproxy -send / -recv)的目录, 收和取共用这一份。不配 dir 则收发一律拒绝
     receive:
     #  dir: /data/incoming
@@ -436,7 +443,7 @@ func genWebsocketClient() string {
     #  allow:                 # 留空 = 谁都不接受; uuid 抄对方的 .<配置文件同名>.uuid(隐藏文件), 名单双向生效
     #    - email: someone@example.com
     #      uuid:
-    # 上面 subscribe/forward/direct/directAccept/receive 全不配时, 常驻进程会自动跳过
+    # 上面 subscribe/forward/direct/receive 全不配时, 常驻进程会自动跳过
     # 这条配置(只留给 -send/-recv 命令行用), 通常不用管这项; 想强制跳过就设 true
     #sendRecvOnly: false
   # 要同时订阅多台服务端就改用 clients 数组(配了它, 上面的 client 块被忽略), 字段完全相同:

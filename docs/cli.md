@@ -17,6 +17,17 @@
 | `-geo-in` / `-geo-cat` / `-geo-out` | geo-extract 的源 `.dat` / 类别(逗号分隔) / 输出路径 | — | — |
 | `-v` | 显示编译版本信息 | — | — |
 | `-h` | 显示帮助 | — | — |
+| `-genkey` | 生成一对 websocket 鉴权密钥并退出（私钥填 `websocket.client.key`，公钥填 `websocket.server.users[].key`） | `websocket.client.key` / `websocket.server.users[].key` | CLI 一次性 |
+| `-send PATH` | 把文件/目录发给另一个订阅端并退出（可跟多个路径）；接收端需开 `direct.accept`，端到端加密 | — | CLI 一次性 |
+| `-to EMAIL[:subdir]` / `DIR` | `-send`：接收方 email（scp 风格 `:subdir` 落到 `receive.dir/subdir`）；`-recv`：本机存放目录（默认当前目录） | — | CLI 一次性 |
+| `-via direct\|relay\|VPS的email` | `-send`/`-recv`：直连打洞(`direct`，打不通直接失败)、经服务端 B 中继(`relay`，无需打洞)，或填一台公网 VPS 的 email（该机需开 `direct.relay`）盲转发中继打洞（双方都在 CGNAT 后无法直连时用，详见 [direct-relay-design.md](direct-relay-design.md)）；均端到端加密 | `websocket.client.direct.relay`(VPS 侧) | CLI 一次性 |
+| `-recv EMAIL:PATH` | 从另一个订阅端取回文件/目录并退出（scp 风格，路径相对对方 `receive.dir`） | — | CLI 一次性 |
+| `-parallel N` | `-send`/`-recv`：单个大文件按字节区间切最多 N 块并行传（默认 1，小文件不切） | — | CLI 一次性 |
+| `-direct-plain-udp` | 直连(NAT 打洞)连接：跳过 quic-go 批量/ECN 快速 UDP 路径，回落逐包 I/O；高丢包、拥塞窗口卡死时尝试 | `websocket.client.direct.plainUdp` | 命令行 > 配置 |
+| `-check` | 对照建议值只读检查系统调优（sysctl/ulimit/BBR）并退出 | — | CLI 一次性 |
+| `-check-fix` | 一键写入 `/etc/sysctl.d/99-anyproxy.conf` 并 `sysctl -p` 应用推荐内核参数（需 root） | — | CLI 一次性 |
+
+> 文件传输（`-send`/`-recv` 及 `-to`/`-via`/`-parallel`/`-direct-plain-udp`）的完整用法、鉴权与排查见 [websocket.md](websocket.md#文件传输-send--recv--receive)；系统调优（`-check`/`-check-fix`）的完整建议项见 [deployment.md](deployment.md#系统调优)。
 
 ## 优先级规则
 

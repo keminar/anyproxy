@@ -29,7 +29,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// Preflight 给出更明确的缺文件提示。
 	if cfg.WindivertDir != "" {
 		if err := windivert.SetSearchDir(cfg.WindivertDir); err != nil {
-			log.Printf("tun(windivert): 预加载 %s\\WinDivert.dll 失败: %v", cfg.WindivertDir, err)
+			log.Printf("tun(windivert): failed to preload %s\\WinDivert.dll: %v", cfg.WindivertDir, err)
 		}
 	}
 	if err := windivert.Preflight(); err != nil {

@@ -58,7 +58,7 @@ func StartRelayUDP(rules []conf.ServerForward) {
 			continue
 		}
 		if !r.ValidProtocol() {
-			log.Printf("nat relay udp: forward %s has unknown protocol %q, skipped", r.Listen, r.Protocol)
+			log.Printf("nat relay udp: forward %s has unknown protocol %q, skipped", r.Listen, r.Protocol())
 			continue
 		}
 		go listenRelayUDP(r)
@@ -68,7 +68,7 @@ func StartRelayUDP(rules []conf.ServerForward) {
 // newUDPRelay 起一个中继的监听 socket。端口取**实际绑定到的**端口而不是配置里写的:
 // 配 :0 时内核才分配, 用配置值会得到 0, 后面拿它当 forward 键就全对不上了。
 func newUDPRelay(r conf.ServerForward) (*udpRelay, error) {
-	addr, err := net.ResolveUDPAddr("udp", r.Listen)
+	addr, err := net.ResolveUDPAddr("udp", r.Addr())
 	if err != nil {
 		return nil, err
 	}
