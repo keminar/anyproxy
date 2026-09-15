@@ -102,4 +102,4 @@ websocket:
         val: test
 ```
 
-> 典型案例（HTTPS 抓包）：公网把 https 请求打到服务器，服务器解证书加特定头部转到 anyproxy websocket 服务端，本地另起一个 websocket 客户端接收并把 HTTP 请求转发到 Charles。见 [README](../README.md) 使用案例 3。
+> 典型案例（HTTPS 抓包）：公网把 https 请求打到服务器，服务器解证书加特定头部转到 anyproxy websocket 服务端，本地另起一个 websocket 客户端接收并把 HTTP 请求转发到 Charles。见 [README](../README_CN.md) 使用案例 3。

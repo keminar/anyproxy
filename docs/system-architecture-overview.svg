@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1842" height="1598" viewBox="0 0 1842 1598" font-family="'PingFang SC','Microsoft YaHei',Arial,sans-serif">
+  <defs>
+    <marker id="a1" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#546e7a"/>
+    </marker>
+  </defs>
+
+  <rect width="1842" height="1598" fill="#ffffff"/>
+
+  <!-- title -->
+  <text x="921" y="80" text-anchor="middle" font-size="46" font-weight="700" fill="#1f2937">anyproxy 系统架构</text>
+  <text x="921" y="132" text-anchor="middle" font-size="22" fill="#6b7280">多模式代理 · 内网穿透 · TUN 全局代理 · SIGHUP 平滑重启 · 配置热重载</text>
+
+  <!-- outer container -->
+  <rect x="80" y="180" width="1682" height="1260" rx="40" fill="#f8f9fa" stroke="#d1d5db" stroke-width="2"/>
+
+  <!-- ① config input -->
+  <rect x="140" y="240" width="1562" height="110" rx="20" fill="#ffffff" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="160" y="270" font-size="18" font-weight="700" fill="#374151">① 配置输入</text>
+  <rect x="190" y="285" width="1462" height="50" rx="10" fill="#f3f4f6" stroke="#e5e7eb"/>
+  <text x="921" y="308" text-anchor="middle" font-size="18" font-weight="600" fill="#1f2937">router.yaml + CLI 参数</text>
+  <text x="921" y="332" text-anchor="middle" font-size="13" fill="#6b7280">-l  -p  -mode  -ws-listen  -ws-connect  -geo-extract  -check  -c  -daemon</text>
+
+  <!-- ② ingress / modes -->
+  <rect x="140" y="400" width="1562" height="220" rx="20" fill="#ffffff" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="160" y="430" font-size="18" font-weight="700" fill="#374151">② 流量接入 · 运行模式（mode）</text>
+
+  <!-- 6 mode boxes -->
+  <g id="modes">
+    <rect x="120" y="455" width="240" height="145" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="240" y="488" text-anchor="middle" font-size="18" font-weight="700" fill="#1e40af">proxy</text>
+    <text x="240" y="514" text-anchor="middle" font-size="13" fill="#374151">客户端 / 本地代理端口</text>
+    <text x="240" y="536" text-anchor="middle" font-size="13" fill="#4b5563">SOCKS5 · HTTP</text>
+    <text x="240" y="558" text-anchor="middle" font-size="11" fill="#6b7280">默认模式</text>
+
+    <rect x="390" y="455" width="240" height="145" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="510" y="488" text-anchor="middle" font-size="18" font-weight="700" fill="#1e40af">tunnel</text>
+    <text x="510" y="514" text-anchor="middle" font-size="13" fill="#374151">服务端 tunneld</text>
+    <text x="510" y="536" text-anchor="middle" font-size="13" fill="#4b5563">token 鉴权</text>
+    <text x="510" y="558" text-anchor="middle" font-size="11" fill="#6b7280">仅处理 anyproxy 请求</text>
+
+    <rect x="660" y="455" width="240" height="145" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="780" y="488" text-anchor="middle" font-size="18" font-weight="700" fill="#1e40af">tun</text>
+    <text x="780" y="514" text-anchor="middle" font-size="13" fill="#374151">TUN 虚拟网卡全局代理</text>
+    <text x="780" y="536" text-anchor="middle" font-size="13" fill="#4b5563">Linux · macOS · Windows</text>
+    <text x="780" y="558" text-anchor="middle" font-size="11" fill="#6b7280">Windows 用 WinDivert</text>
+
+    <rect x="930" y="455" width="240" height="145" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="1050" y="488" text-anchor="middle" font-size="18" font-weight="700" fill="#1e40af">bypass</text>
+    <text x="1050" y="514" text-anchor="middle" font-size="13" fill="#374151">物理网卡绕行</text>
+    <text x="1050" y="536" text-anchor="middle" font-size="13" fill="#4b5563">同机多实例防环路</text>
+    <text x="1050" y="558" text-anchor="middle" font-size="11" fill="#6b7280">仅 Linux</text>
+
+    <rect x="1200" y="455" width="240" height="145" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+    <text x="1320" y="488" text-anchor="middle" font-size="18" font-weight="700" fill="#1e40af">tcpcopy</text>
+    <text x="1320" y="514" text-anchor="middle" font-size="13" fill="#374151">端口转发</text>
+    <text x="1320" y="536" text-anchor="middle" font-size="13" fill="#4b5563">本机端口 → 目标端口</text>
+    <text x="1320" y="558" text-anchor="middle" font-size="11" fill="#6b7280">开启后 hosts 规则失效</text>
+
+    <rect x="1470" y="455" width="240" height="145" rx="14" fill="#fff7ed" stroke="#f97316" stroke-width="1.5"/>
+    <text x="1590" y="488" text-anchor="middle" font-size="18" font-weight="700" fill="#9a3412">websocket</text>
+    <text x="1590" y="514" text-anchor="middle" font-size="13" fill="#374151">内网穿透（独立开关）</text>
+    <text x="1590" y="536" text-anchor="middle" font-size="13" fill="#4b5563">信令服务器 + 数据 VPS</text>
+    <text x="1590" y="558" text-anchor="middle" font-size="11" fill="#6b7280">可与 proxy 同进程共存</text>
+  </g>
+
+  <!-- arrow from config to modes -->
+  <line x1="921" y1="350" x2="921" y2="400" stroke="#6b7280" stroke-width="2" marker-end="url(#a1)"/>
+
+  <!-- ③ proto request engine -->
+  <rect x="140" y="680" width="1562" height="260" rx="20" fill="#ffffff" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="160" y="710" font-size="18" font-weight="700" fill="#374151">③ proto 请求处理引擎</text>
+
+  <!-- engine boxes -->
+  <rect x="220" y="745" width="360" height="145" rx="14" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="400" y="782" text-anchor="middle" font-size="18" font-weight="700" fill="#166534">sniff</text>
+  <text x="400" y="810" text-anchor="middle" font-size="13" fill="#374151">从首包还原域名</text>
+  <text x="400" y="835" text-anchor="middle" font-size="13" fill="#4b5563">TLS SNI · HTTP Host</text>
+  <text x="400" y="858" text-anchor="middle" font-size="11" fill="#6b7280">透明代理 / TUN 仅有目标 IP 时</text>
+
+  <rect x="640" y="745" width="480" height="145" rx="14" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="880" y="782" text-anchor="middle" font-size="18" font-weight="700" fill="#166534">hosts 规则</text>
+  <text x="880" y="810" text-anchor="middle" font-size="13" fill="#374151">按顺序逐条匹配</text>
+  <text x="880" y="835" text-anchor="middle" font-size="13" fill="#4b5563">通配符 * · match · geoip:/geosite:</text>
+  <text x="880" y="858" text-anchor="middle" font-size="11" fill="#6b7280">命中后决定 target / proxy / dns / ip / port</text>
+
+  <rect x="1180" y="745" width="420" height="145" rx="14" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+  <text x="1390" y="782" text-anchor="middle" font-size="18" font-weight="700" fill="#166534">target / egress</text>
+  <text x="1390" y="810" text-anchor="middle" font-size="13" fill="#374151">出口策略</text>
+  <text x="1390" y="835" text-anchor="middle" font-size="13" fill="#4b5563">local · remote · auto · deny</text>
+  <text x="1390" y="858" text-anchor="middle" font-size="11" fill="#6b7280">localport 仅用于 TCP</text>
+
+  <text x="921" y="910" text-anchor="middle" font-size="13" fill="#4b5563">loopGuard 熔断 · tcpcopy 转发 · 上级代理免捕获（SO_BINDTODEVICE / route-to / WinDivert exclude）</text>
+
+  <!-- arrow from modes to engine -->
+  <line x1="921" y1="600" x2="921" y2="680" stroke="#6b7280" stroke-width="2" marker-end="url(#a1)"/>
+
+  <!-- ④ output decision -->
+  <rect x="140" y="1000" width="1562" height="180" rx="20" fill="#ffffff" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="160" y="1030" font-size="18" font-weight="700" fill="#374151">④ 出口决策</text>
+
+  <rect x="220" y="1060" width="690" height="100" rx="14" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5"/>
+  <text x="565" y="1092" text-anchor="middle" font-size="18" font-weight="700" fill="#991b1b">remote（走代理）</text>
+  <text x="565" y="1120" text-anchor="middle" font-size="13" fill="#374151">default.proxy / hosts[].proxy</text>
+  <text x="565" y="1142" text-anchor="middle" font-size="13" fill="#4b5563">tunnel → socks5 → http，多代理按顺序回退</text>
+
+  <rect x="980" y="1060" width="620" height="100" rx="14" fill="#f0fdfa" stroke="#14b8a6" stroke-width="1.5"/>
+  <text x="1290" y="1092" text-anchor="middle" font-size="18" font-weight="700" fill="#0f766e">local / auto / deny</text>
+  <text x="1290" y="1120" text-anchor="middle" font-size="13" fill="#374151">本地直连 / 先本地后代理 / 阻断</text>
+  <text x="1290" y="1142" text-anchor="middle" font-size="13" fill="#4b5563">内网目标 · 直连子网 · blackhole 哨兵触发 remote</text>
+
+  <!-- arrow from engine to output -->
+  <line x1="921" y1="940" x2="921" y2="1000" stroke="#6b7280" stroke-width="2" marker-end="url(#a1)"/>
+
+  <!-- ⑤ infrastructure -->
+  <rect x="140" y="1230" width="1562" height="170" rx="20" fill="#ffffff" stroke="#9ca3af" stroke-width="1.5"/>
+  <text x="160" y="1260" font-size="18" font-weight="700" fill="#374151">⑤ 支撑 · 基础设施</text>
+
+  <rect x="190" y="1285" width="350" height="95" rx="12" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="365" y="1315" text-anchor="middle" font-size="16" font-weight="600" fill="#6b21a8">grace</text>
+  <text x="365" y="1340" text-anchor="middle" font-size="12" fill="#4b5563">SIGHUP 平滑重启 / graceful drain</text>
+
+  <rect x="570" y="1285" width="350" height="95" rx="12" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="745" y="1315" text-anchor="middle" font-size="16" font-weight="600" fill="#6b21a8">conf</text>
+  <text x="745" y="1340" text-anchor="middle" font-size="12" fill="#4b5563">配置热重载（watcher 监听 hosts/default）</text>
+
+  <rect x="950" y="1285" width="350" height="95" rx="12" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="1125" y="1315" text-anchor="middle" font-size="16" font-weight="600" fill="#6b21a8">geo</text>
+  <text x="1125" y="1340" text-anchor="middle" font-size="12" fill="#4b5563">geoip / geosite 数据集（.dat + 文本列表）</text>
+
+  <rect x="1330" y="1285" width="350" height="95" rx="12" fill="#faf5ff" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="1505" y="1315" text-anchor="middle" font-size="16" font-weight="600" fill="#6b21a8">infra</text>
+  <text x="1505" y="1340" text-anchor="middle" font-size="12" fill="#4b5563">logging · daemon · RSS（Win ensureEagerRSS）</text>
+</svg>

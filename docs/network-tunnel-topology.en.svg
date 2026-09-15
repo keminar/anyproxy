@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="720" viewBox="0 0 1080 720" font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arrOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#e8923a"/>
+    </marker>
+    <marker id="arrBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2e7d32"/>
+    </marker>
+    <marker id="arrPurple" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#6a1b9a"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect x="0" y="0" width="1080" height="720" fill="#ffffff"/>
+
+  <!-- title -->
+  <text x="540" y="42" text-anchor="middle" font-size="21" font-weight="700" fill="#16213e">anyproxy Intranet Penetration Topology</text>
+  <text x="540" y="67" text-anchor="middle" font-size="12" fill="#5a6472">Signaling Server (WebSocket) + Data Transfer VPS — replaces legacy tunneld; control &amp; data planes separated</text>
+
+  <!-- ================= Intranet A ================= -->
+  <rect x="40" y="150" width="250" height="340" rx="18" fill="#eaf6fb" stroke="#4a90b8" stroke-width="2"/>
+  <text x="165" y="180" text-anchor="middle" font-size="15" font-weight="700" fill="#2c5f7c">Intranet A (initiator)</text>
+  <rect x="70" y="205" width="190" height="54" rx="8" fill="#ffffff" stroke="#4a90b8"/>
+  <text x="165" y="238" text-anchor="middle" font-size="12" fill="#1a1a2e">anyproxy subscriber A</text>
+  <rect x="70" y="290" width="190" height="50" rx="8" fill="#ffffff" stroke="#4a90b8"/>
+  <text x="165" y="320" text-anchor="middle" font-size="12" fill="#1a1a2e">Internal service (RDP/SSH)</text>
+  <line x1="165" y1="259" x2="165" y2="290" stroke="#4a90b8" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <rect x="70" y="395" width="190" height="48" rx="8" fill="#d7ecf5" stroke="#4a90b8"/>
+  <text x="165" y="424" text-anchor="middle" font-size="12" fill="#1a1a2e">NAT / CGNAT gateway</text>
+  <line x1="165" y1="340" x2="165" y2="395" stroke="#4a90b8" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+
+  <!-- ================= Intranet C ================= -->
+  <rect x="790" y="150" width="250" height="340" rx="18" fill="#eaf6fb" stroke="#4a90b8" stroke-width="2"/>
+  <text x="915" y="180" text-anchor="middle" font-size="15" font-weight="700" fill="#2c5f7c">Intranet C (target)</text>
+  <rect x="820" y="205" width="190" height="54" rx="8" fill="#ffffff" stroke="#4a90b8"/>
+  <text x="915" y="238" text-anchor="middle" font-size="12" fill="#1a1a2e">anyproxy subscriber C</text>
+  <rect x="820" y="290" width="190" height="50" rx="8" fill="#ffffff" stroke="#4a90b8"/>
+  <text x="915" y="320" text-anchor="middle" font-size="12" fill="#1a1a2e">Internal target (3389)</text>
+  <line x1="915" y1="259" x2="915" y2="290" stroke="#4a90b8" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <rect x="820" y="395" width="190" height="48" rx="8" fill="#d7ecf5" stroke="#4a90b8"/>
+  <text x="915" y="424" text-anchor="middle" font-size="12" fill="#1a1a2e">NAT / CGNAT gateway</text>
+  <line x1="915" y1="340" x2="915" y2="395" stroke="#4a90b8" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+
+  <!-- ================= Public / Cloud ================= -->
+  <rect x="315" y="130" width="450" height="400" rx="18" fill="#f3f5fa" stroke="#c3cad6" stroke-width="2"/>
+  <text x="540" y="156" text-anchor="middle" font-size="13" fill="#6b7280">Public network / Cloud</text>
+
+  <!-- Signaling server B -->
+  <rect x="435" y="178" width="210" height="140" rx="10" fill="#fff4e6" stroke="#e8923a" stroke-width="2"/>
+  <text x="540" y="205" text-anchor="middle" font-size="14" font-weight="700" fill="#b85c00">Signaling server B</text>
+  <text x="540" y="226" text-anchor="middle" font-size="11" fill="#b85c00">websocket.server · control plane</text>
+  <line x1="447" y1="236" x2="633" y2="236" stroke="#f0c89a" stroke-width="1"/>
+  <text x="450" y="258" font-size="10" fill="#5a3a00">· Auth (user / pass / key)</text>
+  <text x="450" y="278" font-size="10" fill="#5a3a00">· Candidate address exchange</text>
+  <text x="450" y="298" font-size="10" fill="#5a3a00">· UDP reflector (public EP)</text>
+
+  <!-- Data transfer VPS -->
+  <rect x="435" y="362" width="210" height="135" rx="10" fill="#eaf6ec" stroke="#43a047" stroke-width="2"/>
+  <text x="540" y="389" text-anchor="middle" font-size="14" font-weight="700" fill="#2e7d32">Data transfer VPS</text>
+  <text x="540" y="410" text-anchor="middle" font-size="11" fill="#2e7d32">direct.relay · data plane</text>
+  <line x1="447" y1="420" x2="633" y2="420" stroke="#a5d6a7" stroke-width="1"/>
+  <text x="450" y="442" font-size="10" fill="#1b5e20">· Blind relay (dedicated UDP)</text>
+  <text x="450" y="462" font-size="10" fill="#1b5e20">· QUIC end-to-end</text>
+  <text x="450" y="482" font-size="10" fill="#1b5e20">· No TLS termination · invisible</text>
+
+  <!-- ================= Links ================= -->
+  <!-- 1 control signaling A->B, C->B -->
+  <path d="M290 245 L428 215" fill="none" stroke="#e8923a" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrOrange)"/>
+  <path d="M790 245 L652 215" fill="none" stroke="#e8923a" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrOrange)"/>
+  <text x="296" y="232" font-size="10" fill="#b85c00">1 ws signaling / control</text>
+  <text x="655" y="232" font-size="10" fill="#b85c00">1 ws signaling / control</text>
+
+  <!-- 2 data via B relay A->B->C -->
+  <path d="M290 332 L428 300" fill="none" stroke="#1565c0" stroke-width="2.5" marker-end="url(#arrBlue)"/>
+  <path d="M652 300 L790 332" fill="none" stroke="#1565c0" stroke-width="2.5" marker-end="url(#arrBlue)"/>
+  <text x="540" y="338" text-anchor="middle" font-size="10" fill="#1565c0">2 Data relayed via B (HTTP sub / raw TCP)</text>
+
+  <!-- 3 QUIC direct A<->C arc -->
+  <path d="M290 165 Q540 70 790 165" fill="none" stroke="#2e7d32" stroke-width="2.5" marker-end="url(#arrGreen)"/>
+  <text x="540" y="98" text-anchor="middle" font-size="10" fill="#2e7d32">3 QUIC direct (end-to-end, B signals only)</text>
+
+  <!-- 4 VPS relay A->VPS->C -->
+  <path d="M290 420 L428 405" fill="none" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#arrPurple)"/>
+  <path d="M652 405 L790 420" fill="none" stroke="#6a1b9a" stroke-width="2.5" marker-end="url(#arrPurple)"/>
+  <text x="540" y="528" text-anchor="middle" font-size="10" fill="#6a1b9a">4 QUIC via VPS relay (both behind CGNAT, fallback)</text>
+
+  <!-- ================= Legend ================= -->
+  <rect x="315" y="560" width="450" height="130" rx="10" fill="#fafbfc" stroke="#e2e6ec"/>
+  <line x1="330" y1="582" x2="372" y2="582" stroke="#e8923a" stroke-width="2.5" stroke-dasharray="6 4"/>
+  <text x="382" y="586" font-size="10" fill="#1a1a2e">1 Signaling/control: WebSocket long connection, A,C reconnect to B (auth+candidates)</text>
+
+  <line x1="330" y1="608" x2="372" y2="608" stroke="#1565c0" stroke-width="2.5"/>
+  <text x="382" y="612" font-size="10" fill="#1a1a2e">2 Data relayed via B: HTTP header subscription / raw TCP port forwarding (path A/B)</text>
+
+  <line x1="330" y1="634" x2="372" y2="634" stroke="#2e7d32" stroke-width="2.5"/>
+  <text x="382" y="638" font-size="10" fill="#1a1a2e">3 QUIC direct: A↔C end-to-end; B only exchanges addresses, never data</text>
+
+  <line x1="330" y1="660" x2="372" y2="660" stroke="#6a1b9a" stroke-width="2.5"/>
+  <text x="382" y="664" font-size="10" fill="#1a1a2e">4 VPS relay: both behind restricted CGNAT; VPS blind-forwards, no plaintext</text>
+</svg>
