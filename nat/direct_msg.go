@@ -17,6 +17,17 @@ import (
 //	B --d_offer-->   A     B 把 C 的端点转给 A
 //	A ==QUIC 直连==> C     A 拨号, 流首部带 token 与 port
 //
+// A 声明 TwoPhase 且走中继(DirectRequest.Via 非空)时, 这条链更长, 而且 B 会把 offer 拆成
+// 两段发, 好让 A 的打洞与 C 的信令重叠(详见 DirectRequest.TwoPhase):
+//
+//	A --d_request(Via)--> B   A 要求经 VPS 盲转发
+//	B --d_relay_open--> VPS   VPS 开专用 socket、探到自己的公网中继端点 E
+//	B --d_offer(E, 半截)--> A **第一段**: 只有 E, 指纹还没到 —— A 立刻朝 E 打洞 + nudge
+//	B --d_punch(E)-->   C     C 朝 E 打洞, 并回自己的候选与指纹
+//	C --d_ready-->      B
+//	B --d_offer(E+指纹)--> A  **第二段**: 指纹到齐, A 按打洞结果择路拨号
+//	A ==经 VPS 盲转发==> C
+//
 // 为什么是请求驱动而不是 C 一上线就通告:
 //   - C 平时不必占着 UDP 端口和监听, 空闲时零后台流量;
 //   - 端点是**当场探的**, 不存在"通告完就过期"的窗口 —— 外网地址(隐私临时地址轮换)
@@ -88,6 +99,15 @@ type DirectRequest struct {
 	// B 见 Via 非空即进中继模式(见 nat/direct_broker.go 的 onRelayRequest)。取自
 	// conf.ClientDirect.Via。详见 docs/direct-relay-design.md。
 	Via string `json:"via,omitempty"`
+
+	// TwoPhase 为 true 表示 A 支持**两段式 offer**(见 DirectOffer.EndpointOnly): 中继会话
+	// 里 B 先把中继端点 E 单独发来, A 立刻开始打洞, C 的证书指纹随后随完整 offer 补发。
+	// 这一段重叠省掉的正是"等 C 打完洞、信令绕回来"的时间(实测秒级)。
+	//
+	// 做成"由 A 声明"的能力位而不是服务端直接发两段: 老 A 遇到两段式会在第一段(无指纹)上
+	// 判成 incomplete offer, 直接连不上; 声明之后, 老 A 只会在老服务端/直连路径上收到一段
+	// 完整的 offer, 行为与以前完全一致。新 A 遇老服务端同理(收不到半截 offer, 照旧一段)。
+	TwoPhase bool `json:"twoPhase,omitempty"`
 }
 
 // DirectPunch 服务端转交给 C 的连接请求。
@@ -167,6 +187,14 @@ type DirectOffer struct {
 
 	// PeerAddr 同 DirectReady.Endpoint, 只为兼容旧版对端。
 	PeerAddr string `json:"peerAddr,omitempty"`
+
+	// EndpointOnly 为 true 表示**这是两段式 offer 的第一段**: 只给端点(中继场景里就是 E),
+	// 证书指纹还没到(Fingerprint 为空)。A 收到即可开始打洞, 再等第二段(完整 offer, 带指纹)
+	// 才拨号。这么拆是为了让"A 打洞"与"C 那边的信令 + 打洞"重叠 —— 中继会话里那一段是
+	// 秒级的, 见 DirectRequest.TwoPhase 与 docs/direct-relay-design.md。
+	//
+	// 只有在 A 声明了 TwoPhase 时服务端才会发这种半截 offer, 所以老 A 永远收不到它。
+	EndpointOnly bool `json:"endpointOnly,omitempty"`
 }
 
 // mergeCandidates 把新旧两种字段合成一份候选列表。旧版对端只会填单端点字段, 新版两个

@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -144,11 +145,18 @@ func describeFailures(results []candidateResult) string {
 
 // describeResults 把择优过程打成一行日志: 每条候选的 RTT、偏置、最终分数。直连选了
 // 哪条、为什么选它, 不打出来就只能靠猜。
+//
+// 收敛窗结束时还在探的候选(errPunchPending)单独标成 still probing: 它是"没赶上择优",
+// 不是"探过但失败", 混成 failed 会让人误判成对方不可达。
 func describeResults(results []candidateResult, winner directCandidate) string {
 	s := ""
 	for i, r := range results {
 		if i > 0 {
 			s += ", "
+		}
+		if errors.Is(r.Err, errPunchPending) {
+			s += fmt.Sprintf("%s still probing", r.Cand)
+			continue
 		}
 		if r.Err != nil {
 			s += fmt.Sprintf("%s failed", r.Cand)

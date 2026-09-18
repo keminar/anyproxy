@@ -442,7 +442,111 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 	return cands, nil
 }
 
-// punchAll 朝对端的**所有**候选同时打洞, 并按回执测 RTT。
+// punchRun 一次"朝对端所有候选同时打洞"的过程句柄。
+//
+// 与"等全部候选都出结论再返回"相比, 它把过程拆成可观察的两段, 交给选路方决定什么时候
+// 收手: waitFirst 只在**第一条路通了**时立刻返回, waitSettle 再给一个很短的收敛窗, 然后
+// snapshot 取当下的结果去择优。这样"赢家早就出现, 却还要为不回包的候选等满
+// directPunchWait"的浪费就消掉了(实测中继连接里这一段是最长的)。
+//
+// 还没出结论的候选在 snapshot 里标成 errPunchPending: 它既没通、也没被证明不通 —— 既不
+// 能当赢家(RTT 零值会赢过所有人), 也不该报成失败。它的探测 goroutine 继续跑完, 只是没
+// 人再等它(超时后自行退出, waiter 也会自己注销, 不泄漏)。
+type punchRun struct {
+	mu      sync.Mutex
+	results []candidateResult
+	settled []bool        //是否已有结论(通了或失败)
+	first   chan struct{} //第一条候选回包时关闭
+	allDone chan struct{} //所有候选都收工后关闭
+	once    sync.Once
+	wg      sync.WaitGroup
+}
+
+// errPunchPending 收敛窗到点时"还在探"的候选。selectCandidate 会把它当没通跳过(日志里
+// 显示为 still probing), 与真的没应答区分开。
+var errPunchPending = errors.New("still probing")
+
+func newPunchRun(cands []directCandidate) *punchRun {
+	run := &punchRun{
+		results: make([]candidateResult, len(cands)),
+		settled: make([]bool, len(cands)),
+		first:   make(chan struct{}),
+		allDone: make(chan struct{}),
+	}
+	for i, c := range cands {
+		run.results[i].Cand = c
+	}
+	return run
+}
+
+// finish 记下第 i 条候选的结论: err == nil 表示这条通了(rtt 有效), 否则是失败原因。
+func (r *punchRun) finish(i int, rtt time.Duration, err error) {
+	r.mu.Lock()
+	r.results[i].RTT, r.results[i].Err = rtt, err
+	r.settled[i] = true
+	r.mu.Unlock()
+	if err == nil {
+		r.once.Do(func() { close(r.first) })
+	}
+}
+
+// seal 等所有探测 goroutine 收工后关闭 allDone(候选已经全部记完结论时立即关闭)。
+func (r *punchRun) seal() {
+	go func() {
+		r.wg.Wait()
+		close(r.allDone)
+	}()
+}
+
+// waitFirst 等第一条候选回包。预算用完、或所有候选都已经出结论(全都失败)时返回 false ——
+// 后者能提前收手: 没有候选还在飞了, 再等满预算也不会有人回包。
+func (r *punchRun) waitFirst(budget time.Duration) bool {
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-r.first:
+		return true
+	case <-r.allDone:
+	case <-timer.C:
+	}
+	// 后两种都可能有"同一瞬间刚好回包"的边界, 统一再确认一次。
+	select {
+	case <-r.first:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitSettle 第一条回包之后再留一个收敛窗, 让稍慢但更优的路有机会把结果报回来。全部候选
+// 收工或窗满即返回。
+func (r *punchRun) waitSettle(settle time.Duration) {
+	timer := time.NewTimer(settle)
+	defer timer.Stop()
+	select {
+	case <-r.allDone:
+	case <-timer.C:
+	}
+}
+
+// waitAll 等到所有候选都出结论(老的"等齐"语义)。
+func (r *punchRun) waitAll() { <-r.allDone }
+
+// snapshot 取当下的结果快照; 还在探的候选标成 errPunchPending。
+func (r *punchRun) snapshot() []candidateResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]candidateResult, len(r.results))
+	copy(out, r.results)
+	for i := range out {
+		if out[i].Err == nil && !r.settled[i] {
+			out[i].Err = errPunchPending
+		}
+	}
+	return out
+}
+
+// punchAll 朝对端的**所有**候选同时打洞, 并按回执测 RTT, 等全部候选出结论才返回。
 //
 // 打洞与测速是同一个动作: 发出去的包在本机这侧的有状态防火墙/NAT 上开出返回通道
 // (IPv6 没有 NAT 但家用路由器默认拦主动入站, 同样需要), 对端收到后回一个 pong,
@@ -450,6 +554,9 @@ func (d *directPeer) gatherCandidates() ([]directCandidate, error) {
 //
 // 不串行逐条试: 串行的话前面几条不通就要各等一个超时, 等到能用的那条时入口连接早
 // 超时了。并行发出去, 谁先回谁先被观测到。
+//
+// 选路(pickPeerAddr)不走这里 —— 那边用 startPunchAll + waitFirst/waitSettle, **不等齐**。
+// 这个"等齐"版本留给需要全部候选结论的调用方(测试与诊断)。
 func (d *directPeer) punchAll(token string, cands []directCandidate) []candidateResult {
 	return d.punchAllThen(token, cands, nil)
 }
@@ -461,6 +568,22 @@ func (d *directPeer) punchAll(token string, cands []directCandidate) []candidate
 // 打在 WriteTo 成功返回之后, nudge 才发出去, 顺序是硬保证的(见 direct_entry.go 与
 // direct_accept.go 的 sendRelayNudge)。
 func (d *directPeer) punchAllThen(token string, cands []directCandidate, afterFirst func()) []candidateResult {
+	run := d.startPunchAll(token, cands, afterFirst)
+	run.waitAll()
+	return run.snapshot()
+}
+
+// startPunchAll 发起"朝所有候选同时打洞"并**立刻返回**过程句柄, 不等结果。调用方随后用
+// waitFirst/waitSettle/snapshot 自己决定什么时候收手(见 punchRun)。afterFirst 的语义见
+// punchAllThen。发包窗口取默认值(直连语义, 见 punchSendSpan)。
+func (d *directPeer) startPunchAll(token string, cands []directCandidate, afterFirst func()) *punchRun {
+	return d.startPunchAllFor(token, cands, afterFirst, punchSendSpan(false))
+}
+
+// startPunchAllFor 同 startPunchAll, 但显式指定**发包窗口** sendSpan: 中继腿要给满
+// directPunchWait(见 punchSendSpan 与 punchOneWindow 的注释)。
+func (d *directPeer) startPunchAllFor(token string, cands []directCandidate, afterFirst func(), sendSpan time.Duration) *punchRun {
+	run := newPunchRun(cands)
 	var once sync.Once
 	fire := func() {
 		if afterFirst != nil {
@@ -469,31 +592,28 @@ func (d *directPeer) punchAllThen(token string, cands []directCandidate, afterFi
 	}
 	tr, err := d.ensureTransport()
 	if err != nil {
-		out := make([]candidateResult, 0, len(cands))
-		for _, c := range cands {
-			out = append(out, candidateResult{Cand: c, Err: err})
+		// 一个包都发不出去: 每条候选直接判失败, 别让调用方白等预算。
+		for i := range cands {
+			run.finish(i, 0, err)
 		}
-		return out
+		run.seal()
+		return run
 	}
-
-	results := make([]candidateResult, len(cands))
-	var wg sync.WaitGroup
 	for i, c := range cands {
-		results[i].Cand = c
 		addr, err := net.ResolveUDPAddr("udp", c.Addr)
 		if err != nil {
-			results[i].Err = fmt.Errorf("bad address: %w", err)
+			run.finish(i, 0, fmt.Errorf("bad address: %w", err))
 			continue
 		}
-		wg.Add(1)
+		run.wg.Add(1)
 		go func(i int, addr *net.UDPAddr) {
-			defer wg.Done()
-			rtt, err := d.punchOneThen(tr, token, addr, fire)
-			results[i].RTT, results[i].Err = rtt, err
+			defer run.wg.Done()
+			rtt, err := d.punchOneWindow(tr, token, addr, fire, sendSpan)
+			run.finish(i, rtt, err)
 		}(i, addr)
 	}
-	wg.Wait()
-	return results
+	run.seal()
+	return run
 }
 
 // punchOnly 朝所有候选各连发几个打洞包, 不等回执。C 侧用: 它不需要知道哪条更快(择优
@@ -554,11 +674,39 @@ func (d *directPeer) punchOne(tr *quic.Transport, token string, addr *net.UDPAdd
 }
 
 // punchOneThen 同 punchOne; afterFirst 在第一个包发送成功后立即回调(调用方负责 once)。
+// 发包窗口取默认值(见 punchSendSpan)。
 func (d *directPeer) punchOneThen(tr *quic.Transport, token string, addr *net.UDPAddr, afterFirst func()) (time.Duration, error) {
-	deadline := time.Now().Add(directPunchWait)
-	replies := make(chan probeReply, directPunchCount)
+	return d.punchOneWindow(tr, token, addr, afterFirst, punchSendSpan(false))
+}
 
-	for i := 0; i < directPunchCount; i++ {
+// punchSendSpan 一个候选的**发包窗口**: 窗口内每隔 directPunchGap 发一个, 窗口结束后只
+// 等回包(等到 directPunchWait 预算用完)。窗口只影响"还发不发新的", 不影响"等多久"。
+//
+//   - 直连: 发满 directPunchCount 个(6 × 150ms = 900ms)就够 —— 那里"没回包"基本等于
+//     "这条路不通", 多发只是噪声。
+//   - 中继腿: 要给满 directPunchWait。因为这里"没回包"更常见的原因是**VPS 还没同时听到
+//     两条腿**(转发的前提是对侧腿的真实地址已经学到, 见 direct_relay.go 的 forwardLoop),
+//     而早打的那一侧并不知道中间层什么时候就绪 —— 只能一直敲到预算结束。否则(窗口只有
+//     900ms)探测包会在 VPS 就绪之前就全部用光, 明明路是通的, 却只能退到 raceQUICDial
+//     兜底, 白搭上二次拨号与 QUIC 重传。
+func punchSendSpan(relay bool) time.Duration {
+	if relay {
+		return directPunchWait
+	}
+	return directPunchCount * directPunchGap
+}
+
+// punchOneWindow 与 punchOneThen 相同, 只是发包窗口由调用方指定(见 punchSendSpan)。
+func (d *directPeer) punchOneWindow(tr *quic.Transport, token string, addr *net.UDPAddr, afterFirst func(), sendSpan time.Duration) (time.Duration, error) {
+	deadline := time.Now().Add(directPunchWait)
+	packets := int(sendSpan / directPunchGap)
+	if packets < 1 {
+		packets = 1
+	}
+	// 每一发的等待者都要能被投递, 容量给足: 窗口拉长后包数会明显多于 directPunchCount。
+	replies := make(chan probeReply, packets+1)
+
+	for i := 0; i < packets; i++ {
 		nonce := newNonce()
 		ch, done := d.addWaiter(nonce)
 		if _, err := tr.WriteTo(d.encodeDirectPacket(token, verbPunch+" "+nonce), addr); err != nil {
@@ -583,9 +731,9 @@ func (d *directPeer) punchOneThen(tr *quic.Transport, token string, addr *net.UD
 		}(ch, done)
 
 		// pacing: 距下一发留 directPunchGap, 但给剩余各发留足预算, 不越过总期限。
-		if sleep := min(directPunchGap, time.Until(deadline)-time.Duration(directPunchCount-1-i)*directPunchGap); sleep > 0 {
+		if sleep := min(directPunchGap, time.Until(deadline)-time.Duration(packets-1-i)*directPunchGap); sleep > 0 {
 			select {
-			case r := <-replies: // pacing 期间 pong 到了, 提前收工
+			case r := <-replies: // pacing 期间 pong 到了, 提前收工(也不再继续发包)
 				return r.rtt, nil
 			case <-time.After(sleep):
 			}

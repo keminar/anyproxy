@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="288" viewBox="0 0 680 288" font-family="'PingFang SC','Microsoft YaHei',Arial,sans-serif">
+  <rect x="0" y="0" width="680" height="288" fill="#ffffff"/>
+  <text x="20" y="26" font-size="14" font-weight="bold" fill="#1a1a2e">发包窗口（发到什么时候）与总预算（等多久）不是一回事</text>
+  <text x="20" y="54" font-size="12" fill="#1565c0">直连：发包窗口 6 × 150ms = 900ms，之后只等不再发</text>
+  <rect x="60" y="62" width="560" height="34" rx="6" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <line x1="60" y1="62" x2="60" y2="96" stroke="#1565c0" stroke-width="1.5"/>
+  <line x1="88" y1="62" x2="88" y2="96" stroke="#1565c0" stroke-width="1.5"/>
+  <line x1="116" y1="62" x2="116" y2="96" stroke="#1565c0" stroke-width="1.5"/>
+  <line x1="144" y1="62" x2="144" y2="96" stroke="#1565c0" stroke-width="1.5"/>
+  <line x1="172" y1="62" x2="172" y2="96" stroke="#1565c0" stroke-width="1.5"/>
+  <line x1="200" y1="62" x2="200" y2="96" stroke="#1565c0" stroke-width="1.5"/>
+  <text x="212" y="79" font-size="11" fill="#b85c00" dominant-baseline="central">900ms 之后没有包了</text>
+  <text x="20" y="142" font-size="12" fill="#2e7d32">中继腿：发包窗口给满 directPunchWait = 3s（每 150ms 一个）</text>
+  <rect x="60" y="150" width="560" height="34" rx="6" fill="#eef7ef" stroke="#2e7d32" stroke-width="1"/>
+  <line x1="60" y1="150" x2="60" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="88" y1="150" x2="88" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="116" y1="150" x2="116" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="144" y1="150" x2="144" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="172" y1="150" x2="172" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="200" y1="150" x2="200" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="228" y1="150" x2="228" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="256" y1="150" x2="256" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="284" y1="150" x2="284" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="312" y1="150" x2="312" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="340" y1="150" x2="340" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="368" y1="150" x2="368" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="396" y1="150" x2="396" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="424" y1="150" x2="424" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="452" y1="150" x2="452" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="480" y1="150" x2="480" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="508" y1="150" x2="508" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="536" y1="150" x2="536" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="564" y1="150" x2="564" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <line x1="592" y1="150" x2="592" y2="184" stroke="#2e7d32" stroke-width="1.5"/>
+  <circle cx="256" cy="167" r="4" fill="#2e7d32" stroke="#1b5e20" stroke-width="1"/>
+  <text x="268" y="167" font-size="11" fill="#1b5e20" dominant-baseline="central">这一发被转发 → 立刻拿到 pong</text>
+  <line x1="246.7" y1="46" x2="246.7" y2="200" stroke="#c62828" stroke-width="1" stroke-dasharray="4 3"/>
+  <line x1="60" y1="200" x2="620" y2="200" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="60" y1="200" x2="60" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="153" y1="200" x2="153" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="246.7" y1="200" x2="246.7" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="340" y1="200" x2="340" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="433" y1="200" x2="433" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="527" y1="200" x2="527" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="620" y1="200" x2="620" y2="206" stroke="#90a4ae" stroke-width="1"/>
+  <text x="60" y="218" font-size="11" fill="#607d8b" text-anchor="middle">0</text>
+  <text x="153" y="218" font-size="11" fill="#607d8b" text-anchor="middle">0.5s</text>
+  <text x="246.7" y="218" font-size="11" fill="#c62828" text-anchor="middle">1s</text>
+  <text x="340" y="218" font-size="11" fill="#607d8b" text-anchor="middle">1.5s</text>
+  <text x="433" y="218" font-size="11" fill="#607d8b" text-anchor="middle">2s</text>
+  <text x="527" y="218" font-size="11" fill="#607d8b" text-anchor="middle">2.5s</text>
+  <text x="620" y="218" font-size="11" fill="#607d8b" text-anchor="middle">3s</text>
+  <text x="20" y="240" font-size="11" fill="#455a64">1s：C 的包到达 VPS（转发从此才可能发生）；等多久始终是总预算，窗口只管还发不发新的。</text>
+  <text x="20" y="256" font-size="11" fill="#455a64">直连场景：对端 1s 才起好监听时窗口已过 → 只能干等到 3s，再退到 raceQUICDial 兜底。</text>
+  <text x="20" y="272" font-size="11" fill="#455a64">中继场景：窗口给满 3s → 1.05s 那一发正好穿过去，正常拿到 pong、正常择优拨号，不惊动兜底。</text>
+</svg>

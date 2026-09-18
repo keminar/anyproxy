@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="320" viewBox="0 0 680 320" font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif">
+  <rect x="0" y="0" width="680" height="320" fill="#ffffff"/>
+  <text x="20" y="24" font-size="14" font-weight="bold" fill="#1a1a2e">Signaling order for a relayed session: A can start punching at step 3b, in parallel with steps 4–5</text>
+  <rect x="64" y="40" width="96" height="30" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <text x="112" y="55" font-size="12" font-weight="bold" fill="#1565c0" text-anchor="middle" dominant-baseline="central">A (initiator)</text>
+  <rect x="214" y="40" width="96" height="30" rx="8" fill="#fff4e6" stroke="#b85c00" stroke-width="1"/>
+  <text x="262" y="55" font-size="12" font-weight="bold" fill="#b85c00" text-anchor="middle" dominant-baseline="central">B signaling</text>
+  <rect x="364" y="40" width="96" height="30" rx="8" fill="#f3f5fa" stroke="#607d8b" stroke-width="1"/>
+  <text x="412" y="55" font-size="12" font-weight="bold" fill="#455a64" text-anchor="middle" dominant-baseline="central">VPS relay</text>
+  <rect x="514" y="40" width="96" height="30" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <text x="562" y="55" font-size="12" font-weight="bold" fill="#1565c0" text-anchor="middle" dominant-baseline="central">C (target)</text>
+  <line x1="112" y1="70" x2="112" y2="296" stroke="#cfd8dc" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="262" y1="70" x2="262" y2="296" stroke="#cfd8dc" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="412" y1="70" x2="412" y2="296" stroke="#cfd8dc" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="562" y1="70" x2="562" y2="296" stroke="#cfd8dc" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="112" y1="104" x2="256" y2="104" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <text x="118" y="98" font-size="11" fill="#1565c0">1 d_request (candidates + token)</text>
+  <line x1="262" y1="138" x2="406" y2="138" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <text x="268" y="132" font-size="11" fill="#1565c0">2 d_relay_open: open a socket, get E</text>
+  <line x1="408" y1="172" x2="266" y2="172" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <text x="404" y="166" font-size="11" fill="#1565c0" text-anchor="end">3 d_ready: E (public ip + port)</text>
+  <line x1="262" y1="200" x2="116" y2="200" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+  <text x="118" y="194" font-size="11" fill="#2e7d32">3b d_offer (partial, E only) → A punches now</text>
+  <line x1="262" y1="228" x2="556" y2="228" stroke="#b85c00" stroke-width="1.5" marker-end="url(#arrOrange)"/>
+  <text x="268" y="222" font-size="11" fill="#b85c00">4 d_punch (punch target is E itself)</text>
+  <line x1="558" y1="256" x2="266" y2="256" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <text x="554" y="250" font-size="11" fill="#1565c0" text-anchor="end">5 d_ready: candidates + cert fingerprint</text>
+  <line x1="262" y1="284" x2="116" y2="284" stroke="#2e7d32" stroke-width="1.5" marker-end="url(#arrGreen)"/>
+  <text x="256" y="278" font-size="11" fill="#2e7d32" text-anchor="end">6 d_offer (complete): dial the winning path</text>
+  <path d="M592,214 L592,270" fill="none" stroke="#2e7d32" stroke-width="1"/>
+  <path d="M592,214 L586,222" fill="none" stroke="#2e7d32" stroke-width="1"/>
+  <path d="M592,270 L586,262" fill="none" stroke="#2e7d32" stroke-width="1"/>
+  <text x="598" y="236" font-size="11" fill="#2e7d32">parallel</text>
+  <text x="598" y="250" font-size="11" fill="#2e7d32">with A</text>
+  <text x="20" y="312" font-size="11" fill="#607d8b">Steps 4–5 cannot start earlier: C's punch target is E. The two green steps are the new two-phase offer.</text>
+  <defs>
+    <marker id="arrBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#b85c00"/>
+    </marker>
+    <marker id="arrGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#2e7d32"/>
+    </marker>
+  </defs>
+</svg>

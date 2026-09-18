@@ -54,6 +54,9 @@ TCP 走它的 stream、UDP 走它的 datagram,全在 A 和 C 之间那条端到�
 
 ## 3. 控制面:信令流程
 
+> 六步时序图、两段式 offer(把中继端点 E 先发给 A, 让 A 的打洞与 C 的信令重叠)、以及一次真实
+> 连接的耗时分解, 见 [direct-handshake-flow.md](direct-handshake-flow.md)。
+
 **A 的配置**(给 `client.direct.rules[]` 加 `via`):
 
 ```yaml
@@ -214,6 +217,8 @@ QUIC-TLS 里/之上,与打洞包加密无关。`direct.encrypt` **退化为纯�
 - **专用 socket 的额外好处**:天然隔离,一对中继的关闭不影响别对;地址绑定也天然防抢用。
 
 ## 6. 顺序:绝不抢先,但该主动时必须主动(nudge 驱动)
+
+![居民先打、VPS 后打](direct-relay-punch-order.svg)
 
 中继有两条腿,都是"居民→云"。三条约束必须同时满足,缺一条就不通:
 

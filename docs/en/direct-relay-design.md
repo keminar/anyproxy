@@ -51,6 +51,10 @@ Key choice: **the QUIC/TLS connection is end-to-end A↔C** (A is the client, C 
 
 ## 3. Control plane: signaling flow
 
+> The six-step sequence diagram, the two-phase offer (E is handed to A first so its punching
+> overlaps C's signaling), and a breakdown of one real connection, see
+> [direct-handshake-flow.md](direct-handshake-flow.md).
+
 **A's configuration** (add `via` to `client.direct.rules[]`):
 
 ```yaml
@@ -171,6 +175,8 @@ The few packets the VPS itself proactively sends (see `punchLeg`/`primeLeg` in �
 - **Extra benefit of the dedicated socket**: natural isolation — closing one relay pair does not affect other pairs; the address binding also naturally prevents hijacking.
 
 ## 6. Ordering: never get ahead — but the VPS must send when the nudge says so
+
+![Residents punch first, the VPS follows](../direct-relay-punch-order.en.svg)
 
 A relay has two legs, both "resident→cloud". Three constraints must hold at once, or nothing
 works:

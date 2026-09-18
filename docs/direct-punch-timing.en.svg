@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="302" viewBox="0 0 680 302" font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif">
+  <rect x="0" y="0" width="680" height="302" fill="#ffffff"/>
+  <text x="20" y="26" font-size="14" font-weight="bold" fill="#1a1a2e">Where the 5.3s of one relayed connection went (20:21:51 → 20:21:56)</text>
+  <text x="20" y="52" font-size="12" fill="#455a64">Before: punching itself cost &lt;0.3s; 3.0s was spent waiting out two unreachable endpoints</text>
+  <text x="660" y="52" font-size="12" fill="#2e7d32" text-anchor="end">QUIC handshake ≈50ms → connected</text>
+  <rect x="40" y="62" width="219" height="40" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <rect x="259" y="62" width="33" height="40" rx="4" fill="#d7ecf5" stroke="#1565c0" stroke-width="1"/>
+  <rect x="292" y="62" width="334" height="40" rx="8" fill="#fff4e6" stroke="#b85c00" stroke-width="1"/>
+  <text x="52" y="78" font-size="13" font-weight="bold" fill="#1565c0" dominant-baseline="central">(1) control-plane signaling ≈1–2s</text>
+  <text x="52" y="94" font-size="11" fill="#1565c0" dominant-baseline="central">request → VPS opens a socket → wait for C's fingerprint → offer</text>
+  <text x="304" y="78" font-size="13" font-weight="bold" fill="#b85c00" dominant-baseline="central">(3) waiting out two unreachable E endpoints</text>
+  <text x="304" y="94" font-size="11" fill="#b85c00" dominant-baseline="central">directPunchWait = 3s (the wg.Wait barrier in punchAllThen)</text>
+  <line x1="626" y1="58" x2="626" y2="118" stroke="#2e7d32" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="275" y1="102" x2="275" y2="118" stroke="#2e7d32" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="259" y="132" font-size="12" fill="#2e7d32" dominant-baseline="central">(2) punch: a pong arrives 16ms after the first packet — the winner is already known</text>
+  <text x="40" y="158" font-size="12" fill="#1b5e20">After: start punching as soon as E arrives (overlaps C's signaling) + a 200ms settle window</text>
+  <rect x="40" y="168" width="219" height="40" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <rect x="259" y="168" width="45" height="40" rx="4" fill="#d7ecf5" stroke="#1565c0" stroke-width="1"/>
+  <rect x="304" y="168" width="328" height="40" rx="8" fill="#eef7ef" stroke="#2e7d32" stroke-width="1"/>
+  <text x="316" y="182" font-size="13" font-weight="bold" fill="#1b5e20" dominant-baseline="central">saves ≈2.9s: 5.3s → about 2.4s</text>
+  <text x="316" y="198" font-size="11" fill="#1b5e20" dominant-baseline="central">the two dead paths keep probing in the background (reported as still probing)</text>
+  <line x1="40" y1="220" x2="632" y2="220" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="40" y1="220" x2="40" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="150" y1="220" x2="150" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="259" y1="220" x2="259" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="369" y1="220" x2="369" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="478" y1="220" x2="478" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="588" y1="220" x2="588" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <line x1="626" y1="220" x2="626" y2="226" stroke="#90a4ae" stroke-width="1"/>
+  <text x="40" y="240" font-size="11" fill="#607d8b" text-anchor="middle">51</text>
+  <text x="150" y="240" font-size="11" fill="#607d8b" text-anchor="middle">52</text>
+  <text x="259" y="240" font-size="11" fill="#607d8b" text-anchor="middle">53</text>
+  <text x="369" y="240" font-size="11" fill="#607d8b" text-anchor="middle">54</text>
+  <text x="478" y="240" font-size="11" fill="#607d8b" text-anchor="middle">55</text>
+  <text x="588" y="240" font-size="11" fill="#607d8b" text-anchor="middle">56</text>
+  <text x="626" y="240" font-size="11" fill="#2e7d32" text-anchor="middle">56.3</text>
+  <text x="40" y="262" font-size="11" fill="#607d8b">Ticks are 20:21:5x; the log only has 1s resolution, so the 51→53 stretch is only known to be 1–3s.</text>
+  <text x="40" y="280" font-size="11" fill="#607d8b">Source: four real logs (A/VPS/B/C) captured on 2026-09-18 — see docs/en/direct-handshake-flow.md.</text>
+</svg>

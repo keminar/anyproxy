@@ -29,6 +29,7 @@
 - [multi-instance-loop.md](multi-instance-loop.md) — 同机多实例(A 开 tun + B 普通)死循环防护：`mode=bypass` 根治(仅Linux)、`loopGuard` 熔断器兜底、macOS/Windows 替代方案。
 - [direct-punch-order.md](direct-punch-order.md) — NAT 直连打洞顺序专题：跨"运营商 CGNAT 家宽 ↔ 公网云主机"时居民/CGNAT 侧必须先发第一个包，否则 NAT 映射被毒化、双向全灭；含 `direct.punchFirst` 配置由来与排查清单。
 - [direct-relay-design.md](direct-relay-design.md) — VPS 盲转发中继(TURN 式 direct relay)设计：两端都在 CGNAT 后时经公网 VPS 中转，QUIC/TLS 端到端、VPS 只盲转发不透明 UDP；信令/鉴权/数据面/失败语义。
+- [direct-handshake-flow.md](direct-handshake-flow.md) — 直连/中继握手全流程与耗时：谁先发、等谁的顺序不变量，VPS 什么时候才开始转发（两腿都"亲耳听到"才转），token 与证书指纹的生成/流向，打洞的三个时间量（总预算/发包窗口/收敛窗），一次真实连接 5.3s 的逐段分解，以及"选路收敛窗"与"两段式 offer"两个已落地的优化；附五张流程图与日志速查表。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。
 - [windows-winDivert.md](windows-winDivert.md) — Windows WinDivert 运行依赖：`WinDivert.dll`/`.sys` 放置、管理员权限、路径含空格/中文的驱动加载问题、bypass 模式在 Windows 已移除。
 - [todo.md](todo.md) — 待办/待确认：PR #22 审查中暂留未处理的项（透明代理嗅探 `Peek(1)` 无超时 + 实现分叉、`HostBlocksUDP` 热路径线性扫描）。
