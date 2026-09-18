@@ -10,12 +10,12 @@
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l` |
+| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l`。设为 `off`（或 `none`/`-`）**关闭代理监听**，仅跑 websocket/tun 等后台服务（纯内网穿透场景，不需要本机代理端口）。关闭后 websocket 的「HTTP 头订阅」路径失效（它依赖本机代理），「裸 TCP 转发」不受影响 |
 | `network` | string | `tcp` | 监听协议：`tcp`(v4+v6) / `tcp4` / `tcp6` |
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
 | `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
-| `mode` | string | `proxy` | 运行模式：`proxy` / `tunnel` / `tun` / `bypass`，优先级低于 `-mode` |
+| `mode` | string | `proxy` | 运行模式（互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
 
 ## log
 
@@ -59,19 +59,22 @@ tcpcopy:
 
 ## geo（geoip/geosite 数据集）
 
-按「类别 → 文件」配置，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，取同名类别）或纯文本列表（整文件即该类别）。详见 [geo.md](geo.md)。
+顶层 `geoip:` / `geosite:` 各是一个**文件列表**，配了才启用 `hosts` 的 `geoip:xx` / `geosite:xx` 匹配。文件按扩展名区分：`.dat`（protobuf 数据集，一个文件多类别，`cats` 留空=全部）或纯文本列表（整文件即一个类别，`cats` 须恰好一个）。**同一类别可由多个文件合并取并集**（如 `geosite.dat` 的 `cn` + `direct-list.txt` 的 `cn`，`geosite:cn` 命中两者内容之和；重复去重、按列表顺序合并、类名大小写不敏感）。详见 [geo.md](geo.md)。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `geo.ip` | map[类别]文件 | 每个类别一个 geoip 文件（`.dat` 或 CIDR 文本列表） |
-| `geo.site` | map[类别]文件 | 每个类别一个 geosite 文件（`.dat` 或域名文本列表，如 `direct-list.txt`） |
+| `geoip[].file` | string | geoip 数据文件（`.dat` 或 CIDR 文本列表） |
+| `geoip[].cats` | []类别 | 从该文件加载的类别；`.dat` 留空=全部，文本列表须恰好一个 |
+| `geosite[].file` | string | geosite 数据文件（`.dat` 或域名文本列表，如 `direct-list.txt`） |
+| `geosite[].cats` | []类别 | 同上 |
 
 ```yaml
-geo:
-  ip:
-    cn: ./geoip-cn.dat        # .dat 取 cn 类别; 也可 ./china-cidr.txt(文本)
-  site:
-    cn: ./direct-list.txt     # 文本域名列表; 也可 ./geosite-cn.dat
+geoip:
+  - file: ./geoip.dat         # .dat 一个文件多类别, 只解析一次
+    cats: [cn]                # 留空则加载该 .dat 内全部类别
+geosite:
+  - file: ./direct-list.txt   # 文本域名列表, 整文件即一个类别
+    cats: [cn]
 hosts:
   - name: geoip:cn
     target: local        # 国内 IP 直连
@@ -91,6 +94,7 @@ hosts:
 | `default.dns` | `local` | DNS 服务器：`local` 当前环境 / `remote` 远程（仅 `target=remote` 有效） |
 | `default.match` | `equal` | 默认域名比对方式：`contain`/`equal`（仅 `name` 无星号且未显式配 `match` 时生效） |
 | `default.proxy` | 空 | 全局代理服务器，优先级低于 `-p`；支持多代理与 `local`/`deny` 后缀，见 [routing.md](routing.md#proxy-字段) |
+| `default.blackholeIP` | `192.0.0.0` | 黑洞哨兵 IP：把域名(系统 hosts 或本配置)指向它，达成「无代理时本地不可达=拦截、有代理时强制走代理并远程解析」。命中该 IP 的连接强制 `target=remote`+`dns=remote`；Windows WinDivert 下强制拦截进引擎(不受 `bypassPrivate` 影响)。设 `off`/`none`/`disable` 关闭。专题详见 [blackhole-sentinel.md](blackhole-sentinel.md) |
 
 ## hosts（域名规则列表，可热加载）
 
@@ -155,24 +159,28 @@ tun:
 | `autoRoute` | **true** | Linux/macOS | 自动加/清理路由；`false` 只打印命令；Windows 忽略 |
 | `bypassIPs` | 空 | 三平台 | 这些目标直连（Linux/macOS 加 `/32` 路由；Windows 排除捕获）。**以 IP 指定的上级代理（`-p`/`default.proxy`/`hosts[].proxy`）会自动并入，无需手动填**；只有域名指定的代理或 VPN 服务器 IP 等才需要在此手动列出 |
 | `blockQUIC` | **true** | 三平台 | drop 命中 hosts(配 ip) 域名的 UDP443，逼 QUIC 回退 TCP |
+| `bypassPrivate` | **true** | **仅 Windows** | 私网/LAN/链路本地（含虚拟机/VM 网段、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`）一律直连、不进引擎。显式 `false` 才让私网 80/443 进引擎按 router 规则走；`loopback` 始终直连。Linux/macOS 直连子网靠路由天然直连，无需此项 |
 | `excludeProcs` | 空 | **仅 Windows** | 这些进程(exe 名)出向不重定向，逃同机隧道(如 `openvpn.exe`)死循环 |
 | `inboundPorts` | 空 | **仅 macOS** | pf reply-to 放行入站服务回包(如外网 SSH 22)。Linux 自动、Windows 无需 |
 | `windivertDir` | 空(exe 同目录) | **仅 Windows** | `WinDivert.dll`+`WinDivert64.sys` 所在目录。可把驱动放到无空格/中文的干净路径(如 `C:\wd`)，exe 原地不动，绕开中文/空格路径导致的驱动加载失败 |
 
 详见 [tun-features.md](tun-features.md)、VPN 共存见 [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md)。
 
-## bypass（mode=bypass 时生效）
+## tun.linux（mode=bypass 时生效，仅 Linux）
+
+`mode=bypass`（物理网卡绕行）复用 `tun.linux` 下的两个字段，与 `mode=bypass` 配套。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
-| `bypass.device` | 空(自动探测) | 手动指定绑定的物理网卡名；**macOS 必填**（如 `en0`） |
-| `bypass.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
+| `tun.linux.device` | 空(自动探测) | 手动指定绑定的物理网卡名（如 `eth0`） |
+| `tun.linux.excludeNics` | 平台默认 TUN 名 | 采集直连子网时排除的网卡名（通常填另一实例的 TUN 网卡名） |
 
-详见 [multi-instance-loop.md](multi-instance-loop.md)。
+macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`；Windows 逃逸靠
+`tun.windows.excludeProcs`/`bypassIPs`。详见 [multi-instance-loop.md](multi-instance-loop.md)。
 
 ## loopGuard（死循环兜底熔断器）
 
-同机 A(tun)+B(bypass) 场景下，bypass 失效时的最后防线。默认开启。
+同机 A(tun)+B(bypass, 仅Linux) 场景下，bypass 失效时的最后防线。默认开启。
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -183,14 +191,33 @@ tun:
 
 ## websocket（内网穿透）
 
-服务端需配 `listen`/`user`/`pass`；客户端需配 `connect`/`user`/`email`（缺一不发起连接）。详见 [modes.md](modes.md#websocket-内网穿透)。
+配置按角色分 `server`（服务端）/ `client`（客户端）两块。服务端需配 `server.listen`/`users`；客户端需配 `client.connect`/`user`/`email`（缺一不发起连接）。详见 [modes.md](modes.md#websocket-内网穿透)。
 
 | 字段 | 说明 |
 |------|------|
-| `websocket.listen` | 服务端监听地址端口 |
-| `websocket.connect` | 客户端连接的地址端口 |
-| `websocket.host` | connect 的域名 |
-| `websocket.user` | 认证用户名 |
-| `websocket.pass` | 认证密码 |
-| `websocket.email` | 用于定位用户，不鉴权 |
-| `websocket.subscribe` | 订阅头部信息列表，元素为 `{key, val}` |
+| `websocket.server.listen` | 服务端监听地址端口 |
+| `websocket.server.users` | 鉴权账号数组，每条 `{user, pass, disable}`，校验接入的订阅端；`disable: true` 可临时停用某个账号 |
+| `websocket.server.allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP），为空不限制；按真实 TCP 来源判定，loopback 始终放行 |
+| `websocket.server.forward` | 服务端裸TCP转发入口列表，元素为 `{listen, email}` |
+| `websocket.client.connect` | 客户端连接的地址端口 |
+| `websocket.client.host` | connect 的域名 |
+| `websocket.client.proxy` | 订阅端**经上游 HTTP/SOCKS5 代理**回连服务端 B，格式 `scheme://host:port`：`socks5://`（走 SOCKS5）/ `http://`、`https://`（走 HTTP CONNECT）；其它 scheme 直接报错、不静默退化为直连。用于 `connect` 是内网/回环地址、本机不能直连的场景——先连这台可达代理，由它转到 `connect`。不配则直连（原行为）。与 `connect`/`forward` 一样**只在启动/每次重连时取一次，不参与热加载** |
+| `websocket.client.user` / `.pass` | 客户端认证用户名 / 密码（发给服务端） |
+| `websocket.client.email` | 用于定位用户，不鉴权 |
+| `websocket.client.subscribe` | 订阅头部信息列表，元素为 `{key, val}` |
+| `websocket.client.forward` | 订阅端裸TCP转发目标列表，元素为 `{port, target}` |
+| `websocket.client.uuid` | 本订阅端身份凭证，仅文件传输收发双方使用；**不在配置里写**，启动时自动生成并持久化到同名隐藏文件 `.router.uuid`，重启不变 | — |
+| `websocket.client.direct.accept` | `true` 时起 QUIC 监听并把端点通告服务端，允许其它订阅方直连自己（路径 C） | — |
+| `websocket.client.direct.rules` | 本机 QUIC 直连入口规则数组，每条 `{listen, email, forwardPort, via}`；`listen` 可带 `tcp://`(默认)/`udp://`/`both://` 前缀 | — |
+| `websocket.client.direct.encrypt` | `true` 时打洞控制包额外 AES-256-GCM 加密，防运营商按明文特征丢包；默认 `false`，对 `direct.rules[]` 与 `-send`/`-recv` 同时生效 | — |
+| `websocket.client.direct.portmap` | `true` 时直连候选收集尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` | — |
+| `websocket.client.direct.punchFirst` | `true` 声明本机在受限 CGNAT 后、主动直连时须先发首包（让对端接受方推迟打洞）；家宽连公网/云主机不通时设 | — |
+| `websocket.client.direct.relay` | `true` 时本机(公网 VPS)允许作为 A↔C 盲转发中继；无需为每对配 `forward`/`direct`，目标由发起方 `direct.rules[].via` 指定 | — |
+| `websocket.client.direct.relayAllow` | 收紧 `direct.relay`：只放行这些来源 email 用本机中继；留空=不限制 | — |
+| `websocket.client.direct.relayPublic` | 可选公网中继地址数组；全部只写 IP 时每个 binding 使用随机端口并在全部 IP 上通告，全部写 `IP:port` 时使用固定端口；两种形态不能混写 | — |
+| `websocket.client.direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对本条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 | `-direct-plain-udp` |
+| `websocket.client.direct.lanAddrs` | 手工填本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速候选 | — |
+| `websocket.client.receive` | 接收文件传输配置 `{dir, allow[], readonly}`；`allow` 每条 `{email, uuid}`，`readonly: true` 只出不进 | — |
+| `websocket.client.sendRecvOnly` | `true` 时强制这条配置只给 `-send`/`-recv` 取凭证，常驻进程不为它发起连接 | — |
+
+> `websocket.client` 的直连/中继/文件传输字段（上表 `direct*` / `receive` / `sendRecvOnly`）完整语义、鉴权与示例见 [websocket.md](websocket.md#文件传输-send--recv--receive)；`-genkey` 生成 `key` 亦见该页。

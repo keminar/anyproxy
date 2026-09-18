@@ -36,6 +36,8 @@ sudo -u anyproxy ./anyproxy -daemon
 kill -HUP <pid>
 ```
 
+> `listen: off`（纯 websocket 穿透，无主监听 fd 可交接）下 `SIGHUP` 也支持，但走的是「**先起新进程、老进程再退出**」：websocket 服务自带绑定重试，老进程退出释放端口后新进程接管，订阅端会自动重连（会有极短暂的连接中断，不是零感知交接）。
+
 ## 进程停止与清理
 
 - **普通模式**：`SIGINT`(Ctrl+C) / `SIGTERM` 关闭监听、drain 连接后退出。
@@ -110,10 +112,10 @@ net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_keepalive_time = 1200
 net.ipv4.ip_local_port_range = 10000 65000
 net.ipv4.tcp_max_syn_backlog = 8192
-net.ipv4.tcp_max_tw_buckets = 1440000
+net.ipv4.tcp_max_tw_buckets = 524288
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_rmem = 4096 131072 67108864
 net.ipv4.tcp_wmem = 4096 65536 67108864
 net.ipv4.tcp_mtu_probing = 1
 EOF

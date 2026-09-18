@@ -2,6 +2,8 @@
 
 本文记录一个真实故障：**anyproxy TUN 全局代理与 OpenVPN Connect 同机共存时，手动删掉一条 /32 路由后，所有未被 hosts 劫持的域名解析全部超时**。
 
+下文所有地址均为匿名化后的 RFC1918 示例，不对应原始网络。
+
 ## 现象
 
 ```
@@ -9,7 +11,7 @@
 DNS request timed out.
     timeout was 2 seconds.
 服务器:  UnKnown
-Address:  10.18.0.1        # 解析器指向的是 OpenVPN 隧道内网 DNS
+Address:  10.20.0.53        # 解析器指向的是 OpenVPN 隧道内网 DNS
 *** 请求 UnKnown 超时
 ```
 
@@ -20,24 +22,24 @@ Address:  10.18.0.1        # 解析器指向的是 OpenVPN 隧道内网 DNS
 同机同时跑两层隧道：
 
 - **anyproxy TUN**：`autoRoute` 装了 `0.0.0.0/1` + `128.0.0.0/1`，接管几乎所有流量。
-- **OpenVPN Connect TAP**：`TAP-Windows Adapter V9`，IP `10.18.0.70/30`（掩码 `255.255.255.252`，本地直连段只含 `10.18.0.68 ~ 10.18.0.71`），DNS 服务器 `10.18.0.1`，**无默认网关**。
+- **OpenVPN Connect TAP**：`TAP-Windows Adapter V9`，IP `10.20.30.70/30`（掩码 `255.255.255.252`，本地直连段只含 `10.20.30.68 ~ 10.20.30.71`），DNS 服务器 `10.20.0.53`，**无默认网关**。
 
-关键：**DNS `10.18.0.1` 不在 TAP 的 `/30` 直连段里**，它在隧道对端，只能靠 OpenVPN 装的一条 `10.18.0.1/32 → TAP` 路由才到得了。
+关键：**DNS `10.20.0.53` 不在 TAP 的 `/30` 直连段里**，它在隧道对端，只能靠 OpenVPN 装的一条 `10.20.0.53/32 → TAP` 路由才到得了。
 
 ## 根因
 
 Windows 路由是**最长前缀匹配优先**，`/32` 永远压过 anyproxy 的 `/1`：
 
-- **/32 在**：查询 `10.18.0.1` 直接进 TAP → 走 VPN 的 DNS → 正常，anyproxy 全程没参与。
-- **/32 被删**：到 `10.18.0.1` 只剩 anyproxy 的 `0/1` → 包被吸进 anyproxy 的 TUN → anyproxy 没有任何办法把它送回 TAP：
-  - 强绑物理网卡（`IP_UNICAST_IF`）→ 物理网络上没有 `10.18.0.1` → **黑洞**；
+- **/32 在**：查询 `10.20.0.53` 直接进 TAP → 走 VPN 的 DNS → 正常，anyproxy 全程没参与。
+- **/32 被删**：到 `10.20.0.53` 只剩 anyproxy 的 `0/1` → 包被吸进 anyproxy 的 TUN → anyproxy 没有任何办法把它送回 TAP：
+  - 强绑物理网卡（`IP_UNICAST_IF`）→ 物理网络上没有 `10.20.0.53` → **黑洞**；
   - 普通 dial（不绑接口）→ 系统按路由表又选中 `0/1` → 回灌 anyproxy → **死循环**。
 
 ### 为什么 `isLocalNet` 补不了
 
-`isLocalNet` / `dstInBypassNet`（`proto/dialer_*.go`、`tun/udp.go`）**只判"本机直连子网"**（`config.TUNBypassNets`，由 `initBypassNets` 采集各网卡直连段），**没有 RFC1918 判断**。`10.18.0.1` 不属于任何本机直连子网（TAP 只给了 `/30`），因此 `isLocalNet(10.18.0.1) == false`。
+`isLocalNet` / `dstInBypassNet`（`proto/dialer_*.go`、`tun/udp.go`）**只判"本机直连子网"**（`config.TUNBypassNets`，由 `initBypassNets` 采集各网卡直连段），**没有 RFC1918 判断**。`10.20.0.53` 不属于任何本机直连子网（TAP 只给了 `/30`），因此 `isLocalNet(10.20.0.53) == false`。
 
-即使把它改成按私有段返回 true 也无用——只会把"黑洞"换成"死循环"：删了 /32 后系统里通往 `10.18.0.1` 的唯一路由就是 anyproxy 的 `0/1`，普通 dial 照样绕回自己。**source of truth 是路由表**，代码判断造不出一条通往别人隧道的路。
+即使把它改成按私有段返回 true 也无用——只会把"黑洞"换成"死循环"：删了 /32 后系统里通往 `10.20.0.53` 的唯一路由就是 anyproxy 的 `0/1`，普通 dial 照样绕回自己。**source of truth 是路由表**，代码判断造不出一条通往别人隧道的路。
 
 ## 修复
 
@@ -45,16 +47,16 @@ Windows 路由是**最长前缀匹配优先**，`/32` 永远压过 anyproxy 的 
    ```cmd
    :: 找 TAP 的接口索引
    netsh interface ip show interfaces
-   :: 把 10.18.0.1 钉回 TAP（net30 拓扑对端一般是 .69；用接口索引最稳）
-   route add 10.18.0.1 mask 255.255.255.255 10.18.0.69 if <TAP的Idx> metric 1
+   :: 把 10.20.0.53 钉回 TAP（net30 拓扑对端一般是 .69；用接口索引最稳）
+   route add 10.20.0.53 mask 255.255.255.255 10.20.30.69 if <TAP的Idx> metric 1
    ```
    anyproxy 只要不被喂到这个包，就天然正确。
 
-2. **代码级兜住 VPN 段（待实现，方案 B）**：新增「按目标网段绑定到指定接口 ifindex」的 bypass 配置，TCP `tunDial` 与 UDP `listenUDP` 命中时把 `IP_UNICAST_IF` 指向 **TAP 的索引**（而非物理网卡），让 anyproxy 即使没有系统 /32 也能主动把 VPN 内网流量（含 DNS）送回 TAP：
+2. **代码级兜住 VPN 段（待实现，方案 B）**：新增「按目标网段绑定到指定接口 ifindex」的直连例外配置（`tun.bypassRoutes`，与 mode=bypass 无关），TCP `tunDial` 与 UDP `listenUDP` 命中时把 `IP_UNICAST_IF` 指向 **TAP 的索引**（而非物理网卡），让 anyproxy 即使没有系统 /32 也能主动把 VPN 内网流量（含 DNS）送回 TAP：
    ```yaml
    tun:
      bypassRoutes:
-       - net: 10.18.0.0/24     # 或精确到 10.18.0.1/32
+       - net: 10.20.0.0/24     # 或精确到 10.20.0.53/32
          dev: "TAP-Windows Adapter V9 for OpenVPN Connect"
    ```
 
@@ -64,12 +66,12 @@ Windows 路由是**最长前缀匹配优先**，`/32` 永远压过 anyproxy 的 
 
 ```powershell
 Get-NetRoute -AddressFamily IPv4 |
-    ? { $_.DestinationPrefix -match '/32$' -and $_.NextHop -in '192.168.1.1','10.18.0.69' } |
+    ? { $_.DestinationPrefix -match '/32$' -and $_.NextHop -in '192.168.1.1','10.20.30.69' } |
     Sort-Object NextHop,DestinationPrefix |
     Format-Table DestinationPrefix,NextHop,ifIndex,RouteMetric
 ```
 
-- 若 `10.18.0.1/32`（下一跳指向 TAP，如 `10.18.0.69`）**不在列表**，说明通往 VPN DNS 的路由已丢，DNS 会被 anyproxy 的 `0/1` 吞掉。
+- 若 `10.20.0.53/32`（下一跳指向 TAP，如 `10.20.30.69`）**不在列表**，说明通往 VPN DNS 的路由已丢，DNS 会被 anyproxy 的 `0/1` 吞掉。
 - 顺便核对上游代理 / 网关的 /32 例外是否还在（下一跳 `192.168.1.1`）。
 
 对照哪个 ifIndex 是 TAP / 物理网卡：
@@ -81,11 +83,11 @@ Get-NetAdapter | Format-Table Name,ifIndex,Status
 ### 2. 分别向不同 DNS 发起查询，定位是"路由问题"还是"解析问题"
 
 ```cmd
-:: 走当前默认解析器（可能是 10.18.0.1）
+:: 走当前默认解析器（可能是 10.20.0.53）
 nslookup baidu.com
 
 :: 显式指定 VPN 内网 DNS，验证 /32 路由是否把它送进了 TAP
-nslookup baidu.com 10.18.0.1
+nslookup baidu.com 10.20.0.53
 
 :: 显式指定物理网络的真实 DNS，作为对照
 nslookup baidu.com 192.168.1.1
@@ -93,7 +95,7 @@ nslookup baidu.com 192.168.1.1
 
 判读：
 
-- `10.18.0.1` 超时、`192.168.1.1` 正常 → 通往 VPN DNS 的 /32 路由丢了（本故障）。
+- `10.20.0.53` 超时、`192.168.1.1` 正常 → 通往 VPN DNS 的 /32 路由丢了（本故障）。
 - 两者都超时 → 更上层问题（anyproxy 未逃出 TUN、`TUNBypassIfIndex=0` 等，见启动日志 `TUN bypass:` 行）。
 - 两者都正常 → DNS 已恢复。
 
@@ -108,7 +110,7 @@ OpenVPN 走 **TCP 传输**（如 `tcp/443`，常用于穿透防火墙）且开�
 ```
 openvpn.exe → VPN服务器:443 (TCP传输)
    → WinDivert 捕获(443 是重定向端口) → NAT 到 anyproxy 本地监听
-   → anyproxy 回拨 VPN服务器:443（自身出向被 SOCKET guard 放行，不再捕获）
+   → anyproxy 回拨 VPN服务器:443（anyproxy 自身出向绑定在 egress 源端口段，确定性放行，不再捕获）
    → 但默认路由=VPN隧道 → openvpn.exe 又封包发往 VPN服务器:443
    → 又被 WinDivert 捕获 → …… 死循环
 ```
@@ -131,6 +133,10 @@ openvpn.exe → VPN服务器:443 (TCP传输)
    ```
 
 生效后启动日志会打印 `tun(windivert): exclude procs=[openvpn.exe] ips=[...]`。
+
+> **两种排除的可靠性差异**：`bypassIPs`（按目的 IP）在包捕获层匹配，**确定性、无竞态**；`excludeProcs`（按进程名）依赖 WinDivert 的 **SOCKET 层事件**记录该进程的出向源端口，该事件与网络层 SYN 分属两条路径、**存在竞态**（极端情况下头几个包可能没排除掉），且需要较新的 WinDivert（SOCKET 层不可用时 `excludeProcs` 完全失效，启动日志会警告）。所以：**首选进程名排除便于维护，但若 VPN 传输偶发仍被抓，改用/叠加 `bypassIPs` 填服务器 IP 最稳。**
+>
+> （注：anyproxy 自身的直连出向已改用 **egress 源端口段**确定性放行，不再依赖 SOCKET guard，也因此根治了 IPv6 直连的自环——见 [windows-windivert-redirect.md](windows-windivert-redirect.md) 的「环路防护」。SOCKET guard 如今只服务于 `excludeProcs` 这类外部进程。）
 
 > 为什么不自动扫路由表识别 VPN 服务器：OpenVPN 的 `<server>/32 via 物理网关` 虽可探测，但 `/32` 路由不止它会加，启发式易误伤/漏判，显式配置更可控。
 >

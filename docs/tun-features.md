@@ -22,8 +22,14 @@ QUIC(UDP443) 拦截、UDP 转发行为，以及 `target`/`proxy` 的优先级。
 
 启动（三平台一致，需管理员/root）：
 ```
+# 命令行开启（配 IP 默认 10.9.0.1/24）
 sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
-# 或 conf/router.yaml 配 mode: tun
+
+# 网卡名和接口地址通过配置 tun.name / tun.addr 指定
+sudo ./anyproxy -mode tun
+
+# 或在 conf/router.yaml 中配置 tun.enable: true 后直接启动
+sudo ./anyproxy
 ```
 
 ## 2. 自动路由 autoRoute（默认开启）
@@ -42,6 +48,20 @@ sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
 > 默认 true 意味着开 `mode=tun` 就会接管默认路由。上级代理必须直连、不能走 TUN，否则环路断网。
 > **以 IP 指定的上级代理会自动加入直连例外**（`tun.bypassIPs`，autoRoute 加 `/32` 直连路由）；
 > 只有**域名指定**的上级代理需手动把其 IP 填进 `tun.bypassIPs`。
+
+`autoRoute: false` 时启动只打印命令，需按提示手动接管（需管理员/root）：
+
+```
+# Linux: 接管默认路由前，务必先给上级代理出口 IP 加直连例外，否则会环路断网
+sudo ip route add <上级代理IP>/32 via <原网关> dev <原网卡>
+sudo ip route add 0.0.0.0/1 dev anytun0
+sudo ip route add 128.0.0.0/1 dev anytun0
+
+# Windows: 同样先给上级代理 IP 加直连例外
+route add <上级代理IP> mask 255.255.255.255 <原网关>
+route add 0.0.0.0 mask 128.0.0.0 10.9.0.1
+route add 128.0.0.0 mask 128.0.0.0 10.9.0.1
+```
 
 ## 3. QUIC(UDP 443) 拦截 blockQUIC（默认开启）
 
@@ -122,7 +142,7 @@ Linux 用**策略路由**（`tun/route_linux.go`，`autoRoute=true` 自动生效
 > **一网卡多 IP**：`pref 100` 对该网卡的**每个** IPv4 都加了规则，绑其中任一个都能命中；我们绑
 > `physIPv4s(dev)[0]`（该网卡第一个 IPv4），再叠加 `SO_BINDTODEVICE` 锁定网卡，多 IP 场景也正确。
 
-启动日志 `TUN bypass: device="enp3s0" ip="192.168.144.183" ...`：`device` 与 `ip` 都非空才算逃逸
+启动日志 `TUN bypass: device="enp3s0" ip="192.168.1.100" ...`：`device` 与 `ip` 都非空才算逃逸
 就绪。若 `ip=""`（旧版本症状）则没绑源 IP，本机直连公网会环路。
 
 ### 排查：反复 `direct to <IP>` 是环路还是正常遥测？
@@ -141,7 +161,7 @@ sudo ss -tnp | grep anyproxy | grep 10.9.0.1
 sudo ss -tnp | grep anyproxy | grep -oE '[0-9.]+:(443|80)' | sort | uniq -c | sort -rn | head
 ```
 
-- 出向源全是物理网卡 IP（如 `192.168.144.183%enp3s0`）、无 `10.9.0.1`、每个目标连接数个位数 → **正常**，只是遥测吵。
+- 出向源全是物理网卡 IP（如 `192.168.1.100%enp3s0`）、无 `10.9.0.1`、每个目标连接数个位数 → **正常**，只是遥测吵。
 - 出现 `10.9.0.1` 源、或某 IP 连接数暴涨 → 真环路，检查启动日志 `TUN bypass:` 的 `ip` 是否为空、`ip rule` 是否有 `pref 100`。
 
 消除噪声：给该遥测域名配 `target: deny` 直接掐掉即可（不影响正常业务）：

@@ -43,7 +43,9 @@ tun:
 - **DNS(UDP/53)**：继续按 hosts 配置劫持解析(命中 `ip` 返回该 IP、`target=deny` 返回
   NXDOMAIN)，未命中放行由系统解析。
 - **QUIC(UDP/443)**：仅对命中 hosts `ip` 的目标丢弃，逼其回退 TCP 走代理（`tun.blockQUIC`，默认开）。
-- **bypass 模式**：Windows 上无实际意义(WinDivert 集中捕获)，会打印忽略日志。
+- **bypass 模式**：Windows 上已移除（WinDivert 集中捕获，无 0/1 路由概念）。逃逸靠
+  `tun.windows.excludeProcs`/`bypassIPs` + egress 源端口段，见
+  [windows-windivert-escape.md](windows-windivert-escape.md)。
 
 驱动/加载问题的诊断，见程序启动失败时打印的 WinDivert diagnostics，以及
 `https://reqrypt.org/windivert.html`。
