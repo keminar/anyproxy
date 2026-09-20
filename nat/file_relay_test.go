@@ -622,7 +622,7 @@ func TestSendFilesRejectsBadViaVps(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := SendFiles(c.cfg, c.to, []string{src}, c.via, 1)
+			err := SendFiles(c.cfg, c.to, []string{src}, c.via, 1, ConflictRename)
 			if err == nil || !strings.Contains(err.Error(), c.wantErrSub) {
 				t.Fatalf("want error containing %q, got %v", c.wantErrSub, err)
 			}
@@ -636,7 +636,7 @@ func TestSendFilesRejectsEscapingSubdir(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "x.txt")
 	os.WriteFile(src, []byte("hi"), 0o644)
 	cfg := conf.WsClient{Connect: "127.0.0.1:1", User: "a", Pass: testPassA, Email: "a@example.com"}
-	err := SendFiles(cfg, "c@example.com:../../etc", []string{src}, ViaDirect, 1)
+	err := SendFiles(cfg, "c@example.com:../../etc", []string{src}, ViaDirect, 1, ConflictRename)
 	if err == nil || !strings.Contains(err.Error(), "escapes the receive directory") {
 		t.Fatalf("want a clear escape error, got %v", err)
 	}
@@ -660,7 +660,7 @@ func TestSendFilesToSubdir(t *testing.T) {
 	}
 
 	cfg := conf.WsClient{Connect: connect, User: "a", Pass: testPassA, Email: "a@example.com", UUID: testUUIDA}
-	if err := SendFiles(cfg, "c@example.com:/aaa/", []string{src}, ViaRelay, 1); err != nil {
+	if err := SendFiles(cfg, "c@example.com:/aaa/", []string{src}, ViaRelay, 1, ConflictRename); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -702,7 +702,7 @@ func TestRecvFilesRelayEndToEnd(t *testing.T) {
 	localDir := t.TempDir()
 	cfgA := conf.WsClient{Connect: connect, User: "a", Pass: testPassA,
 		Email: "a@example.com", UUID: testUUIDA}
-	if err := RecvFiles(cfgA, "c@example.com:backup", localDir, ViaRelay, 1); err != nil {
+	if err := RecvFiles(cfgA, "c@example.com:backup", localDir, ViaRelay, 1, ConflictRename); err != nil {
 		t.Fatalf("recv: %v", err)
 	}
 
@@ -738,7 +738,7 @@ func TestFileRelayReadOnlyServesButRefusesWrites(t *testing.T) {
 
 	// 取: 照常。
 	localDir := t.TempDir()
-	if err := RecvFiles(cfgA, "c@example.com:pkg.tar", localDir, ViaRelay, 1); err != nil {
+	if err := RecvFiles(cfgA, "c@example.com:pkg.tar", localDir, ViaRelay, 1, ConflictRename); err != nil {
 		t.Fatalf("a read-only directory must still serve files: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(localDir, "pkg.tar")); string(got) != "payload" {
@@ -750,7 +750,7 @@ func TestFileRelayReadOnlyServesButRefusesWrites(t *testing.T) {
 	if err := os.WriteFile(src, []byte("nope"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	err := SendFiles(cfgA, "c@example.com", []string{src}, ViaRelay, 1)
+	err := SendFiles(cfgA, "c@example.com", []string{src}, ViaRelay, 1, ConflictRename)
 	if err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("want a read-only refusal, got %v", err)
 	}
@@ -777,7 +777,7 @@ func TestRecvFilesRelayRejectsStranger(t *testing.T) {
 	localDir := t.TempDir()
 	cfgA := conf.WsClient{Connect: connect, User: "a", Pass: testPassA,
 		Email: "a@example.com", UUID: testUUIDStranger}
-	err := RecvFiles(cfgA, "c@example.com:secret.txt", localDir, ViaRelay, 1)
+	err := RecvFiles(cfgA, "c@example.com:secret.txt", localDir, ViaRelay, 1, ConflictRename)
 	if err == nil {
 		t.Fatal("a peer that is not in receive.allow must not be able to fetch anything")
 	}

@@ -65,7 +65,10 @@ func splitRecvSpec(recv string) (email, remotePath string, err error) {
 //
 // parallel 与 SendFiles 同一个参数、同一个阈值判断(见 planChunks): 单个文件够大时
 // 按 e.Size(清单里已经有, 不用额外问一次)切块, 各开一条独立连接并行取。
-func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
+//
+// conflict 是本机已有同名文件时的处理方式(见 ParseConflict 与 file_conflict.go): 空串表示
+// 终端里逐个询问、否则自动改名。
+func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict string) error {
 	if cfg.Connect == "" {
 		return fmt.Errorf("websocket.client.connect is empty, cannot reach the server")
 	}
@@ -81,6 +84,10 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	}
 	if from == cfg.Email {
 		return fmt.Errorf("-recv %s is this machine's own email", from)
+	}
+	res, err := newConflictResolver(conflict, conflictIn, os.Stderr)
+	if err != nil {
+		return err
 	}
 	actualVia, relayVia := resolveVia(via)
 	if relayVia != "" {
@@ -178,19 +185,49 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 		len(entries), humanBytes(total), from, via, dir)
 
 	var gotBytes int64
+	skipped := 0
 	for i, e := range entries {
 		start := time.Now()
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(entries), e.Name)
+
+		// 同名协商放在进度条之前: 它要向用户提问, 进度条的定时重绘会把提示冲掉。
+		act, resumeAt := ConflictRename, int64(0)
+		if res.policy != ConflictRename {
+			var perr error
+			act, resumeAt, perr = res.preparePull(dir, e, func(n int64) (string, error) {
+				hc, err := openPull()
+				if err != nil {
+					return "", err
+				}
+				defer hc.Close()
+				return pullHash(hc, e, n)
+			})
+			if perr != nil {
+				return fmt.Errorf("%s: %w", e.Name, perr)
+			}
+			if act == ConflictSkip {
+				fmt.Fprintf(os.Stderr, "%s -> skipped (already exists)\n", prefix)
+				skipped++
+				continue
+			}
+		}
 		p := newProgress(prefix, e.Size)
 
 		var saved string
 		var err error
-		if chunks := planChunks(e.Size, parallel); chunks != nil {
-			saved, err = recvParallel(openPull, dir, e, from, remote, logf, chunks, p)
+		if act == ConflictResume {
+			// 续传只取一段尾巴, 不做分块并行; 进度从已有的字节数起算。
+			var conn fileConn
+			if conn, err = openPull(); err == nil {
+				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, act, resumeAt)
+				conn.Close()
+			}
+		} else if chunks := planChunks(e.Size, parallel); chunks != nil {
+			saved, err = recvParallel(openPull, dir, e, from, remote, logf, chunks, act, p)
 		} else {
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
-				saved, err = pullFile(conn, dir, e, from, remote, logf, p.update)
+				saved, err = pullFileAct(conn, dir, e, from, remote, logf, p.update, act, 0)
 				conn.Close()
 			}
 		}
@@ -204,7 +241,7 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 		fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
 			humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
 	}
-	fmt.Fprintf(os.Stderr, "done: %d file(s), %s\n", len(entries), humanBytes(gotBytes))
+	fmt.Fprintf(os.Stderr, "done: %d file(s), %s%s\n", len(entries)-skipped, humanBytes(gotBytes), skippedNote(skipped))
 	return nil
 }
 
@@ -212,7 +249,7 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 // 分块版编排。每一块各自调 openPull 要一条新连接——它对 direct/relay 一视同仁, 不用
 // 在这里再分 via。失败语义与 sendParallel 对称: 任意一块出错就让整份文件报错。
 func recvParallel(openPull func() (fileConn, error), dir string, e filePullEntry, from, remote string,
-	logf func(string, ...interface{}), chunks []chunkRange, p *progress) (string, error) {
+	logf func(string, ...interface{}), chunks []chunkRange, act string, p *progress) (string, error) {
 	tid, err := newTransferID()
 	if err != nil {
 		return "", fmt.Errorf("generate transfer id: %w", err)
@@ -236,7 +273,7 @@ func recvParallel(openPull func() (fileConn, error), dir string, e filePullEntry
 				mu.Unlock()
 				return
 			}
-			s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, i, len(chunks), c.offset, c.length,
+			s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, i, len(chunks), c.offset, c.length, act,
 				func(sent int64) { cp.update(i, sent) })
 			conn.Close()
 			mu.Lock()

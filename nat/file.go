@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -84,6 +85,17 @@ type fileHead struct {
 	ChunkIndex int    `json:"ci,omitempty"`
 	ChunkCount int    `json:"cc,omitempty"`
 	Offset     int64  `json:"off,omitempty"`
+
+	// Conflict 同名文件已存在时发送方要求的处理: 空是默认(收方自动改名保存, 见 claimName),
+	// "overwrite" 覆盖, "resume" 从 Offset 起续写(此时 Size 是剩余字节数、TransferID 为空)。
+	// 后两者会改动收方已有文件, 由发送方的使用者在协商时明确选择(见 file_conflict.go)。
+	Conflict string `json:"conflict,omitempty"`
+
+	// Probe 表示这不是一次传输, 只是探测收方有没有同名文件(见 file_conflict.go)。ProbeSize
+	// 是来件大小(Size 留 0, 见 probeOver), ProbeNoHash 表示不用算哈希。
+	Probe       bool  `json:"probe,omitempty"`
+	ProbeSize   int64 `json:"probeSize,omitempty"`
+	ProbeNoHash bool  `json:"noHash,omitempty"`
 }
 
 // fileTrailer 数据发完之后才发的校验信息。
@@ -167,7 +179,7 @@ func (dc *directConn) recvFile(stream *quic.Stream, remote string) {
 		reply(fileReply{Err: err.Error()})
 		return
 	}
-	recvFileOver(stream, cfg.Dir, email, remote, logf, nil)
+	recvFileOver(stream, cfg.Dir, email, remote, logf, recvOpts{}, nil)
 }
 
 // servePullStream 处理一条取件流(直连路径的入口)。身份核对与收文件那条路完全一样,
@@ -189,7 +201,7 @@ func (dc *directConn) servePullStream(stream *quic.Stream, remote string) {
 // 比对; 中继见 onFileRelayOpen 的 email 查 uuid + 用它解密, 解密成功本身就是身份
 // 证明)——这里只管接收本身, fromEmail 仅用于日志展示。onDone 仅一次性收文件(-recv)
 // 用来知道这个文件(不论成败)已经处理完, daemon 场景传 nil。
-func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string, ...interface{}), onDone func(fileReply)) {
+func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string, ...interface{}), opts recvOpts, onDone func(fileReply)) {
 	reply := func(r fileReply) {
 		if r.Err != "" {
 			logf("file from %s: %s", remote, r.Err)
@@ -218,6 +230,28 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 		return
 	}
 
+	// -recv 取件: 同名怎么处理由本机说了算, 对端首部里带的一律不认。
+	if opts.local {
+		head.Conflict = opts.conflict
+		if head.Conflict == ConflictResume {
+			head.Offset = opts.resumeAt
+		}
+	}
+	// 探测(见 file_conflict.go): 只回 stat/哈希, 不接收任何数据。
+	if head.Probe {
+		serveProbe(conn, dir, head, logf)
+		if onDone != nil {
+			onDone(fileReply{})
+		}
+		return
+	}
+	switch head.Conflict {
+	case "", ConflictOverwrite, ConflictResume:
+	default:
+		reply(fileReply{Err: fmt.Sprintf("unknown conflict mode %q", head.Conflict)})
+		return
+	}
+
 	// TransferID 非空说明这不是整份文件, 是分块并行传输(见 file_send.go 的 parallel
 	// 参数)里的一块, 转交单独的落盘逻辑——多条连接要写同一个目标文件的不同字节区间,
 	// 不能像下面这样每条连接各开各的 .part。
@@ -237,6 +271,26 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 	}
 
 	start := time.Now()
+
+	// 标记, 对不存在的目标同样只是普通传输)。
+	// 标记, 不能让没有冲突的文件也因为收方没授权而被拒)。
+	if head.Conflict == ConflictOverwrite {
+		if _, statErr := os.Lstat(dest); statErr != nil {
+			head.Conflict = ""
+		}
+	}
+	if head.Conflict != "" {
+		saved, err := writeModify(dest, conn, head)
+		if err != nil {
+			reply(fileReply{Err: err.Error()})
+			return
+		}
+		rel, _ := filepath.Rel(dir, saved)
+		logf("file from %s: %s %s (%s in %s)", remote, head.Conflict, rel, humanBytes(head.Size), time.Since(start).Round(time.Millisecond))
+		reply(fileReply{Saved: filepath.ToSlash(rel)})
+		return
+	}
+
 	saved, sum, err := writeIncoming(dest, conn, head)
 	if err != nil {
 		reply(fileReply{Err: err.Error()})
@@ -281,6 +335,7 @@ type chunkAssembly struct {
 	mu        sync.Mutex
 	f         *os.File
 	final     string // 最终落盘名, 第一块到达时就用 claimName 原子占好(占位文件已在磁盘上), 所有块共用
+	claimed   bool   // final 是 claimName 留下的空占位文件(失败时要删); 覆盖模式下 final 是已有文件, 绝不能删
 	part      string
 	total     int
 	remaining int
@@ -310,7 +365,7 @@ func abortChunkAssembly(tid string) {
 	if a != nil {
 		_ = a.f.Close()
 		_ = os.Remove(a.part)
-		_ = os.Remove(a.final) // claimName 原子占的位, 传输没完成也要一并收掉
+		a.dropClaim() // claimName 原子占的位, 传输没完成也要一并收掉
 	}
 }
 
@@ -334,9 +389,20 @@ func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly,
 	// final 在第一块到达时就原子认领下来(见 claimName), 而不是等所有块都收完才决定:
 	// 每条并行连接各自收完自己那一块就要独立回复对端"Saved"(不能等其他块), 所以这个
 	// 名字必须从一开始就是确定、且不会被并发的另一次同名传输抢走的。
-	final, err := claimName(dest)
-	if err != nil {
-		return nil, err
+	// 覆盖(见 file_conflict.go): 目标不存在就是普通传输; 存在则最终改名时替换它。
+	overwrite := false
+	if head.Conflict == ConflictOverwrite {
+		if _, statErr := os.Lstat(dest); statErr == nil {
+			overwrite = true
+		}
+	}
+	final, claimed := dest, false
+	if !overwrite {
+		final, err = claimName(dest)
+		if err != nil {
+			return nil, err
+		}
+		claimed = true
 	}
 	// part 带上这次传输自己的 TransferID, 不能只用 final+".part": 发送端异常退出
 	// (比如传到一半 Ctrl+C)时, 接收端这个 goroutine 在检测到连接真的断了之前还会
@@ -348,11 +414,13 @@ func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly,
 	part := final + "." + tid + filePartSuffix
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, filePerm(head.Mode))
 	if err != nil {
-		os.Remove(final) // final 已经被 claimName 原子占位了, 这里失败要把占位一起收掉
+		if claimed {
+			os.Remove(final) // final 已经被 claimName 原子占位了, 这里失败要把占位一起收掉
+		}
 		return nil, fmt.Errorf("create: %w", err)
 	}
 	a := &chunkAssembly{
-		f: f, final: final, part: part,
+		f: f, final: final, claimed: claimed, part: part,
 		total: head.ChunkCount, remaining: head.ChunkCount,
 		seen: make(map[int]bool, head.ChunkCount), touched: time.Now(),
 	}
@@ -382,7 +450,7 @@ func reapChunkAssemblies() {
 		for _, a := range dead {
 			a.f.Close()
 			os.Remove(a.part)
-			os.Remove(a.final) // claimName 原子占的位, 传输没完成也要一并收掉
+			a.dropClaim() // claimName 原子占的位, 传输没完成也要一并收掉
 			log.Printf("nat file: transfer to %s idle, dropped (%d/%d chunks arrived)", a.final, a.total-a.remaining, a.total)
 		}
 	}
@@ -459,12 +527,12 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 			// 占下的空占位文件, 传输失败了也要一并收掉, 不然会留下一个看着像"传完
 			// 了"、其实是空的文件。
 			os.Remove(a.part)
-			os.Remove(a.final)
+			a.dropClaim()
 		} else if err := renameWithRetry(a.part, a.final); err != nil {
 			// 所有块都收全校验也都过了, 只是改名被卡住(常见于杀毒软件扫描刚落盘的
 			// 可执行文件): 把空占位文件收掉(留着会被误认成"传完了但是空文件"), 但
 			// 不删 part——数据都在那, 删掉等于逼一次全量重传。
-			os.Remove(a.final)
+			a.dropClaim()
 			finalErr = fmt.Errorf("rename: %w (data kept at %s)", err, a.part)
 		} else {
 			rel, _ := filepath.Rel(dir, a.final)
@@ -484,7 +552,7 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 //
 // 先写 .part 再改名: 中断留下的是一眼能看出没传完的文件。改名时若目标已存在, 自动
 // 换一个名字而不是覆盖 —— 覆盖会悄无声息地毁掉收方已有的数据, 这个代价太大, 而多
-// 出一个 "x (1).zip" 只是有点碍眼。
+// 出一个带序号的名字(命名见 dupName)只是有点碍眼。
 //
 // part 名字带一段随机 token, 不能只用 dest+".part": 发送端异常退出(比如传到一半
 // Ctrl+C)时, 收端这个 goroutine 在检测到连接真的断了之前还占着旧的 .part 继续
@@ -494,29 +562,9 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 // "being used by another process"(哪怕数据本身完全收对了)。每次调用生成自己的
 // token, 这类撞名从根上就不会发生。
 func writeIncoming(dest string, r io.Reader, head fileHead) (string, string, error) {
-	tok, err := newTransferID()
+	part, sum, err := receiveToPart(dest, r, head)
 	if err != nil {
-		return "", "", fmt.Errorf("part name: %w", err)
-	}
-	part := dest + "." + tok + filePartSuffix
-	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, filePerm(head.Mode))
-	if err != nil {
-		return "", "", fmt.Errorf("create: %w", err)
-	}
-	h := sha256.New()
-	n, err := copyN(io.MultiWriter(f, h), r, head.Size)
-	closeErr := f.Close()
-	if err != nil {
-		os.Remove(part)
-		return "", "", fmt.Errorf("receive: %w", err)
-	}
-	if closeErr != nil {
-		os.Remove(part)
-		return "", "", fmt.Errorf("close: %w", closeErr)
-	}
-	if n != head.Size {
-		os.Remove(part)
-		return "", "", fmt.Errorf("truncated: got %d of %d bytes", n, head.Size)
+		return "", "", err
 	}
 
 	// claimName 而不是"先 Stat 探测、这里再 Rename": 两步分开在两个独立进程之间不
@@ -535,7 +583,7 @@ func writeIncoming(dest string, r io.Reader, head fileHead) (string, string, err
 		os.Remove(final)
 		return "", "", fmt.Errorf("rename: %w (data kept at %s)", err, part)
 	}
-	return final, hex.EncodeToString(h.Sum(nil)), nil
+	return final, sum, nil
 }
 
 // renameWithRetry 重试版 os.Rename。Windows 上杀毒软件常对刚落盘的可执行文件做
@@ -629,7 +677,7 @@ func safeJoin(dir, name string) (string, error) {
 }
 
 // claimName 原子地"认领"一个尚未被占用的文件名: 目标已存在就换下一个候选,
-// x.zip -> x (1).zip -> x (2).zip -> ...。
+// 候选名按收方系统习惯生成, 见 dupName(如 x (1).zip / x.zip.1 / x copy.zip)。
 //
 // 不能用"先 os.Stat 探测存不存在、调用方再另外一步 Rename"这种两步走的做法——那两
 // 步之间不是原子的。两个独立进程/goroutine 并发给同一个目标名字发送同名文件时,
@@ -662,15 +710,8 @@ func claimName(dest string) (string, error) {
 		return dest, nil
 	}
 
-	ext := filepath.Ext(dest)
-	// 纯数字的".1"多半是版本号(如 anyproxy-amd64-v2.1)而不是后缀名 ——
-	// 非 Windows 下的可执行文件常见这种命名, 按后缀名拆分会把序号插进版本号中间。
-	if isNumericExt(ext) {
-		ext = ""
-	}
-	base := strings.TrimSuffix(dest, ext)
 	for i := 1; i < 10000; i++ {
-		cand := fmt.Sprintf("%s (%d)%s", base, i, ext)
+		cand := dupName(dest, i, runtime.GOOS)
 		ok, err := claim(cand)
 		if err != nil {
 			return "", fmt.Errorf("claim %s: %w", cand, err)
@@ -682,6 +723,33 @@ func claimName(dest string) (string, error) {
 	// 一万个重名还没排开就别较劲了, 如实报错——跟旧版"退回原名字让调用方写、多半会
 	// 失败"的效果一样, 但不用再让调用方自己判断"这到底是不是真的认领到了"。
 	return "", fmt.Errorf("too many files named like %s, giving up", filepath.Base(dest))
+}
+
+// dupName 给出第 i 个(从 1 起)重名候选, 按收方系统(goos)的习惯命名:
+//
+//	windows / 其它: x (1).zip, x (2).zip
+//	linux:          x.zip.1,   x.zip.2      (wget / logrotate 式, 追加在完整文件名后)
+//	darwin:         x copy.zip, x copy 2.zip (Finder 式)
+//
+// 接收方自己落盘, 所以看的是接收进程的 runtime.GOOS, 与发送方系统无关。
+func dupName(dest string, i int, goos string) string {
+	if goos == "linux" {
+		return fmt.Sprintf("%s.%d", dest, i)
+	}
+	ext := filepath.Ext(dest)
+	// 纯数字的".1"多半是版本号(如 anyproxy-amd64-v2.1)而不是后缀名 ——
+	// 可执行文件常见这种命名, 按后缀名拆分会把序号插进版本号中间。
+	if isNumericExt(ext) {
+		ext = ""
+	}
+	base := strings.TrimSuffix(dest, ext)
+	if goos == "darwin" {
+		if i == 1 {
+			return base + " copy" + ext
+		}
+		return fmt.Sprintf("%s copy %d%s", base, i, ext)
+	}
+	return fmt.Sprintf("%s (%d)%s", base, i, ext)
 }
 
 // isNumericExt 形如 ".1"、".22" 的"后缀"通篇是数字, 真实文件后缀几乎不会这样, 一般是版本号。
@@ -705,6 +773,11 @@ type fileItem struct {
 	name string
 	size int64
 	mode uint32
+
+	// 同名协商的结果(见 file_conflict.go): conflict 为空按默认(收方改名); resumeAt 仅
+	// conflict=="resume" 时有意义, 是收方已有的字节数、也是本次从哪儿开始发。
+	conflict string
+	resumeAt int64
 }
 
 // collectFiles 展开命令行给的路径。目录会递归进去, 相对名以该目录本身为根 ——
@@ -829,6 +902,15 @@ func (d *directPeer) sendFile(sess *directSession, it fileItem, onProgress func(
 	return sendFileOver(stream, it, onProgress)
 }
 
+// probeFile 在直连上开一条流探测收方有没有同名文件(见 file_conflict.go)。
+func (d *directPeer) probeFile(sess *directSession, it fileItem, noHash bool, notify func(string)) (*probeResult, error) {
+	stream, err := d.openFileStream(sess)
+	if err != nil {
+		return nil, err
+	}
+	return probeOver(stream, it, noHash, notify)
+}
+
 // sendFileChunk 是 sendFile 的分块版: 单独开一条流发文件里的 [offset, offset+length)
 // 这一段, 供单文件并行分块传输用(见 file_send.go 的 parallel 参数)。除了多传
 // offset/length/tid/chunkIdx/chunkCount, 与 sendFile 完全一样——每个分块各自开一条
@@ -881,6 +963,11 @@ func (d *directPeer) openPullStream(sess *directSession) (*quic.Stream, error) {
 // sendFileOver 发送一整个文件, 是 sendFileOverRange 在"不分块"时的薄包装——
 // offset=0、length=文件全长、TransferID 为空, 语义与今天完全一样。
 func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (string, error) {
+	if it.conflict == ConflictResume {
+		// 续传: 只发收方还没有的后半段。摘要(尾部)也只覆盖这一段——前半段已经在协商时
+		// 比对过哈希, 收方续写失败时会把文件截回原长度(见 resumeIncoming)。
+		return sendFileOverRange(conn, it, it.resumeAt, it.size-it.resumeAt, "", 0, 1, onProgress)
+	}
 	return sendFileOverRange(conn, it, 0, it.size, "", 0, 1, onProgress)
 }
 
@@ -910,6 +997,7 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 	if err := writeFrame(conn, fileHead{
 		Name: it.name, Size: length, Mode: it.mode,
 		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset,
+		Conflict: it.conflict,
 	}); err != nil {
 		return "", fmt.Errorf("send head: %w", err)
 	}

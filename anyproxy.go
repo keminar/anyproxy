@@ -58,6 +58,7 @@ var (
 	gSendVia         string
 	gRecv            string
 	gParallel        int
+	gConflict        string
 	gDirectPlainUDP  bool
 )
 
@@ -90,6 +91,7 @@ func init() {
 
 	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
 	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
+	flag.StringVar(&gConflict, "conflict", "", "-send/-recv: what to do when the destination already has a file of the same name: ask (compare contents, then choose: rename / overwrite / skip when identical, continue / rename / skip when different; the default on a terminal), rename (save under a new name; the default when stdin is not a terminal), overwrite, skip, or resume (continue a partial file, skip if already complete).")
 	flag.BoolVar(&gDirectPlainUDP, "direct-plain-udp", false, "direct (NAT punch) connections: skip quic-go's batched/ECN fast path for the UDP socket, always falling back to plain per-packet I/O. Try this if a direct transfer shows high loss and a congestion window stuck near its floor even on an otherwise healthy link -- on some machines (seen on Windows, likely a NIC driver/virtual adapter quirk) that fast path itself corrupts or delays packets, which quic-go then mistakes for congestion. Unlike -debug, this does not log every packet, so it's fine to leave on")
 
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
@@ -174,7 +176,7 @@ func main() {
 		if err != nil {
 			log.Fatalln("send:", err)
 		}
-		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel); err != nil {
+		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel, gConflict); err != nil {
 			// 打洞失败也走这里: 按约定不做中继回落, 一个字节都不传, 退出码非零。
 			log.Fatalln("send:", err)
 		}
@@ -187,7 +189,7 @@ func main() {
 		if err != nil {
 			log.Fatalln("recv:", err)
 		}
-		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel); err != nil {
+		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel, gConflict); err != nil {
 			log.Fatalln("recv:", err)
 		}
 		return

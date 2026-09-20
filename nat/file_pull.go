@@ -37,6 +37,7 @@ const (
 	// filePullList 要一份清单; filePullGet 取其中一个文件。
 	filePullList = "list"
 	filePullGet  = "get"
+	filePullHash = "hash" // 算文件前 Length 字节的 SHA-256(同名协商用, 见 file_conflict.go)
 
 	// filePullMaxEntries 一次清单最多认多少条。对端说了算的东西都要有上限, 不然
 	// 一个指向巨大目录(或恶意构造)的清单能让 A 一直读一直攒。
@@ -67,6 +68,9 @@ type filePullReq struct {
 	// 文件末尾, 是因为"到文件末尾"只对最后一块成立——其余块的长度必须由 A 显式
 	// 告诉 C, C 不知道整份切分方案。
 	Length int64 `json:"length,omitempty"`
+	// Resume 仅 op=get: A 本地已有这个文件的前 Offset 字节, 只要 [Offset, Offset+Length) 这一段
+	// 接在后面(不是分块并行, TransferID 为空)。
+	Resume bool `json:"resume,omitempty"`
 }
 
 // filePullResp C 的应答, 排在任何数据之前。Err 非空表示这次取件到此为止。
@@ -187,7 +191,7 @@ func servePull(conn fileConn, cfg conf.ClientReceive, fromEmail, remote string, 
 		it := fileItem{path: src, name: name, size: info.Size(), mode: uint32(info.Mode().Perm())}
 		start := time.Now()
 		var saved string
-		if req.TransferID != "" {
+		if req.TransferID != "" || req.Resume {
 			// 分块取件(见 file_recv.go 的 parallel 参数): A 已经规划好了范围, 这里
 			// 照单发货, 不重新判断切不切块——那是取件方的决定, C 只管配合。
 			saved, err = sendFileOverRange(conn, it, req.Offset, req.Length, req.TransferID, req.ChunkIndex, req.ChunkCount, nil)
@@ -200,6 +204,29 @@ func servePull(conn fileConn, cfg conf.ClientReceive, fromEmail, remote string, 
 		}
 		logf("pull from %s: sent %s as %s (%s in %s)", remote, req.Path, saved,
 			humanBytes(it.size), time.Since(start).Round(time.Millisecond))
+
+	case filePullHash:
+		info, err := os.Stat(src)
+		if err != nil || !info.Mode().IsRegular() {
+			fail(fmt.Sprintf("cannot read %q", req.Path))
+			return
+		}
+		if req.Length < 0 || req.Length > info.Size() {
+			fail(fmt.Sprintf("cannot hash the first %d bytes of %q", req.Length, req.Path))
+			return
+		}
+		if err := writeFrame(conn, filePullResp{}); err != nil {
+			logf("pull from %s: cannot reply: %v", remote, err)
+			return
+		}
+		sum, err := hashFilePrefix(src, req.Length)
+		if err != nil {
+			logf("pull from %s: hash %s: %v", remote, req.Path, err)
+			return // 直接断开: 对端读不到摘要帧就会报错
+		}
+		if err := writeFrame(conn, fileTrailer{SHA256: sum}); err != nil {
+			logf("pull from %s: cannot send hash: %v", remote, err)
+		}
 
 	default:
 		fail(fmt.Sprintf("unknown pull op %q", req.Op))
@@ -272,10 +299,23 @@ func pullList(conn fileConn, path string) ([]filePullEntry, error) {
 	}
 }
 
-// pullFile 在一条流上取一个文件并落盘到 dir, 返回实际存成的名字。
+// pullFile 在一条流上取一个文件并落盘到 dir, 返回实际存成的名字。同名按默认自动改名。
 func pullFile(conn fileConn, dir string, e filePullEntry, from, remote string,
 	logf func(string, ...interface{}), onProgress func(int64)) (string, error) {
-	if err := writeFrame(conn, filePullReq{Op: filePullGet, Path: e.Path, Name: e.Name}); err != nil {
+	return pullFileAct(conn, dir, e, from, remote, logf, onProgress, "", 0)
+}
+
+// pullFileAct 是 pullFile 带同名处理决定的版本: act 为空/ConflictRename 走默认(自动改名),
+// ConflictOverwrite 覆盖本机已有文件, ConflictResume 从 resumeAt 起续传(本机已有前 resumeAt 字节)。
+func pullFileAct(conn fileConn, dir string, e filePullEntry, from, remote string,
+	logf func(string, ...interface{}), onProgress func(int64), act string, resumeAt int64) (string, error) {
+	req := filePullReq{Op: filePullGet, Path: e.Path, Name: e.Name}
+	size := e.Size
+	if act == ConflictResume {
+		req.Offset, req.Length, req.Resume = resumeAt, e.Size-resumeAt, true
+		size = req.Length
+	}
+	if err := writeFrame(conn, req); err != nil {
 		return "", fmt.Errorf("send get request: %w", err)
 	}
 	var resp filePullResp
@@ -288,12 +328,12 @@ func pullFile(conn fileConn, dir string, e filePullEntry, from, remote string,
 
 	var src fileConn = conn
 	if onProgress != nil {
-		src = &progressConn{fileConn: conn, size: e.Size, on: onProgress}
+		src = &progressConn{fileConn: conn, size: size, on: onProgress}
 	}
 	// recvFileOver 不返回结果(daemon 场景只记日志), 结果从它的 onDone 回调里接。
 	// 它的每一条返回路径都先走 reply(), 所以这个回调一定会被调到一次。
 	var got fileReply
-	recvFileOver(src, dir, from, remote, logf, func(r fileReply) { got = r })
+	recvFileOver(src, dir, from, remote, logf, localOpts(act, resumeAt), func(r fileReply) { got = r })
 	if got.Err != "" {
 		return "", errors.New(got.Err)
 	}
@@ -305,7 +345,7 @@ func pullFile(conn fileConn, dir string, e filePullEntry, from, remote string,
 // parallel 参数)。落盘走的还是 recvFileOver——它已经会按 TransferID 转给
 // recvFileChunk 做跨连接的拼接, 这里不用重复那套逻辑。
 func pullFileChunk(conn fileConn, dir string, e filePullEntry, from, remote string,
-	logf func(string, ...interface{}), tid string, chunkIdx, chunkCount int, offset, length int64, onProgress func(int64)) (string, error) {
+	logf func(string, ...interface{}), tid string, chunkIdx, chunkCount int, offset, length int64, act string, onProgress func(int64)) (string, error) {
 	req := filePullReq{
 		Op: filePullGet, Path: e.Path, Name: e.Name,
 		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset, Length: length,
@@ -326,11 +366,40 @@ func pullFileChunk(conn fileConn, dir string, e filePullEntry, from, remote stri
 		src = &progressConn{fileConn: conn, size: length, on: onProgress}
 	}
 	var got fileReply
-	recvFileOver(src, dir, from, remote, logf, func(r fileReply) { got = r })
+	recvFileOver(src, dir, from, remote, logf, localOpts(act, 0), func(r fileReply) { got = r })
 	if got.Err != "" {
 		return "", errors.New(got.Err)
 	}
 	return got.Saved, nil
+}
+
+// pullHash 在一条流上让对端算它那份文件前 n 字节的 SHA-256(同名协商用)。
+func pullHash(conn fileConn, e filePullEntry, n int64) (string, error) {
+	if err := writeFrame(conn, filePullReq{Op: filePullHash, Path: e.Path, Length: n}); err != nil {
+		return "", fmt.Errorf("send hash request: %w", err)
+	}
+	var resp filePullResp
+	if err := readPullFrame(conn, &resp); err != nil {
+		return "", err
+	}
+	if resp.Err != "" {
+		return "", errors.New(resp.Err)
+	}
+	// 摘要帧不设短超时: 对端要把文件读一遍, 大文件要很久。
+	var tr fileTrailer
+	if err := readFrame(conn, &tr, fileFrameMax); err != nil {
+		return "", fmt.Errorf("read hash: %w", err)
+	}
+	return tr.SHA256, nil
+}
+
+// localOpts 取件时落盘的策略: 同名怎么处理由本机决定(见 recvOpts.local)。
+func localOpts(act string, resumeAt int64) recvOpts {
+	o := recvOpts{local: true, resumeAt: resumeAt}
+	if act == ConflictOverwrite || act == ConflictResume {
+		o.conflict = act
+	}
+	return o
 }
 
 // readPullFrame 带超时读一个控制帧。每次都重设绝对超时, 不能只在循环外设一次——

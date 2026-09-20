@@ -494,7 +494,7 @@ func onFileRelayOpen(c *Client, msg *Message) {
 		// closeWithError(此时 r.Err 非空)/Close(r.Err 为空即成功), 直接关掉 p.done——
 		// 那正是 waitWindow 的 select 里等着的信号之一, 一到就立刻返回, 不必再等满
 		// 60 秒。成功的一路也顺带把 A 那侧原本从未清理过的 fileRelayPipes 记录收掉。
-		recvFileOver(secured, cfg.Dir, req.FromEmail, remote, logf, func(r fileReply) {
+		recvFileOver(secured, cfg.Dir, req.FromEmail, remote, logf, recvOpts{}, func(r fileReply) {
 			s.close(r.Err)
 		})
 	}
@@ -581,4 +581,13 @@ func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, 
 		sess.pipe.setOnAcked(onProgress)
 	}
 	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, chunkCount, nil)
+}
+
+// probeFileViaRelay 经中继探测收方有没有同名文件(见 file_conflict.go), 每次探测一条新会话。
+func probeFileViaRelay(client *Client, toEmail string, it fileItem, noHash bool, notify func(string)) (*probeResult, error) {
+	secured, _, err := openRelayConn(client, toEmail, "")
+	if err != nil {
+		return nil, err
+	}
+	return probeOver(secured, it, noHash, notify)
 }

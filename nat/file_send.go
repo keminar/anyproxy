@@ -107,7 +107,10 @@ func splitSendTo(to string) (email, subdir string, err error) {
 // 块、各开一条独立连接并行传——只切单个大文件, 不会让多个文件同时传输(那样反而可能
 // 拖长每一个文件的耗时, 见 planChunks 的阈值判断)。parallel<=1 或文件不够大时走原来
 // 的单连接路径, 行为与之前完全一样。
-func SendFiles(cfg conf.WsClient, to string, paths []string, via string, parallel int) error {
+//
+// conflict 是收方已有同名文件时的处理方式(见 ParseConflict 与 file_conflict.go): 空串表示
+// 终端里逐个询问、否则让收方自动改名。
+func SendFiles(cfg conf.WsClient, to string, paths []string, via string, parallel int, conflict string) error {
 	if cfg.Connect == "" {
 		return fmt.Errorf("websocket.client.connect is empty, cannot reach the server")
 	}
@@ -120,6 +123,10 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	}
 	if toEmail == cfg.Email {
 		return fmt.Errorf("-to %s is this machine's own email", toEmail)
+	}
+	res, err := newConflictResolver(conflict, conflictIn, os.Stderr)
+	if err != nil {
+		return err
 	}
 	actualVia, relayVia := resolveVia(via)
 	if relayVia != "" {
@@ -166,6 +173,9 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	// quicStats 直连路径才有: 传完打一行 QUIC 收发统计, 用来判断"传得慢"是链路丢包
 	// 还是本端的问题(见 nat/direct_stats.go 的判读说明)。
 	var quicStats *directStats
+	// probe 在一条新通道上探测收方有没有同名文件(同名协商用)。
+	var probe func(it fileItem, noHash bool) (*probeResult, error)
+	notify := func(msg string) { fmt.Fprintln(os.Stderr, msg) }
 	switch actualVia {
 	case ViaDirect:
 		// 一次直连, 所有文件共用 —— 每个文件(或每一块)占一条 stream, 不必反复打洞。
@@ -191,6 +201,9 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
 			return sender.peer.sendFile(sess, it, onProgress)
 		}
+		probe = func(it fileItem, noHash bool) (*probeResult, error) {
+			return sender.peer.probeFile(sess, it, noHash, notify)
+		}
 		sendChunk = func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
 			return sender.peer.sendFileChunk(sess, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
 		}
@@ -198,19 +211,37 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
 			return sendFileViaRelay(sender.client, toEmail, it, onProgress)
 		}
+		probe = func(it fileItem, noHash bool) (*probeResult, error) {
+			return probeFileViaRelay(sender.client, toEmail, it, noHash, notify)
+		}
 		sendChunk = func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
 			return sendFileChunkViaRelay(sender.client, toEmail, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
 		}
 	}
 
 	var sentBytes int64
+	skipped := 0
 	for i, it := range items {
 		start := time.Now()
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(items), it.name)
+
+		// 同名协商放在进度条之前: 它要向用户提问, 进度条的定时重绘会把提示冲掉。
+		skip, err := res.prepareSend(&it, probe)
+		if err != nil {
+			return fmt.Errorf("%s: %w", it.name, err)
+		}
+		if skip {
+			fmt.Fprintf(os.Stderr, "%s -> skipped (already exists)\n", prefix)
+			skipped++
+			continue
+		}
 		p := newProgress(prefix, it.size)
 		var saved string
-		var err error
-		if chunks := planChunks(it.size, parallel); chunks != nil {
+		if it.conflict == ConflictResume {
+			// 续传只发一段尾巴, 不做分块并行; 进度从收方已有的字节数起算。
+			at := it.resumeAt
+			saved, err = send(it, func(n int64) { p.update(at + n) })
+		} else if chunks := planChunks(it.size, parallel); chunks != nil {
 			saved, err = sendParallel(it, chunks, sendChunk, p)
 		} else {
 			saved, err = send(it, p.update)
@@ -223,7 +254,7 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
 			humanBytes(it.size), time.Since(start).Round(time.Millisecond), rate(it.size, time.Since(start)))
 	}
-	fmt.Fprintf(os.Stderr, "done: %d file(s), %s\n", len(items), humanBytes(sentBytes))
+	fmt.Fprintf(os.Stderr, "done: %d file(s), %s%s\n", len(items)-skipped, humanBytes(sentBytes), skippedNote(skipped))
 	if quicStats != nil {
 		if s := quicStats.summary(); s != "" {
 			fmt.Fprintf(os.Stderr, "quic: %s\n", s)

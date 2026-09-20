@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -90,8 +91,8 @@ func TestClaimName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if got2 != filepath.Join(dir, "x (1).zip") {
-		t.Fatalf("got %q, want x (1).zip", got2)
+	if want := dupName(p, 1, runtime.GOOS); got2 != want {
+		t.Fatalf("got %q, want %q", got2, want)
 	}
 	os.WriteFile(got2, []byte("old"), 0o644)
 
@@ -99,8 +100,8 @@ func TestClaimName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if got3 != filepath.Join(dir, "x (2).zip") {
-		t.Fatalf("got %q, want x (2).zip", got3)
+	if want := dupName(p, 2, runtime.GOOS); got3 != want {
+		t.Fatalf("got %q, want %q", got3, want)
 	}
 	// 原文件必须原封不动。
 	if b, _ := os.ReadFile(p); string(b) != "old" {
@@ -111,8 +112,33 @@ func TestClaimName(t *testing.T) {
 	// 序号要加在整个文件名后面, 不能拆进版本号中间。
 	vp := filepath.Join(dir, "anyproxy-amd64-v2.1")
 	os.WriteFile(vp, []byte("old"), 0o644)
-	if got, err := claimName(vp); err != nil || got != filepath.Join(dir, "anyproxy-amd64-v2.1 (1)") {
-		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, "anyproxy-amd64-v2.1 (1)")
+	if got, err := claimName(vp); err != nil || got != dupName(vp, 1, runtime.GOOS) {
+		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, dupName(vp, 1, runtime.GOOS))
+	}
+}
+
+// 重名后缀按收方系统习惯命名; 这里直接传 goos, 三个平台的规则在任何系统上都能测。
+func TestDupName(t *testing.T) {
+	cases := []struct {
+		goos, dest string
+		i          int
+		want       string
+	}{
+		{"windows", "/d/x.zip", 1, "/d/x (1).zip"},
+		{"windows", "/d/x.zip", 2, "/d/x (2).zip"},
+		{"windows", "/d/v2.1", 1, "/d/v2.1 (1)"}, // 数字后缀是版本号, 序号加在末尾
+		{"linux", "/d/x.zip", 1, "/d/x.zip.1"},
+		{"linux", "/d/x.zip", 2, "/d/x.zip.2"},
+		{"linux", "/d/v2.1", 1, "/d/v2.1.1"},
+		{"darwin", "/d/x.zip", 1, "/d/x copy.zip"},
+		{"darwin", "/d/x.zip", 2, "/d/x copy 2.zip"},
+		{"darwin", "/d/v2.1", 1, "/d/v2.1 copy"},
+		{"freebsd", "/d/x.zip", 1, "/d/x (1).zip"},
+	}
+	for _, c := range cases {
+		if got := dupName(c.dest, c.i, c.goos); got != c.want {
+			t.Errorf("dupName(%q, %d, %q) = %q, want %q", c.dest, c.i, c.goos, got, c.want)
+		}
 	}
 }
 
