@@ -34,43 +34,32 @@ func TestParseConflict(t *testing.T) {
 	}
 }
 
+// 目标名上已有完整文件时: 一致 = 改名/覆盖/跳过, 不同 = 改名/跳过; 目标名不接受续传。
 func TestDecideFixedPolicies(t *testing.T) {
 	same := conflictInfo{name: "a", where: "locally", existing: 5, incoming: 5, same: true}
-	prefix := conflictInfo{name: "a", where: "locally", existing: 3, incoming: 5, resumable: true}
 	differ := conflictInfo{name: "a", where: "locally", existing: 3, incoming: 5}
-
 	cases := []struct {
 		policy string
 		ci     conflictInfo
 		want   string
-		errSub string
 	}{
-		{ConflictRename, same, ConflictRename, ""},
-		{ConflictSkip, differ, ConflictSkip, ""},
-		{ConflictOverwrite, differ, ConflictOverwrite, ""},
-		{ConflictResume, prefix, ConflictResume, ""},
-		{ConflictResume, same, ConflictSkip, ""}, // 已经完整了: 没什么可续的
-		{ConflictResume, differ, ConflictRename, ""},
+		{ConflictRename, same, ConflictRename},
+		{ConflictSkip, differ, ConflictSkip},
+		{ConflictOverwrite, differ, ConflictOverwrite},
+		{ConflictResume, same, ConflictSkip}, // 已经完整了: 没什么可续的
+		{ConflictResume, differ, ConflictRename},
 	}
 	for _, c := range cases {
 		r, _ := newTestResolver(c.policy, "")
 		got, err := r.decide(c.ci)
-		if c.errSub != "" {
-			if err == nil || !strings.Contains(err.Error(), c.errSub) {
-				t.Errorf("policy %s: want error containing %q, got %v", c.policy, c.errSub, err)
-			}
-			continue
-		}
 		if err != nil || got != c.want {
-			t.Errorf("policy %s: got %q, %v; want %q", c.policy, got, err, c.want)
+			t.Errorf("policy %s same=%v: got %q, %v; want %q", c.policy, c.ci.same, got, err, c.want)
 		}
 	}
 }
 
-// 提示里给出的选项要与用户描述的一致: 内容一致 = 改名/覆盖/跳过; 内容不同 = 续传/改名/跳过。
 func TestPromptOptions(t *testing.T) {
 	same := conflictInfo{name: "a.zip", where: "on the peer", existing: 5, incoming: 5, same: true, hash: "abcdef0123456789"}
-	prefix := conflictInfo{name: "a.zip", where: "on the peer", existing: 3, incoming: 5, resumable: true}
 	differ := conflictInfo{name: "a.zip", where: "on the peer", existing: 3, incoming: 5}
 
 	cases := []struct {
@@ -86,8 +75,8 @@ func TestPromptOptions(t *testing.T) {
 		{"same: overwrite", same, "o\n", ConflictOverwrite, false, nil, nil},
 		{"same: default is skip", same, "\n", ConflictSkip, false, nil, nil},
 		{"same: uppercase is sticky", same, "S\n", ConflictSkip, true, nil, nil},
-		{"differ, resumable: continue", prefix, "c\n", ConflictResume, false, []string{"differs", "[c]ontinue from 3B", "[r]ename", "[s]kip"}, []string{"[o]verwrite"}},
-		{"differ, not resumable: no continue", differ, "c\nr\n", ConflictRename, false, []string{"cannot continue"}, []string{"[c]ontinue"}},
+		// 目标名不接受续传, 内容不同也不提供覆盖(要覆盖用 -conflict overwrite)。
+		{"differ: only rename and skip", differ, "c\no\nr\n", ConflictRename, false, []string{"differs", "[r]ename", "[s]kip"}, []string{"[c]ontinue", "[o]verwrite"}},
 		{"garbage then answer", differ, "??\nx\ns\n", ConflictSkip, false, []string{"please answer"}, nil},
 	}
 	for _, c := range cases {
@@ -114,6 +103,27 @@ func TestPromptOptions(t *testing.T) {
 	}
 }
 
+func TestDecidePart(t *testing.T) {
+	r, _ := newTestResolver(ConflictResume, "")
+	if got, _ := r.decidePart("a", "locally", 3, 10); got != ConflictResume {
+		t.Errorf("policy resume: got %q", got)
+	}
+	for input, want := range map[string]string{"c\n": ConflictResume, "r\n": ConflictRename, "s\n": ConflictSkip, "\n": ConflictSkip} {
+		r, out := newTestResolver(ConflictAsk, input)
+		got, err := r.decidePart("a.zip", "on the peer", 3, 10)
+		if err != nil || got != want {
+			t.Errorf("input %q: got %q, %v; want %q", input, got, err, want)
+		}
+		if !strings.Contains(out.String(), "interrupted transfer") || !strings.Contains(out.String(), "[c]ontinue from 3B") {
+			t.Errorf("prompt should describe the interrupted transfer, got:\n%s", out.String())
+		}
+	}
+	r, _ = newTestResolver(ConflictAsk, "C\n")
+	if _, err := r.decidePart("a", "locally", 3, 10); err != nil || r.policy != ConflictResume {
+		t.Errorf("uppercase C should make continuing the policy, got policy %q err %v", r.policy, err)
+	}
+}
+
 func TestHashFilePrefix(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "f")
 	os.WriteFile(p, []byte("hello world"), 0o644)
@@ -132,6 +142,61 @@ func TestHashFilePrefix(t *testing.T) {
 	}
 	if _, err := hashFilePrefix(p, 12); err == nil {
 		t.Fatal("asking for more bytes than the file has must fail")
+	}
+}
+
+// ---------- .part 的识别 ----------
+
+const testTok = "0123456789abcdef"
+
+func TestPartNameOK(t *testing.T) {
+	good := []string{"x.zip." + testTok + ".part"}
+	bad := []string{
+		"x.zip.part",                                  // 没有 token
+		"x.zip." + testTok[:8] + ".part",              // token 太短
+		"x.zip." + strings.ToUpper(testTok) + ".part", // 只认小写十六进制
+		"x.zip." + testTok + ".chunks.part",           // 分块传输的 .part 不能续
+		"y.zip." + testTok + ".part",                  // 别的目标名的
+		"../x.zip." + testTok + ".part",               // 带目录
+		"x.zip." + testTok + ".txt",                   // 后缀不对
+		"x.zip.zzzzzzzzzzzzzzzz.part",                 // 不是十六进制
+	}
+	for _, n := range good {
+		if !partNameOK("x.zip", n) {
+			t.Errorf("%q should be accepted", n)
+		}
+	}
+	for _, n := range bad {
+		if partNameOK("x.zip", n) {
+			t.Errorf("%q must be rejected", n)
+		}
+	}
+}
+
+func TestFindResumablePart(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "x.bin")
+	mk := func(tok, body string) string {
+		p := dest + "." + tok + ".part"
+		writeFile(t, p, body)
+		return p
+	}
+	small := mk("1111111111111111", "ab")
+	big := mk("2222222222222222", "abcdef")
+	mk("3333333333333333", "")                                    // 空的: 没有续传价值
+	mk("4444444444444444", "abcdefghijklmnop")                    // 比来件还长
+	writeFile(t, dest+".5555555555555555.chunks.part", "abcdefg") // 分块的
+	writeFile(t, filepath.Join(dir, "other.bin."+testTok+".part"), "abcdefg")
+
+	p, size := findResumablePart(dest, 10)
+	if p != big || size != 6 {
+		t.Fatalf("got %q (%d), want the longest usable part %q", p, size, big)
+	}
+	// 正在被写的不能接管。
+	activeParts.Store(big, struct{}{})
+	defer activeParts.Delete(big)
+	if p, _ := findResumablePart(dest, 10); p != small {
+		t.Fatalf("a part in use must be skipped, got %q", p)
 	}
 }
 
@@ -194,67 +259,108 @@ func readFileStr(t *testing.T, path string) string {
 
 func exists(path string) bool { _, err := os.Stat(path); return err == nil }
 
-func TestConflictSendRelay(t *testing.T) {
-	const src = "0123456789" // 来件
-	cases := []struct {
-		name      string
-		existing  string
-		policy    string
-		input     string // 提示时的输入
-		wantDest  string // 收方 x.txt 最后的内容
-		wantDup   string // 改名文件的内容, 空表示不应有
-		wantErr   string
-		wantLeft  bool // 收方目录里不应残留任何 .part
-		unchanged bool
-	}{
-		{name: "identical, skip", existing: src, policy: ConflictSkip, wantDest: src},
-		{name: "identical, rename", existing: src, policy: ConflictRename, wantDest: src, wantDup: src},
-		{name: "identical, overwrite", existing: src, policy: ConflictOverwrite, wantDest: src},
-		{name: "identical, resume means already complete", existing: src, policy: ConflictResume, wantDest: src},
-		{name: "prefix, resume", existing: "01234", policy: ConflictResume, wantDest: src},
-		{name: "differs, resume -> rename", existing: "abcde", policy: ConflictResume, wantDest: "abcde", wantDup: src},
-		{name: "existing larger, resume -> rename", existing: src + "extra", policy: ConflictResume, wantDest: src + "extra", wantDup: src},
-		{name: "differs, overwrite", existing: "abcde", policy: ConflictOverwrite, wantDest: src},
-		{name: "differs, skip", existing: "abcde", policy: ConflictSkip, wantDest: "abcde"},
-		{name: "ask: continue", existing: "01234", policy: ConflictAsk, input: "c\n", wantDest: src},
-		{name: "ask: rename", existing: "abcde", policy: ConflictAsk, input: "r\n", wantDest: "abcde", wantDup: src},
-		{name: "ask: skip", existing: "abcde", policy: ConflictAsk, input: "s\n", wantDest: "abcde"},
-		{name: "ask: identical, overwrite", existing: src, policy: ConflictAsk, input: "o\n", wantDest: src},
+// conflictCase 一个协商场景: 收方(或取件时的本机)目录里事先摆好什么, 用什么策略, 结果应当是什么。
+type conflictCase struct {
+	name     string
+	final    string // 目标名上已有的完整文件内容, 空 = 没有
+	part     string // 上次中断留下的 .part 内容, 空 = 没有
+	policy   string
+	input    string // 提示时的输入
+	wantDest string // 目标名上最后的内容, 空 = 不应存在
+	wantDup  string // 改名文件的内容, 空 = 不应有
+	wantPart bool   // 事先摆好的 .part 是否应仍在(没被接管)
+}
+
+const convSrc = "0123456789" // 来件
+
+func conflictCases() []conflictCase {
+	src := convSrc
+	return []conflictCase{
+		// 目标名上已有完整文件
+		{name: "identical, skip", final: src, policy: ConflictSkip, wantDest: src},
+		{name: "identical, rename", final: src, policy: ConflictRename, wantDest: src, wantDup: src},
+		{name: "identical, overwrite", final: src, policy: ConflictOverwrite, wantDest: src},
+		{name: "identical, resume means already complete", final: src, policy: ConflictResume, wantDest: src},
+		{name: "differs, resume never continues the final name -> rename", final: "abcde", policy: ConflictResume, wantDest: "abcde", wantDup: src},
+		{name: "differs prefix, final name still not resumed -> rename", final: "01234", policy: ConflictResume, wantDest: "01234", wantDup: src},
+		{name: "differs, overwrite", final: "abcde", policy: ConflictOverwrite, wantDest: src},
+		{name: "differs, skip", final: "abcde", policy: ConflictSkip, wantDest: "abcde"},
+		{name: "ask: differs, rename", final: "abcde", policy: ConflictAsk, input: "r\n", wantDest: "abcde", wantDup: src},
+		{name: "ask: differs, skip", final: "abcde", policy: ConflictAsk, input: "s\n", wantDest: "abcde"},
+		{name: "ask: identical, overwrite", final: src, policy: ConflictAsk, input: "o\n", wantDest: src},
+		// 中断留下的 .part
+		{name: "part, resume", part: "01234", policy: ConflictResume, wantDest: src},
+		{name: "part, ask continue", part: "01234", policy: ConflictAsk, input: "c\n", wantDest: src},
+		{name: "part, ask restart", part: "01234", policy: ConflictAsk, input: "r\n", wantDest: src, wantPart: true},
+		{name: "part, ask skip", part: "01234", policy: ConflictAsk, input: "s\n", wantPart: true},
+		{name: "part with other content is not resumed", part: "abcde", policy: ConflictResume, wantDest: src, wantPart: true},
+		{name: "part longer than the file is ignored", part: src + "more", policy: ConflictResume, wantDest: src, wantPart: true},
+		{name: "part, resume, final differs -> finished part is renamed, final untouched", final: "abcde", part: "01234", policy: ConflictResume, wantDest: "abcde", wantDup: src},
+		{name: "part, ask, final differs: rename then continue", final: "abcde", part: "01234", policy: ConflictAsk, input: "r\nc\n", wantDest: "abcde", wantDup: src},
+		{name: "part, overwrite ignores it", part: "01234", policy: ConflictOverwrite, wantDest: src, wantPart: true},
+		{name: "part, rename policy ignores it", part: "01234", policy: ConflictRename, wantDest: src, wantPart: true},
 	}
-	for _, c := range cases {
+}
+
+func checkConflictCase(t *testing.T, c conflictCase, dir string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	dest := filepath.Join(dir, "x.txt")
+	if c.wantDest == "" {
+		if exists(dest) {
+			t.Fatalf("x.txt should not exist, has %q", readFileStr(t, dest))
+		}
+	} else if got := readFileStr(t, dest); got != c.wantDest {
+		t.Fatalf("x.txt = %q, want %q", got, c.wantDest)
+	}
+	dup := dupName(dest, 1, runtime.GOOS)
+	if c.wantDup == "" {
+		if exists(dup) {
+			t.Fatalf("unexpected renamed copy %s", dup)
+		}
+	} else if got := readFileStr(t, dup); got != c.wantDup {
+		t.Fatalf("renamed copy = %q, want %q", got, c.wantDup)
+	}
+	// 事先摆好的 .part: 被续传接管就应该没了(已改成目标名), 否则原样还在。
+	partPath := dest + "." + testTok + ".part"
+	if c.part != "" {
+		if c.wantPart {
+			if got := readFileStr(t, partPath); got != c.part {
+				t.Fatalf("the untouched .part changed to %q", got)
+			}
+		} else if exists(partPath) {
+			t.Fatalf("the resumed .part should be gone, it was renamed to the target")
+		}
+	}
+	// 除了事先摆好的那个, 不该留下别的 .part。
+	all, _ := filepath.Glob(filepath.Join(dir, "*"+filePartSuffix))
+	for _, p := range all {
+		if p != partPath {
+			t.Fatalf("unexpected left-over .part: %s", p)
+		}
+	}
+}
+
+func TestConflictSendRelay(t *testing.T) {
+	for _, c := range conflictCases() {
 		t.Run(c.name, func(t *testing.T) {
 			rig := newConflictRig(t)
-			writeFile(t, filepath.Join(rig.dirC, "x.txt"), c.existing)
+			dest := filepath.Join(rig.dirC, "x.txt")
+			if c.final != "" {
+				writeFile(t, dest, c.final)
+			}
+			if c.part != "" {
+				writeFile(t, dest+"."+testTok+".part", c.part)
+			}
 			local := filepath.Join(t.TempDir(), "x.txt")
-			writeFile(t, local, src)
+			writeFile(t, local, convSrc)
 			if c.input != "" {
 				setConflictInput(t, c.input)
 			}
-
 			err := SendFiles(rig.cfgA, "c@example.com", []string{local}, ViaRelay, 1, c.policy)
-			if c.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
-					t.Fatalf("want error containing %q, got %v", c.wantErr, err)
-				}
-			} else if err != nil {
-				t.Fatalf("send: %v", err)
-			}
-
-			dest := filepath.Join(rig.dirC, "x.txt")
-			if got := readFileStr(t, dest); got != c.wantDest {
-				t.Fatalf("x.txt = %q, want %q", got, c.wantDest)
-			}
-			dup := dupName(dest, 1, runtime.GOOS)
-			if c.wantDup == "" {
-				if exists(dup) {
-					t.Fatalf("unexpected renamed copy %s", dup)
-				}
-			} else if got := readFileStr(t, dup); got != c.wantDup {
-				t.Fatalf("renamed copy = %q, want %q", got, c.wantDup)
-			}
-			if parts, _ := filepath.Glob(filepath.Join(rig.dirC, "*"+filePartSuffix)); len(parts) != 0 {
-				t.Fatalf("left-over .part files: %v", parts)
-			}
+			checkConflictCase(t, c, rig.dirC, err)
 		})
 	}
 }
@@ -278,11 +384,11 @@ func TestConflictSendStickyAnswer(t *testing.T) {
 	}
 }
 
-// 没有同名文件时协商不该多出任何副作用, 也不该要求收方授权。
+// 没有同名文件、也没有 .part 时协商不该多出任何副作用。
 func TestConflictSendNoConflict(t *testing.T) {
 	for _, policy := range []string{ConflictAsk, ConflictSkip, ConflictResume, ConflictOverwrite} {
 		t.Run(policy, func(t *testing.T) {
-			rig := newConflictRig(t) // 未授权覆盖: 没冲突的文件照样要能收
+			rig := newConflictRig(t)
 			local := filepath.Join(t.TempDir(), "fresh.txt")
 			writeFile(t, local, "fresh")
 			if policy == ConflictAsk {
@@ -295,6 +401,65 @@ func TestConflictSendNoConflict(t *testing.T) {
 				t.Fatalf("got %q", got)
 			}
 		})
+	}
+}
+
+// 传到一半断线: 收方保留 .part, 下一次就能从断点续传, 最终内容与来件一致。
+func TestInterruptedSendCanBeResumed(t *testing.T) {
+	rig := newConflictRig(t)
+	body := strings.Repeat("0123456789", 100000) // 1MB
+	local := filepath.Join(t.TempDir(), "big.bin")
+	writeFile(t, local, body)
+
+	// 用底层接口模拟中断: 首部声明整份大小, 只发一半就断开(不发尾部摘要)。
+	client, err := dialSender(conf.WsClient{Connect: rig.connect, User: "a", Pass: testPassA, Email: "a@example.com", UUID: testUUIDA}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, err := openRelayConn(client.client, "c@example.com", "")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	half := len(body) / 2
+	if err := writeFrame(conn, fileHead{Name: "big.bin", Size: int64(len(body)), Mode: 0o644}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte(body[:half])); err != nil {
+		t.Fatal(err)
+	}
+	// 发送方整个掉线(进程被杀/断网): 服务端 B 发现后通知收方, 收方才知道这次传输断了。
+	client.close()
+
+	// 等收方把断掉的这条收尾, 留下 .part。
+	var parts []string
+	for i := 0; i < 100 && len(parts) == 0; i++ {
+		parts, _ = filepath.Glob(filepath.Join(rig.dirC, "big.bin.*"+filePartSuffix))
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(parts) != 1 {
+		t.Fatalf("the interrupted transfer should leave exactly one .part, got %v", parts)
+	}
+	if exists(filepath.Join(rig.dirC, "big.bin")) {
+		t.Fatal("an interrupted transfer must not create the target name")
+	}
+	// 收方要等服务端的断线通知才放开这个 .part(此前它仍算「正在写」, 不能被接管)。
+	var got string
+	for i := 0; i < 100 && got == ""; i++ {
+		got, _ = findResumablePart(filepath.Join(rig.dirC, "big.bin"), int64(len(body)))
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got == "" {
+		t.Fatal("the interrupted .part never became resumable")
+	}
+
+	if err := SendFiles(rig.cfgA, "c@example.com", []string{local}, ViaRelay, 1, ConflictResume); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if got := readFileStr(t, filepath.Join(rig.dirC, "big.bin")); got != body {
+		t.Fatalf("resumed file differs from the source (%d vs %d bytes)", len(got), len(body))
+	}
+	if exists(parts[0]) {
+		t.Fatal("the .part should have been renamed to the target")
 	}
 }
 
@@ -322,94 +487,176 @@ func TestProbeUnsupportedFallsBack(t *testing.T) {
 // ---------- 端到端: -recv 经中继 ----------
 
 func TestConflictRecvRelay(t *testing.T) {
-	const remote = "0123456789"
-	cases := []struct {
-		name     string
-		local    string
-		policy   string
-		input    string
-		wantDest string
-		wantDup  string
-	}{
-		{"identical, skip", remote, ConflictSkip, "", remote, ""},
-		{"identical, rename", remote, ConflictRename, "", remote, remote},
-		{"identical, overwrite", remote, ConflictOverwrite, "", remote, ""},
-		{"identical, resume is complete", remote, ConflictResume, "", remote, ""},
-		{"prefix, resume", "01234", ConflictResume, "", remote, ""},
-		{"differs, resume -> rename", "abcde", ConflictResume, "", "abcde", remote},
-		{"differs, overwrite", "abcde", ConflictOverwrite, "", remote, ""},
-		{"local larger, resume -> rename", remote + "zz", ConflictResume, "", remote + "zz", remote},
-		{"ask: continue", "01234", ConflictAsk, "c\n", remote, ""},
-		{"ask: rename", "abcde", ConflictAsk, "r\n", "abcde", remote},
-		{"ask: skip", "abcde", ConflictAsk, "s\n", "abcde", ""},
-	}
-	for _, c := range cases {
+	for _, c := range conflictCases() {
 		t.Run(c.name, func(t *testing.T) {
-
 			rig := newConflictRig(t)
-			writeFile(t, filepath.Join(rig.dirC, "x.txt"), remote)
+			writeFile(t, filepath.Join(rig.dirC, "x.txt"), convSrc) // C 共享的来件
 			local := t.TempDir()
-			writeFile(t, filepath.Join(local, "x.txt"), c.local)
+			dest := filepath.Join(local, "x.txt")
+			if c.final != "" {
+				writeFile(t, dest, c.final)
+			}
+			if c.part != "" {
+				writeFile(t, dest+"."+testTok+".part", c.part)
+			}
 			if c.input != "" {
 				setConflictInput(t, c.input)
 			}
-			if err := RecvFiles(rig.cfgA, "c@example.com:x.txt", local, ViaRelay, 1, c.policy); err != nil {
-				t.Fatalf("recv: %v", err)
-			}
-			dest := filepath.Join(local, "x.txt")
-			if got := readFileStr(t, dest); got != c.wantDest {
-				t.Fatalf("x.txt = %q, want %q", got, c.wantDest)
-			}
-			dup := dupName(dest, 1, runtime.GOOS)
-			if c.wantDup == "" {
-				if exists(dup) {
-					t.Fatalf("unexpected renamed copy %s", dup)
-				}
-			} else if got := readFileStr(t, dup); got != c.wantDup {
-				t.Fatalf("renamed copy = %q, want %q", got, c.wantDup)
-			}
-			if parts, _ := filepath.Glob(filepath.Join(local, "*"+filePartSuffix)); len(parts) != 0 {
-				t.Fatalf("left-over .part files: %v", parts)
-			}
+			err := RecvFiles(rig.cfgA, "c@example.com:x.txt", local, ViaRelay, 1, c.policy)
+			checkConflictCase(t, c, local, err)
 		})
 	}
 }
 
-// ---------- 收方落盘: 续传失败要回滚 / 分块覆盖 ----------
+// ---------- 收方落盘 ----------
 
-func TestResumeIncomingRollsBack(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "r.bin")
-	writeFile(t, dest, "01234")
-	head := fileHead{Name: "r.bin", Size: 5, Offset: 5, Conflict: ConflictResume}
-
-	// 尾部摘要不对: 已有文件必须回到原来的 5 字节。
-	var wire bytes.Buffer
-	wire.WriteString("56789")
-	if err := writeFrame(&wire, fileTrailer{SHA256: "deadbeef"}); err != nil {
-		t.Fatal(err)
+func TestResumeIncoming(t *testing.T) {
+	newHead := func(dest, part string, offset int64, size int) fileHead {
+		return fileHead{Name: filepath.Base(dest), Size: int64(size), Offset: offset, Conflict: ConflictResume, ResumePart: part}
 	}
-	if _, err := resumeIncoming(dest, &wire, head); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
-		t.Fatalf("want a checksum error, got %v", err)
+	wire := func(tail, sum string) *bytes.Buffer {
+		var w bytes.Buffer
+		w.WriteString(tail)
+		if sum != "" {
+			if err := writeFrame(&w, fileTrailer{SHA256: sum}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return &w
 	}
-	if got := readFileStr(t, dest); got != "01234" {
-		t.Fatalf("existing file = %q after a failed resume, want it rolled back", got)
-	}
-
-	// 中途断了(只到 3 字节): 同样回滚。
-	if _, err := resumeIncoming(dest, strings.NewReader("567"), head); err == nil {
-		t.Fatal("a truncated resume must fail")
-	}
-	if got := readFileStr(t, dest); got != "01234" {
-		t.Fatalf("existing file = %q after a truncated resume", got)
+	tailSum := func(s string) string {
+		p := filepath.Join(t.TempDir(), "s")
+		writeFile(t, p, s)
+		h, _ := hashFilePrefix(p, int64(len(s)))
+		return h
 	}
 
-	// 文件在协商之后变了长度: 不续。
-	writeFile(t, dest, "0123456")
-	if _, err := resumeIncoming(dest, strings.NewReader("56789"), head); err == nil || !strings.Contains(err.Error(), "changed") {
-		t.Fatalf("want a 'changed' error, got %v", err)
+	t.Run("completes and renames to the target", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		partName := "r.bin." + testTok + ".part"
+		writeFile(t, dest+"."+testTok+".part", "01234")
+		final, err := resumeIncoming(dest, wire("56789", tailSum("56789")), newHead(dest, partName, 5, 5))
+		if err != nil || final != dest {
+			t.Fatalf("got %q, %v", final, err)
+		}
+		if got := readFileStr(t, dest); got != "0123456789" {
+			t.Fatalf("target = %q", got)
+		}
+		if exists(dest + "." + testTok + ".part") {
+			t.Fatal(".part should be gone")
+		}
+	})
+
+	t.Run("never overwrites an existing target", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		writeFile(t, dest, "precious")
+		writeFile(t, dest+"."+testTok+".part", "01234")
+		final, err := resumeIncoming(dest, wire("56789", tailSum("56789")), newHead(dest, "r.bin."+testTok+".part", 5, 5))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final == dest || readFileStr(t, dest) != "precious" {
+			t.Fatalf("the existing target must be untouched, saved as %q", final)
+		}
+		if readFileStr(t, final) != "0123456789" {
+			t.Fatalf("finished file = %q", readFileStr(t, final))
+		}
+	})
+
+	t.Run("bad tail checksum truncates back and keeps the part", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		part := dest + "." + testTok + ".part"
+		writeFile(t, part, "01234")
+		_, err := resumeIncoming(dest, wire("56789", "deadbeef"), newHead(dest, "r.bin."+testTok+".part", 5, 5))
+		if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+			t.Fatalf("want a checksum error, got %v", err)
+		}
+		if got := readFileStr(t, part); got != "01234" {
+			t.Fatalf(".part = %q, want it back at its original content", got)
+		}
+		if exists(dest) {
+			t.Fatal("the target must not be created")
+		}
+	})
+
+	t.Run("a dropped connection keeps what arrived", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		part := dest + "." + testTok + ".part"
+		writeFile(t, part, "01234")
+		if _, err := resumeIncoming(dest, strings.NewReader("567"), newHead(dest, "r.bin."+testTok+".part", 5, 5)); err == nil {
+			t.Fatal("a truncated resume must fail")
+		}
+		if got := readFileStr(t, part); got != "01234567" {
+			t.Fatalf(".part = %q, want the received bytes kept so the next run can continue", got)
+		}
+		if exists(dest) {
+			t.Fatal("the target must not be created")
+		}
+	})
+
+	t.Run("refuses when the part changed size", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		part := dest + "." + testTok + ".part"
+		writeFile(t, part, "0123456")
+		_, err := resumeIncoming(dest, wire("56789", tailSum("56789")), newHead(dest, "r.bin."+testTok+".part", 5, 5))
+		if err == nil || !strings.Contains(err.Error(), "changed") {
+			t.Fatalf("want a 'changed' error, got %v", err)
+		}
+		if got := readFileStr(t, part); got != "0123456" {
+			t.Fatalf("a refused resume must not touch the part, got %q", got)
+		}
+	})
+
+	t.Run("refuses names that are not this target's part", func(t *testing.T) {
+		dir := t.TempDir()
+		dest := filepath.Join(dir, "r.bin")
+		writeFile(t, filepath.Join(dir, "victim.txt"), "secret")
+		for _, name := range []string{"victim.txt", "../victim.txt", "r.bin.part", ""} {
+			if _, err := resumeIncoming(dest, wire("x", ""), newHead(dest, name, 6, 1)); err == nil {
+				t.Errorf("resume part %q must be refused", name)
+			}
+		}
+		if got := readFileStr(t, filepath.Join(dir, "victim.txt")); got != "secret" {
+			t.Fatalf("victim file was modified: %q", got)
+		}
+	})
+
+	t.Run("refuses a part that is being written", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		part := dest + "." + testTok + ".part"
+		writeFile(t, part, "01234")
+		activeParts.Store(part, struct{}{})
+		defer activeParts.Delete(part)
+		if _, err := resumeIncoming(dest, wire("56789", tailSum("56789")), newHead(dest, "r.bin."+testTok+".part", 5, 5)); err == nil {
+			t.Fatal("a part in use must not be taken over")
+		}
+	})
+}
+
+// 传输中断时已收到的部分要留在 .part 里(续传的前提); 一个字节都没收到则不留。
+func TestInterruptedReceiveKeepsPart(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "a.bin")
+	if _, _, err := writeIncoming(dest, strings.NewReader("abc"), fileHead{Name: "a.bin", Size: 10}); err == nil {
+		t.Fatal("a short body must fail")
 	}
-	if got := readFileStr(t, dest); got != "0123456" {
-		t.Fatalf("a refused resume must not touch the file, got %q", got)
+	parts, _ := filepath.Glob(dest + ".*" + filePartSuffix)
+	if len(parts) != 1 || readFileStr(t, parts[0]) != "abc" {
+		t.Fatalf("want one .part holding the received bytes, got %v", parts)
+	}
+	if !partNameOK("a.bin", filepath.Base(parts[0])) {
+		t.Fatalf("the kept part %q must be recognisable as resumable", filepath.Base(parts[0]))
+	}
+	if exists(dest) {
+		t.Fatal("no target on a failed transfer")
+	}
+
+	empty := filepath.Join(dir, "e.bin")
+	if _, _, err := writeIncoming(empty, strings.NewReader(""), fileHead{Name: "e.bin", Size: 10}); err == nil {
+		t.Fatal("an empty body must fail")
+	}
+	if left, _ := filepath.Glob(empty + ".*" + filePartSuffix); len(left) != 0 {
+		t.Fatalf("an empty .part is useless and must be removed: %v", left)
 	}
 }
 

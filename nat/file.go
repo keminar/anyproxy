@@ -87,9 +87,11 @@ type fileHead struct {
 	Offset     int64  `json:"off,omitempty"`
 
 	// Conflict 同名文件已存在时发送方要求的处理: 空是默认(收方自动改名保存, 见 claimName),
-	// "overwrite" 覆盖, "resume" 从 Offset 起续写(此时 Size 是剩余字节数、TransferID 为空)。
-	// 后两者会改动收方已有文件, 由发送方的使用者在协商时明确选择(见 file_conflict.go)。
-	Conflict string `json:"conflict,omitempty"`
+	// "overwrite" 覆盖已有文件(由使用者在协商时明确选择), "resume" 接着上次中断留下的 .part
+	// (ResumePart, 不含目录)从 Offset 处续写, 收全后再改成目标名(此时 Size 是剩余字节数、TransferID
+	// 为空)。目标名上的完整文件不接受续传。见 file_conflict.go。
+	Conflict   string `json:"conflict,omitempty"`
+	ResumePart string `json:"resumePart,omitempty"`
 
 	// Probe 表示这不是一次传输, 只是探测收方有没有同名文件(见 file_conflict.go)。ProbeSize
 	// 是来件大小(Size 留 0, 见 probeOver), ProbeNoHash 表示不用算哈希。
@@ -234,7 +236,7 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 	if opts.local {
 		head.Conflict = opts.conflict
 		if head.Conflict == ConflictResume {
-			head.Offset = opts.resumeAt
+			head.Offset, head.ResumePart = opts.resumeAt, opts.resumePart
 		}
 	}
 	// 探测(见 file_conflict.go): 只回 stat/哈希, 不接收任何数据。
@@ -272,15 +274,21 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 
 	start := time.Now()
 
-	// 标记, 对不存在的目标同样只是普通传输)。
-	// 标记, 不能让没有冲突的文件也因为收方没授权而被拒)。
+	// 覆盖: 目标不存在时就是一次普通传输(-conflict overwrite 不探测、对每个文件都带这个
+	// 标记)。
 	if head.Conflict == ConflictOverwrite {
 		if _, statErr := os.Lstat(dest); statErr != nil {
 			head.Conflict = ""
 		}
 	}
 	if head.Conflict != "" {
-		saved, err := writeModify(dest, conn, head)
+		var saved string
+		var err error
+		if head.Conflict == ConflictResume {
+			saved, err = resumeIncoming(dest, conn, head)
+		} else {
+			saved, err = writeOverwrite(dest, conn, head)
+		}
 		if err != nil {
 			reply(fileReply{Err: err.Error()})
 			return
@@ -411,7 +419,7 @@ func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly,
 	// 如果新旧两次都写同名的 xxx.part, 新的这次收完文件、改名时会因为旧 goroutine
 	// 还占着那个文件而报 "being used by another process"(哪怕数据本身完全收对了)。
 	// 每次传输用自己的 TransferID 单独占一个 .part 文件名, 这类撞名从根上就不会发生。
-	part := final + "." + tid + filePartSuffix
+	part := final + "." + tid + ".chunks" + filePartSuffix
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, filePerm(head.Mode))
 	if err != nil {
 		if claimed {
@@ -776,8 +784,9 @@ type fileItem struct {
 
 	// 同名协商的结果(见 file_conflict.go): conflict 为空按默认(收方改名); resumeAt 仅
 	// conflict=="resume" 时有意义, 是收方已有的字节数、也是本次从哪儿开始发。
-	conflict string
-	resumeAt int64
+	conflict   string
+	resumePart string // 续传时收方 .part 的文件名
+	resumeAt   int64
 }
 
 // collectFiles 展开命令行给的路径。目录会递归进去, 相对名以该目录本身为根 ——
@@ -997,7 +1006,7 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 	if err := writeFrame(conn, fileHead{
 		Name: it.name, Size: length, Mode: it.mode,
 		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset,
-		Conflict: it.conflict,
+		Conflict: it.conflict, ResumePart: it.resumePart,
 	}); err != nil {
 		return "", fmt.Errorf("send head: %w", err)
 	}

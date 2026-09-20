@@ -191,10 +191,10 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(entries), e.Name)
 
 		// 同名协商放在进度条之前: 它要向用户提问, 进度条的定时重绘会把提示冲掉。
-		act, resumeAt := ConflictRename, int64(0)
+		plan := pullPlan{act: ConflictRename}
 		if res.policy != ConflictRename {
 			var perr error
-			act, resumeAt, perr = res.preparePull(dir, e, func(n int64) (string, error) {
+			plan, perr = res.preparePull(dir, e, func(n int64) (string, error) {
 				hc, err := openPull()
 				if err != nil {
 					return "", err
@@ -205,13 +205,14 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 			if perr != nil {
 				return fmt.Errorf("%s: %w", e.Name, perr)
 			}
-			if act == ConflictSkip {
-				fmt.Fprintf(os.Stderr, "%s -> skipped (already exists)\n", prefix)
+			if plan.act == ConflictSkip {
+				fmt.Fprintf(os.Stderr, "%s -> skipped\n", prefix)
 				skipped++
 				continue
 			}
 		}
 		p := newProgress(prefix, e.Size)
+		act, resumeAt := plan.act, plan.resumeAt
 
 		var saved string
 		var err error
@@ -219,7 +220,7 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 			// 续传只取一段尾巴, 不做分块并行; 进度从已有的字节数起算。
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
-				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, act, resumeAt)
+				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, plan)
 				conn.Close()
 			}
 		} else if chunks := planChunks(e.Size, parallel); chunks != nil {
@@ -227,7 +228,7 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 		} else {
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
-				saved, err = pullFileAct(conn, dir, e, from, remote, logf, p.update, act, 0)
+				saved, err = pullFileAct(conn, dir, e, from, remote, logf, p.update, plan)
 				conn.Close()
 			}
 		}

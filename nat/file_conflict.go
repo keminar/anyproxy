@@ -12,23 +12,26 @@ import (
 	"time"
 )
 
-// 同名文件的协商。
+// 同名文件与断点续传的协商。
 //
-// 落盘的一侧(收方)发现目标已存在时, 默认做法是自动改名保存(见 dupName/claimName), 不碰
-// 已有文件。这里在此之上让**人**来决定: 先比对内容(SHA-256), 再问是改名重传、覆盖、续传
-// 还是跳过。
+// 两件互相独立的事, 都发生在真正传数据之前:
 //
-//	内容一致:   改名重传 / 覆盖 / 跳过
-//	内容不同:   续传(已有文件恰好是新文件的开头一段时) / 改名重传 / 跳过
+//  1. 目标文件名已存在(收方已经有一份完整的同名文件): 先比对内容(SHA-256), 再问怎么办。
+//     内容一致:  改名重传 / 覆盖 / 跳过
+//     内容不同:  改名重传 / 跳过
+//     「改名」指新传的文件换个名字保存(见 dupName/claimName), 已有文件原封不动。目标文件名
+//     **不接受续传**: 传输总是先写 .part、收全并校验后才改成目标名, 目标名上的一定是完整文件。
 //
-// 「改名」指的是新传的文件换一个名字保存, 已有文件原封不动; 覆盖/续传才会改动已有文件, 且
-// 只在使用者明确选择时发生(allow 名单里的发送方本来就有写这个目录的权限, 不再单设开关)。
+//  2. 上次中断的传输留下了 .part 临时文件(x.zip.<16位十六进制>.part): 如果它恰好是新文件的
+//     开头一段(哈希核对过), 可以从断点续传, 收完再改成目标名(重名时照常走 claimName 改名, 不覆盖)。
 //
-// 协商发生在真正传数据之前:
+// 覆盖会改动收方已有的文件, 只在使用者明确选择时发生(allow 名单里的发送方本来就有写这个
+// 目录的权限, 不再单设开关)。
 //
-//	-send: 先开一条只带 fileHead{Probe} 的流探一下(收方回 stat 结果, 必要时再回已有文件的
-//	       哈希), 发送方在本地比对、问用户, 再带着决定(fileHead.Conflict)发数据。
-//	-recv: 本机自己 stat, 需要对端哈希时用 pull 的 "hash" 操作取, 决定通过 recvOpts 传给落盘逻辑。
+//	-send: 先开一条只带 fileHead{Probe} 的流探一下(收方回目标名与可续传 .part 的情况, 必要时
+//	       再回哈希), 发送方在本地比对、问用户, 再带着决定(fileHead.Conflict)发数据。
+//	-recv: 本机自己 stat/找 .part, 需要对端哈希时用 pull 的 "hash" 操作取, 决定通过 recvOpts
+//	       传给落盘逻辑。
 
 // 同名冲突的处理方式, 同时也是命令行 -conflict 的取值。
 const (
@@ -36,7 +39,7 @@ const (
 	ConflictRename    = "rename"    // 自动改名保存, 不问不探测(非交互时的默认, 也是旧版行为)
 	ConflictOverwrite = "overwrite" // 覆盖
 	ConflictSkip      = "skip"      // 跳过
-	ConflictResume    = "resume"    // 能续传就续传(内容一致则视为已完成、跳过), 不能续传就改名
+	ConflictResume    = "resume"    // 有可续传的 .part 就续传; 目标名上已有一致的完整文件则跳过, 内容不同则改名
 )
 
 // ParseConflict 校验 -conflict 的取值。空串交给调用方按环境决定默认。
@@ -51,42 +54,52 @@ func ParseConflict(s string) (string, error) {
 const probeVersion = 1
 
 // probeAckTimeout 等收方回第一帧(只是一次 stat, 应当立刻回)的上限。老版本收方看不懂
-// Probe、不会回这一帧, 超时后按"对端不支持"退回旧的自动改名。哈希那一帧不受此限——
-// 对端要把整个已有文件读一遍, 大文件要很久。
+// Probe、不会回这一帧, 超时后按"对端不支持"退回旧的自动改名。哈希那几帧不受此限——
+// 对端要把整个文件读一遍, 大文件要很久。
 var probeAckTimeout = 10 * time.Second
 
 // errProbeUnsupported 对端没有按协议回应探测(多半是老版本)。
 var errProbeUnsupported = errors.New("peer does not support the same-name check")
 
-// fileProbe 收方对探测的应答, 两帧共用: 第一帧带 Exists/Size, 第二帧(仅在已有
-// 文件不比来件大时)带 SHA256。V 用来把它与老版本的 fileReply 区分开(老版本回的是
+// fileProbe 收方对探测的应答。V 用来把它与老版本的 fileReply 区分开(老版本回的是
 // {"err":...}, 没有 v)。
+//
+// 帧序: 第一帧带 Exists/Size(目标名上的完整文件)与 Part/PartSize(可续传的 .part);
+// 之后按需各一帧只带 SHA256: 先是目标名文件的(Exists 且 Size <= 来件大小时), 再是 .part 的
+// (Part 非空时)。发送方从第一帧就能知道后面还有几帧。
 type fileProbe struct {
-	V      int    `json:"v,omitempty"`
-	Err    string `json:"err,omitempty"`
-	Exists bool   `json:"exists,omitempty"`
-	Size   int64  `json:"size,omitempty"`
-	SHA256 string `json:"sha256,omitempty"`
+	V        int    `json:"v,omitempty"`
+	Err      string `json:"err,omitempty"`
+	Exists   bool   `json:"exists,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	Part     string `json:"part,omitempty"` // 可续传 .part 的文件名(不含目录)
+	PartSize int64  `json:"partSize,omitempty"`
+	SHA256   string `json:"sha256,omitempty"`
 }
 
-// probeResult 探测结果。SHA256 仅在 Exists 且 Size <= 来件大小时有值, 是收方已有文件整份的哈希。
+// probeResult 探测结果。SHA256 仅在 Exists 且 Size <= 来件大小时有值, PartSHA256 仅在 Part
+// 非空时有值, 各自是对应文件整份的哈希。
 type probeResult struct {
-	Exists bool
-	Size   int64
-	SHA256 string
+	Exists     bool
+	Size       int64
+	SHA256     string
+	Part       string
+	PartSize   int64
+	PartSHA256 string
 }
 
 // recvOpts 落盘逻辑(recvFileOver)的调用方给定的策略。
 type recvOpts struct {
-	// local 为 true 时(-recv 取件), 冲突处理由本机的决定(conflict/resumeAt)说了算, 忽略对端
-	// 首部里带的——被取的一侧无权决定本机怎么处理本机的文件。
-	local    bool
-	conflict string
-	resumeAt int64
+	// local 为 true 时(-recv 取件), 冲突处理由本机的决定(conflict/resumePart/resumeAt)说了算,
+	// 忽略对端首部里带的——被取的一侧无权决定本机怎么处理本机的文件。
+	local      bool
+	conflict   string
+	resumePart string // 续传的 .part 文件名(不含目录)
+	resumeAt   int64
 }
 
-// probeOver 在一条已建好的文件通道上探测收方是否已有同名文件, 用完即关。noHash 为 true 时
-// 只问存不存在、多大, 不让收方去算哈希。
+// probeOver 在一条已建好的文件通道上探测收方的同名文件与可续传的 .part, 用完即关。noHash 为
+// true 时只问存不存在、多大, 不让收方去算哈希(也不找 .part)。
 func probeOver(conn fileConn, it fileItem, noHash bool, notify func(string)) (*probeResult, error) {
 	defer conn.Close()
 	// Size 留 0: 老版本收方会把它当成一个空文件的首部, 等不到尾部就清理掉, 不会落下东西。
@@ -106,24 +119,34 @@ func probeOver(conn fileConn, it fileItem, noHash bool, notify func(string)) (*p
 	if p.V != probeVersion {
 		return nil, errProbeUnsupported
 	}
-	res := &probeResult{Exists: p.Exists, Size: p.Size}
-	if p.Exists && !noHash && p.Size <= it.size {
+	res := &probeResult{Exists: p.Exists, Size: p.Size, Part: p.Part, PartSize: p.PartSize}
+	readHash := func(what string) (string, error) {
 		if notify != nil {
-			notify(fmt.Sprintf("checking the existing %s on the peer...", it.name))
+			notify(fmt.Sprintf("checking the %s of %s on the peer...", what, it.name))
 		}
 		var h fileProbe
 		if err := readFrame(conn, &h, fileFrameMax); err != nil {
-			return nil, fmt.Errorf("read the peer's hash of the existing file: %w", err)
+			return "", fmt.Errorf("read the peer's hash of the %s: %w", what, err)
 		}
 		if h.Err != "" {
-			return nil, errors.New(h.Err)
+			return "", errors.New(h.Err)
 		}
-		res.SHA256 = h.SHA256
+		return h.SHA256, nil
+	}
+	if p.Exists && !noHash && p.Size <= it.size {
+		if res.SHA256, err = readHash("existing file"); err != nil {
+			return nil, err
+		}
+	}
+	if p.Part != "" {
+		if res.PartSHA256, err = readHash("interrupted transfer"); err != nil {
+			return nil, err
+		}
 	}
 	return res, nil
 }
 
-// serveProbe 收方处理一次探测: stat 目标, 回第一帧, 需要时再算哈希回第二帧。
+// serveProbe 收方处理一次探测: stat 目标名, 找可续传的 .part, 回第一帧, 再按需算哈希回后续帧。
 func serveProbe(conn io.Writer, dir string, head fileHead, logf func(string, ...interface{})) {
 	fail := func(msg string) { _ = writeFrame(conn, fileProbe{V: probeVersion, Err: msg}) }
 	dest, err := safeJoin(dir, head.Name)
@@ -131,25 +154,41 @@ func serveProbe(conn io.Writer, dir string, head fileHead, logf func(string, ...
 		fail(fmt.Sprintf("rejected name %q: %v", head.Name, err))
 		return
 	}
-	info, err := os.Stat(dest)
-	if err != nil || !info.Mode().IsRegular() {
-		// 不存在(或是个目录之类占着名字的东西, claimName 会绕开它): 对发送方来说没有可协商的。
-		_ = writeFrame(conn, fileProbe{V: probeVersion})
+	out := fileProbe{V: probeVersion}
+	if info, err := os.Stat(dest); err == nil && info.Mode().IsRegular() {
+		out.Exists, out.Size = true, info.Size()
+	} // 不存在, 或是个目录之类占着名字的东西(claimName 会绕开它): 没有可比对的
+	var partPath string
+	if !head.ProbeNoHash {
+		if p, size := findResumablePart(dest, head.ProbeSize); p != "" {
+			partPath = p
+			out.Part, out.PartSize = partName(p), size
+		}
+	}
+	if err := writeFrame(conn, out); err != nil {
 		return
 	}
-	if err := writeFrame(conn, fileProbe{V: probeVersion, Exists: true, Size: info.Size()}); err != nil {
-		return
+	// 已有文件比来件还大: 一定不同, 不必费力算哈希。
+	if out.Exists && !head.ProbeNoHash && out.Size <= head.ProbeSize {
+		sum, err := hashFilePrefix(dest, out.Size)
+		if err != nil {
+			logf("probe %s: hash: %v", head.Name, err)
+			fail("cannot read the existing file to compare")
+			return
+		}
+		if err := writeFrame(conn, fileProbe{V: probeVersion, SHA256: sum}); err != nil {
+			return
+		}
 	}
-	if head.ProbeNoHash || info.Size() > head.ProbeSize {
-		return // 已有文件比来件还大: 一定不同、也不可能续传, 不必费力算哈希
+	if partPath != "" {
+		sum, err := hashFilePrefix(partPath, out.PartSize)
+		if err != nil {
+			logf("probe %s: hash part: %v", head.Name, err)
+			fail("cannot read the interrupted transfer to compare")
+			return
+		}
+		_ = writeFrame(conn, fileProbe{V: probeVersion, SHA256: sum})
 	}
-	sum, err := hashFilePrefix(dest, info.Size())
-	if err != nil {
-		logf("probe %s: hash: %v", head.Name, err)
-		fail("cannot read the existing file to compare")
-		return
-	}
-	_ = writeFrame(conn, fileProbe{V: probeVersion, SHA256: sum})
 }
 
 // hashFilePrefix 算一个文件前 n 字节的 SHA-256。文件不足 n 字节视为出错。
@@ -172,15 +211,14 @@ func hashFilePrefix(path string, n int64) (string, error) {
 
 // ---------- 决策 ----------
 
-// conflictInfo 一次同名冲突的事实, 交给 conflictResolver 决定怎么办。
+// conflictInfo 目标名上已有完整文件的冲突事实, 交给 conflictResolver 决定怎么办。
 type conflictInfo struct {
-	name      string
-	where     string // "on the peer" / "locally", 只用于提示
-	existing  int64  // 已有文件大小
-	incoming  int64  // 来件大小
-	same      bool   // 内容完全一致
-	resumable bool   // 已有文件恰好是来件的开头一段(且更短、非空)
-	hash      string // 已有文件(或其前缀)的哈希, 仅用于展示
+	name     string
+	where    string // "on the peer" / "locally", 只用于提示
+	existing int64  // 已有文件大小
+	incoming int64  // 来件大小
+	same     bool   // 内容完全一致
+	hash     string // 已有文件的哈希, 仅用于展示
 }
 
 // conflictResolver 按策略(必要时询问用户)决定同名文件怎么处理。
@@ -213,7 +251,7 @@ func isTerminal(f *os.File) bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
-// decide 返回要对这个文件采取的动作: ConflictRename / ConflictOverwrite / ConflictSkip / ConflictResume。
+// decide 决定目标名上已有完整文件时怎么办, 返回 ConflictRename / ConflictOverwrite / ConflictSkip。
 func (r *conflictResolver) decide(ci conflictInfo) (string, error) {
 	if r.policy == ConflictAsk {
 		act, sticky, err := r.prompt(ci)
@@ -225,61 +263,65 @@ func (r *conflictResolver) decide(ci conflictInfo) (string, error) {
 		}
 		return act, nil
 	}
-	switch r.policy {
-	case ConflictOverwrite:
-		return ConflictOverwrite, nil
-	case ConflictResume:
-		switch {
-		case ci.same:
+	if r.policy == ConflictResume { // 目标名不接受续传: 一致 = 已经完整, 不同 = 另存
+		if ci.same {
 			fmt.Fprintf(r.out, "%s: already complete %s, skipping\n", ci.name, ci.where)
 			return ConflictSkip, nil
-		case ci.resumable:
-			return ConflictResume, nil
 		}
-		fmt.Fprintf(r.out, "%s: cannot resume (%s), saving under a new name\n", ci.name, noResumeReason(ci))
 		return ConflictRename, nil
 	}
-	return r.policy, nil // rename / skip
+	return r.policy, nil // rename / skip / overwrite
 }
 
-func noResumeReason(ci conflictInfo) string {
-	switch {
-	case ci.existing > ci.incoming:
-		return "the existing file is larger"
-	case ci.existing == 0:
-		return "the existing file is empty"
+// decidePart 决定发现了一个可续传的 .part 时怎么办, 返回 ConflictResume(续传) / ConflictRename
+// (放弃它、从头传) / ConflictSkip。
+func (r *conflictResolver) decidePart(name, where string, have, total int64) (string, error) {
+	if r.policy == ConflictResume {
+		return ConflictResume, nil
 	}
-	return "the existing content is not the start of the new file"
+	if r.policy != ConflictAsk {
+		return ConflictRename, nil // 其它策略下不探测 .part, 走到这里只是保险
+	}
+	fmt.Fprintf(r.out, "\nan interrupted transfer of %q was found %s: %s of %s already received, matching the start of this file.\n",
+		name, where, humanBytes(have), humanBytes(total))
+	act, sticky, err := r.ask([]option{
+		{'c', ConflictResume, fmt.Sprintf("[c]ontinue from %s", humanBytes(have))},
+		{'r', ConflictRename, "[r]estart from scratch"},
+		{'s', ConflictSkip, "[s]kip (default)"},
+	})
+	if err != nil {
+		return "", err
+	}
+	if sticky {
+		r.policy = act
+	}
+	return act, nil
 }
 
-// prompt 向用户描述冲突并读一个选择。大写字母表示对之后所有冲突都这样处理(sticky)。
+// prompt 向用户描述目标名上的冲突并读一个选择。大写字母表示对之后所有冲突都这样处理(sticky)。
 // 直接回车 = 跳过: 提示的是"已有数据可能被动到", 默认走最不具破坏性、也不多耗流量的一项。
 func (r *conflictResolver) prompt(ci conflictInfo) (act string, sticky bool, err error) {
 	fmt.Fprintf(r.out, "\n%q already exists %s (%s).\n", ci.name, ci.where, humanBytes(ci.existing))
-	type option struct {
-		key byte
-		act string
-		txt string
-	}
-	var opts []option
-	switch {
-	case ci.same:
+	opts := []option{{'r', ConflictRename, "[r]ename and transfer again"}}
+	if ci.same {
 		fmt.Fprintf(r.out, "  identical to the incoming file (sha256 %s).\n", short(ci.hash))
 		opts = append(opts, option{'o', ConflictOverwrite, "[o]verwrite"})
-		opts = append([]option{{'r', ConflictRename, "[r]ename and transfer again"}}, opts...)
-	default:
+	} else {
 		fmt.Fprintf(r.out, "  content differs from the incoming file (existing %s, incoming %s).\n",
 			humanBytes(ci.existing), humanBytes(ci.incoming))
-		if ci.resumable {
-			fmt.Fprintf(r.out, "  the existing file is exactly the first %s of the incoming one, so it can be continued.\n", humanBytes(ci.existing))
-			opts = append(opts, option{'c', ConflictResume, fmt.Sprintf("[c]ontinue from %s", humanBytes(ci.existing))})
-		} else {
-			fmt.Fprintf(r.out, "  cannot continue: %s.\n", noResumeReason(ci))
-		}
-		opts = append(opts, option{'r', ConflictRename, "[r]ename and transfer again"})
 	}
 	opts = append(opts, option{'s', ConflictSkip, "[s]kip (default)"})
+	return r.ask(opts)
+}
 
+type option struct {
+	key byte
+	act string
+	txt string
+}
+
+// ask 显示选项并读一个回答。
+func (r *conflictResolver) ask(opts []option) (act string, sticky bool, err error) {
 	var parts []string
 	for _, o := range opts {
 		parts = append(parts, o.txt)
@@ -305,8 +347,8 @@ func (r *conflictResolver) prompt(ci conflictInfo) (act string, sticky bool, err
 	}
 }
 
-// prepareSend 在发一个文件之前做同名协商, 并把决定写进 it(conflict/resumeAt)。skip 为 true
-// 表示这个文件不要发了。probe 是「在一条新通道上探测收方」的闭包(直连/中继各自实现)。
+// prepareSend 在发一个文件之前做协商, 并把决定写进 it(conflict/resumePart/resumeAt)。skip 为
+// true 表示这个文件不要发了。probe 是「在一条新通道上探测收方」的闭包(直连/中继各自实现)。
 func (r *conflictResolver) prepareSend(it *fileItem, probe func(it fileItem, noHash bool) (*probeResult, error)) (skip bool, err error) {
 	switch r.policy {
 	case ConflictRename:
@@ -317,7 +359,7 @@ func (r *conflictResolver) prepareSend(it *fileItem, probe func(it fileItem, noH
 		it.conflict = ConflictOverwrite
 		return false, nil
 	}
-	// ask / skip / resume 都要先知道有没有同名。skip 不需要比内容。
+	// ask / skip / resume 都要先探测。skip 只问有没有同名, 不比内容、不找 .part。
 	pr, err := probe(*it, r.policy == ConflictSkip)
 	if errors.Is(err, errProbeUnsupported) {
 		if !r.warnedUnsupported {
@@ -329,73 +371,127 @@ func (r *conflictResolver) prepareSend(it *fileItem, probe func(it fileItem, noH
 	if err != nil {
 		return false, err
 	}
-	if !pr.Exists {
-		return false, nil
+
+	// 第一步: 目标名上已有完整文件。
+	if pr.Exists {
+		ci := conflictInfo{name: it.name, where: "on the peer", existing: pr.Size, incoming: it.size}
+		if pr.SHA256 != "" {
+			local, err := hashFilePrefix(it.path, pr.Size)
+			if err != nil {
+				return false, fmt.Errorf("hash %s: %w", it.path, err)
+			}
+			ci.hash = local
+			ci.same = local == pr.SHA256 && pr.Size == it.size
+		}
+		act, err := r.decide(ci)
+		if err != nil {
+			return false, err
+		}
+		switch act {
+		case ConflictSkip:
+			return true, nil
+		case ConflictOverwrite:
+			it.conflict = ConflictOverwrite
+			return false, nil // 覆盖是从头重传, 不用续
+		}
 	}
-	ci := conflictInfo{name: it.name, where: "on the peer", existing: pr.Size, incoming: it.size}
-	if pr.SHA256 != "" {
-		local, err := hashFilePrefix(it.path, pr.Size)
+
+	// 第二步: 上次中断留下的 .part(前缀哈希对得上才算)。
+	if pr.Part != "" && pr.PartSize > 0 && pr.PartSize < it.size {
+		local, err := hashFilePrefix(it.path, pr.PartSize)
 		if err != nil {
 			return false, fmt.Errorf("hash %s: %w", it.path, err)
 		}
-		ci.hash = local
-		if local == pr.SHA256 {
-			ci.same = pr.Size == it.size
-			ci.resumable = pr.Size > 0 && pr.Size < it.size
+		if local == pr.PartSHA256 {
+			act, err := r.decidePart(it.name, "on the peer", pr.PartSize, it.size)
+			if err != nil {
+				return false, err
+			}
+			switch act {
+			case ConflictSkip:
+				return true, nil
+			case ConflictResume:
+				it.conflict, it.resumePart, it.resumeAt = ConflictResume, pr.Part, pr.PartSize
+			}
 		}
-	}
-	act, err := r.decide(ci)
-	if err != nil {
-		return false, err
-	}
-	switch act {
-	case ConflictSkip:
-		return true, nil
-	case ConflictOverwrite:
-		it.conflict = ConflictOverwrite
-	case ConflictResume:
-		it.conflict = ConflictResume
-		it.resumeAt = pr.Size
 	}
 	return false, nil
 }
 
-// preparePull 取一个文件之前的同名协商, 返回动作(ConflictRename 表示按默认走)与续传起点。
-// 本机没有同名文件时直接返回默认动作。remoteHash 取对端文件前 n 字节的哈希。
-func (r *conflictResolver) preparePull(dir string, e filePullEntry, remoteHash func(n int64) (string, error)) (act string, resumeAt int64, err error) {
+// pullPlan 取一个文件之前协商出的做法。
+type pullPlan struct {
+	act        string // ConflictRename(按默认走) / ConflictOverwrite / ConflictResume / ConflictSkip
+	resumePart string // act 为 ConflictResume 时: 本机 .part 的文件名
+	resumeAt   int64
+}
+
+// preparePull 取一个文件之前的协商。本机没有冲突时返回默认做法。remoteHash 取对端文件前 n 字节的哈希。
+func (r *conflictResolver) preparePull(dir string, e filePullEntry, remoteHash func(n int64) (string, error)) (pullPlan, error) {
+	def := pullPlan{act: ConflictRename}
 	if r.policy == ConflictRename {
-		return ConflictRename, 0, nil
+		return def, nil
 	}
 	dest, err := safeJoin(dir, e.Name)
 	if err != nil {
-		return ConflictRename, 0, nil // 名字不合法的话落盘时会如实报错, 这里不抢着报
+		return def, nil // 名字不合法的话落盘时会如实报错, 这里不抢着报
 	}
-	info, err := os.Stat(dest)
-	if err != nil || !info.Mode().IsRegular() {
-		return ConflictRename, 0, nil
-	}
-	ci := conflictInfo{name: e.Name, where: "locally", existing: info.Size(), incoming: e.Size}
-	if r.policy != ConflictSkip && r.policy != ConflictOverwrite && info.Size() <= e.Size {
-		fmt.Fprintf(r.out, "checking the existing %s...\n", e.Name)
-		local, err := hashFilePrefix(dest, info.Size())
+	needHash := r.policy != ConflictSkip && r.policy != ConflictOverwrite
+
+	// 第一步: 目标名上已有完整文件。
+	if info, err := os.Stat(dest); err == nil && info.Mode().IsRegular() {
+		ci := conflictInfo{name: e.Name, where: "locally", existing: info.Size(), incoming: e.Size}
+		if needHash && info.Size() <= e.Size {
+			fmt.Fprintf(r.out, "checking the existing %s...\n", e.Name)
+			local, err := hashFilePrefix(dest, info.Size())
+			if err != nil {
+				return def, fmt.Errorf("hash %s: %w", dest, err)
+			}
+			remote, err := remoteHash(info.Size())
+			if err != nil {
+				return def, fmt.Errorf("ask the peer to hash %s: %w", e.Path, err)
+			}
+			ci.hash = local
+			ci.same = local == remote && info.Size() == e.Size
+		}
+		act, err := r.decide(ci)
 		if err != nil {
-			return "", 0, fmt.Errorf("hash %s: %w", dest, err)
+			return def, err
 		}
-		remote, err := remoteHash(info.Size())
-		if err != nil {
-			return "", 0, fmt.Errorf("ask the peer to hash %s: %w", e.Path, err)
-		}
-		ci.hash = local
-		if local == remote {
-			ci.same = info.Size() == e.Size
-			ci.resumable = info.Size() > 0 && info.Size() < e.Size
+		switch act {
+		case ConflictSkip:
+			return pullPlan{act: ConflictSkip}, nil
+		case ConflictOverwrite:
+			return pullPlan{act: ConflictOverwrite}, nil
 		}
 	}
-	act, err = r.decide(ci)
-	if err != nil {
-		return "", 0, err
+
+	// 第二步: 上次中断留下的 .part。
+	if needHash {
+		if p, size := findResumablePart(dest, e.Size); p != "" {
+			fmt.Fprintf(r.out, "checking the interrupted transfer of %s...\n", e.Name)
+			local, err := hashFilePrefix(p, size)
+			if err != nil {
+				return def, fmt.Errorf("hash %s: %w", p, err)
+			}
+			remote, err := remoteHash(size)
+			if err != nil {
+				return def, fmt.Errorf("ask the peer to hash %s: %w", e.Path, err)
+			}
+			if local == remote {
+				act, err := r.decidePart(e.Name, "locally", size, e.Size)
+				if err != nil {
+					return def, err
+				}
+				switch act {
+				case ConflictSkip:
+					return pullPlan{act: ConflictSkip}, nil
+				case ConflictResume:
+					return pullPlan{act: ConflictResume, resumePart: partName(p), resumeAt: size}, nil
+				}
+			}
+		}
 	}
-	return act, info.Size(), nil
+	return def, nil
 }
 
 // skippedNote 结束语里附注跳过了几个文件。

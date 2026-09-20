@@ -302,17 +302,17 @@ func pullList(conn fileConn, path string) ([]filePullEntry, error) {
 // pullFile 在一条流上取一个文件并落盘到 dir, 返回实际存成的名字。同名按默认自动改名。
 func pullFile(conn fileConn, dir string, e filePullEntry, from, remote string,
 	logf func(string, ...interface{}), onProgress func(int64)) (string, error) {
-	return pullFileAct(conn, dir, e, from, remote, logf, onProgress, "", 0)
+	return pullFileAct(conn, dir, e, from, remote, logf, onProgress, pullPlan{act: ConflictRename})
 }
 
 // pullFileAct 是 pullFile 带同名处理决定的版本: act 为空/ConflictRename 走默认(自动改名),
 // ConflictOverwrite 覆盖本机已有文件, ConflictResume 从 resumeAt 起续传(本机已有前 resumeAt 字节)。
 func pullFileAct(conn fileConn, dir string, e filePullEntry, from, remote string,
-	logf func(string, ...interface{}), onProgress func(int64), act string, resumeAt int64) (string, error) {
+	logf func(string, ...interface{}), onProgress func(int64), plan pullPlan) (string, error) {
 	req := filePullReq{Op: filePullGet, Path: e.Path, Name: e.Name}
 	size := e.Size
-	if act == ConflictResume {
-		req.Offset, req.Length, req.Resume = resumeAt, e.Size-resumeAt, true
+	if plan.act == ConflictResume {
+		req.Offset, req.Length, req.Resume = plan.resumeAt, e.Size-plan.resumeAt, true
 		size = req.Length
 	}
 	if err := writeFrame(conn, req); err != nil {
@@ -333,7 +333,7 @@ func pullFileAct(conn fileConn, dir string, e filePullEntry, from, remote string
 	// recvFileOver 不返回结果(daemon 场景只记日志), 结果从它的 onDone 回调里接。
 	// 它的每一条返回路径都先走 reply(), 所以这个回调一定会被调到一次。
 	var got fileReply
-	recvFileOver(src, dir, from, remote, logf, localOpts(act, resumeAt), func(r fileReply) { got = r })
+	recvFileOver(src, dir, from, remote, logf, localOpts(plan), func(r fileReply) { got = r })
 	if got.Err != "" {
 		return "", errors.New(got.Err)
 	}
@@ -366,7 +366,7 @@ func pullFileChunk(conn fileConn, dir string, e filePullEntry, from, remote stri
 		src = &progressConn{fileConn: conn, size: length, on: onProgress}
 	}
 	var got fileReply
-	recvFileOver(src, dir, from, remote, logf, localOpts(act, 0), func(r fileReply) { got = r })
+	recvFileOver(src, dir, from, remote, logf, localOpts(pullPlan{act: act}), func(r fileReply) { got = r })
 	if got.Err != "" {
 		return "", errors.New(got.Err)
 	}
@@ -394,10 +394,10 @@ func pullHash(conn fileConn, e filePullEntry, n int64) (string, error) {
 }
 
 // localOpts 取件时落盘的策略: 同名怎么处理由本机决定(见 recvOpts.local)。
-func localOpts(act string, resumeAt int64) recvOpts {
-	o := recvOpts{local: true, resumeAt: resumeAt}
-	if act == ConflictOverwrite || act == ConflictResume {
-		o.conflict = act
+func localOpts(p pullPlan) recvOpts {
+	o := recvOpts{local: true, resumeAt: p.resumeAt, resumePart: p.resumePart}
+	if p.act == ConflictOverwrite || p.act == ConflictResume {
+		o.conflict = p.act
 	}
 	return o
 }
