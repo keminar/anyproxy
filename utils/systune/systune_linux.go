@@ -142,9 +142,33 @@ func Check() int {
 	} else {
 		fmt.Printf("%d item(s) below recommendation; run sudo anyproxy -check-fix to apply.\n", warn)
 	}
-	// 不是任何一项 sysctl 达不达标就能判定的症状, 单独提一句: 出现 syn flood 日志时
-	// 该往哪几个参数上查, 不然这条排查线索只存在于人的记忆里。
-	fmt.Println("tip: if you see syn flood warnings in your kernel log, look at tcp_max_syn_backlog, tcp_synack_retries and tcp_abort_on_overflow.")
+
+	// 以前印在 -h 里的那份参考清单, 原样搬过来(不再在 -h 里重复): 上面是"当前系统是否
+	// 达标"的动态报告, 这里是"手动怎么改"的静态操作手册, 两者不是互相替代的关系。
+	fmt.Println(`Some other tunables that enable higher performance (append to /etc/sysctl.conf, then run "sysctl -p"):
+  # TCP BBR congestion control (needs kernel >= 4.9)
+  net.core.default_qdisc = fq
+  net.ipv4.tcp_congestion_control = bbr
+  # TCP/IP tuning
+  fs.file-max = 1000000
+  net.core.rmem_max = 67108864
+  net.core.wmem_max = 67108864
+  net.core.netdev_max_backlog = 250000
+  net.core.somaxconn = 4096
+  net.ipv4.tcp_syncookies = 1
+  net.ipv4.tcp_tw_reuse = 1
+  net.ipv4.tcp_fin_timeout = 30
+  net.ipv4.tcp_keepalive_time = 1200
+  net.ipv4.ip_local_port_range = 10000 65000
+  net.ipv4.tcp_max_syn_backlog = 8192
+  net.ipv4.tcp_max_tw_buckets = 524288
+  net.ipv4.tcp_fastopen = 3
+  net.ipv4.tcp_window_scaling = 1
+  net.ipv4.tcp_rmem = 4096 131072 67108864
+  net.ipv4.tcp_wmem = 4096 65536 67108864
+  net.ipv4.tcp_mtu_probing = 1
+  NOTE: if you see syn flood warnings in your logs, you need to adjust tcp_max_syn_backlog, tcp_synack_retries and tcp_abort_on_overflow
+  verify BBR: sysctl net.ipv4.tcp_congestion_control (=> bbr) ; lsmod | grep bbr (=> tcp_bbr)`)
 	return warn
 }
 
