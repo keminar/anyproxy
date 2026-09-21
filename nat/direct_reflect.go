@@ -190,8 +190,8 @@ func serveDirectReflector(conn *net.UDPConn) {
 			}
 			// 回包也要带 magic: 对端是用 QUIC 的那个 socket 收的, 不带前缀会被
 			// quic-go 当成 QUIC 报文丢掉。nonce 原样带回供对端关联。
-			reply := directPacket(fmt.Sprintf("%s %s %s", verbSeen, nonce, from.String()))
-			if _, err := conn.WriteToUDP(reply, from); err != nil {
+			replyPayload := fmt.Sprintf("%s %s %s", verbSeen, nonce, from.String())
+			if _, err := conn.WriteToUDP(directPacket(replyPayload), from); err != nil {
 				log.Printf("nat direct reflector reply to %s: %v", from, err)
 				continue
 			}
@@ -200,8 +200,12 @@ func serveDirectReflector(conn *net.UDPConn) {
 			// 注意**不能用"本进程只记一次"**: 同一台机器重试时就不再出这行, 而排查清单恰恰
 			// 把"完全没有 whoami 记录"判成"包没到"——那会给出错误结论。限速版在窗口内始终
 			// 如实反映"答复过"。
+			//
+			// 记 replyPayload(不带 magic 前缀), 不能直接把 directPacket 的结果(带一个
+			// 0x00 首字节)打进日志: 那个字节会在终端/日志采集里显示成 ^@ 之类的控制符,
+			// 让这一行看起来"半是文本半是二进制", grep/日志系统按行处理时容易出问题。
 			if reflectorLog.allow("answered|"+from.IP.String(), reflectorDeniedLogEvery) {
-				log.Printf("nat direct reflector: whoami from %s answered with %s", from, reply)
+				log.Printf("nat direct reflector: whoami from %s answered with %s", from, replyPayload)
 			}
 		}
 	}()
