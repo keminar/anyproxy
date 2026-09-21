@@ -117,6 +117,12 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 	if err == nil {
 		return sess, stream, nil
 	}
+	// 对端明确拒绝(配置问题, 比如 tag 没有 forward 映射)不代表连接坏了: session 留着
+	// 复用, 不重建——重建了下一条流照样会被拒, 只是白白重打一次洞。
+	var rejected *directRejectedError
+	if errors.As(err, &rejected) {
+		return nil, nil, err
+	}
 	// 连接可能已被对端关掉、空闲回收掉或超时老化, 丢弃后完整重建一次。
 	d.dropSession(r.Forward.Email, sess, route)
 	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Forward.Email, err)
@@ -608,12 +614,38 @@ func (d *directPeer) openDataStream(sess *directSession, tag string) (*quic.Stre
 		return nil, fmt.Errorf("wait for data stream ready ack: %w", err)
 	}
 	_ = stream.SetReadDeadline(time.Time{})
-	if ack[0] != directAuthACK {
+	switch ack[0] {
+	case directAuthACK:
+		return stream, nil
+	case directRejectACK:
+		// C 明确拒绝了这条流(比如 tag 没有 forward 映射), 不是连接坏了——原因紧跟在
+		// 这个字节后面, 读不到也不至于卡住(给个短超时, 读不出就用个兜底文案)。
+		_ = stream.SetReadDeadline(time.Now().Add(directDialWait))
+		var reject directStreamReject
+		_ = readFrame(stream, &reject, directStreamHeadMax)
+		stream.CancelRead(0)
+		_ = stream.Close()
+		reason := reject.Reason
+		if reason == "" {
+			reason = "rejected by peer"
+		}
+		return nil, &directRejectedError{reason: reason}
+	default:
 		stream.CancelRead(0)
 		_ = stream.Close()
 		return nil, fmt.Errorf("invalid data stream ready ack %d", ack[0])
 	}
-	return stream, nil
+}
+
+// directRejectedError C 明确拒绝了这条数据流(比如 tag 没有 forward 映射、落地目标拨不通)。
+// 这是对端的配置/落地问题, 不是这条 QUIC 连接坏了——调用方(见 openStream)不应据此
+// dropSession 重建, 那只会白白重打一次洞, 下一条流照样被拒。
+type directRejectedError struct {
+	reason string
+}
+
+func (e *directRejectedError) Error() string {
+	return "peer rejected: " + e.reason
 }
 
 // onOffer 把服务端回的 offer 交给等待中的请求。

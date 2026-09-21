@@ -358,7 +358,9 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 	// 对端只能到达本机明确开放的目标。
 	target, ok := d.forward[head.Tag]
 	if !ok {
-		d.logf("stream from %s: no forward target for tag %q, rejected", remote, head.Tag)
+		reason := fmt.Sprintf("no forward target for tag %q", head.Tag)
+		d.logf("stream from %s: %s, rejected", remote, reason)
+		rejectDataStream(stream, head, reason)
 		return
 	}
 
@@ -366,7 +368,9 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 	start := time.Now()
 	targetConn, err := bypassDial("tcp", target, 5*time.Second)
 	if err != nil {
-		d.logf("stream from %s: dial %s failed: %v", remote, target, err)
+		reason := fmt.Sprintf("dial %s failed: %v", target, err)
+		d.logf("stream from %s: %s", remote, reason)
+		rejectDataStream(stream, head, reason)
 		return
 	}
 	defer targetConn.Close()
@@ -382,6 +386,20 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 	dur := time.Since(start)
 	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept closed %s up=%d(%s) down=%d(%s) dur=%s",
 		remote, up, rate(up, dur), down, rate(down, dur), dur.Round(time.Second)))
+}
+
+// rejectDataStream 告诉 A 这条数据流为什么被拒绝: 配置问题(tag 没映射、落地目标拨不通)
+// 不是连接坏了, 用专门的 directRejectACK 加原因帧, 让 A 不会把它当成 session 损坏去重建
+// (见 direct_entry.go 的 openDataStream/openStream)。老版本对端(head.Ready 为 false, 没有
+// ready ACK 能力)不等这个字节, 写不写它都无所谓, 关流时一并丢弃。
+func rejectDataStream(stream *quic.Stream, head directStreamHead, reason string) {
+	if !head.Ready {
+		return
+	}
+	if _, err := stream.Write([]byte{directRejectACK}); err != nil {
+		return
+	}
+	_ = writeFrame(stream, directStreamReject{Reason: reason})
 }
 
 // directQUICConfig 两侧共用的 QUIC 参数。

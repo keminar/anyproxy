@@ -524,7 +524,17 @@ const (
 	directStreamData  = "data"
 	directAuthACK     = byte(1)
 	directCapReadyACK = byte(1)
+	// directRejectACK 数据流被 C 明确拒绝(比如 tag 没有 forward 映射), 不是连接坏了。
+	// 与 directAuthACK 区分开, 好让 A 不把这种配置问题误判成 session 损坏去重建。
+	directRejectACK = byte(2)
 )
+
+// directStreamReject 紧跟在 directRejectACK 后面的拒绝原因, 用 writeFrame/readFrame 传输。
+// 只有 head.Ready 的对端(有能力等 ready ACK)才会收到它; 老版本对端读不到这个字节,
+// 反正也不等 ack, 直接看到流关闭。
+type directStreamReject struct {
+	Reason string `json:"reason"`
+}
 
 // directStreamPull 取件流: 与 directStreamFile 同一套身份校验和端口(directFileTag),
 // 只是字节流向相反 —— 发起方在流上说要什么, 对端把文件推回来(见 nat/file_pull.go)。

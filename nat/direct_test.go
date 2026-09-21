@@ -238,6 +238,93 @@ func TestDirectRejectsUnmappedPort(t *testing.T) {
 	}
 }
 
+// TestDirectRejectReportsReason 数据流被 C 拒绝时(tag 没映射, 或映射了但落地目标拨不通),
+// A 必须能读到明确原因, 而不是把它当成连接坏了(EOF/读超时)。两个用例分别覆盖
+// direct_accept.go 里的两个拒绝点。
+func TestDirectRejectReportsReason(t *testing.T) {
+	c := newAcceptPeer(t, map[string]string{"echo": "127.0.0.1:1"}) // 映射了, 但拨不通
+	a := newDialPeer(t)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("ensure transport: %v", err)
+	}
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect peer: %v", err)
+	}
+	const token = "test-token-reason"
+	c.tokens.put(token, "echo")
+	if err := a.authenticateSession(sess, token, "echo", false, c.fingerprint); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if !sess.streamReady.Load() {
+		t.Fatal("new peer did not advertise data stream ready ACK support")
+	}
+
+	cases := []struct {
+		tag  string
+		want string
+	}{
+		{"unmapped-tag", "no forward target"}, // 连接已认证, 数据流不必再带 token/tag 白名单外的 tag
+		{"echo", "dial"},                      // tag 映射了, 但目标拨不通
+	}
+	for _, tc := range cases {
+		_, err := a.openDataStream(sess, tc.tag)
+		if err == nil {
+			t.Fatalf("tag %q: expected the stream to be rejected", tc.tag)
+		}
+		rejected, ok := err.(*directRejectedError)
+		if !ok {
+			t.Fatalf("tag %q: want a *directRejectedError, got %T: %v", tc.tag, err, err)
+		}
+		if !strings.Contains(rejected.reason, tc.want) {
+			t.Fatalf("tag %q: reason %q does not mention %q", tc.tag, rejected.reason, tc.want)
+		}
+	}
+}
+
+// TestDirectRejectDoesNotRebuildSession 回归: C 明确拒绝一条数据流(tag 没有 forward 映射)
+// 不该被 A 当成 session 坏了去重建——重建要重新走一遍信令, 而这里 A 根本没有信令连接
+// (websocket not connected), 一旦误判就会把这个错误当成真正的失败原因, 还白白丢弃了一条
+// 完好的 session。参见 nat/direct_accept.go 的 rejectDataStream 与
+// nat/direct_entry.go 的 directRejectedError/openStream。
+func TestDirectRejectDoesNotRebuildSession(t *testing.T) {
+	c := newAcceptPeer(t, map[string]string{"2222": "127.0.0.1:1"}) // 没有 "ubnt"
+	a := newDialPeer(t)
+
+	const token = "test-token-no-rebuild"
+	const tag = "ubnt"
+	c.tokens.put(token, tag)
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("ensure transport: %v", err)
+	}
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect peer: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, tag, false, c.fingerprint); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+
+	r := conf.ClientDirect{Forward: conf.DirectForwardTarget{Email: "c@example.com", Tag: tag}}
+	route := sessionRouteForRule(r)
+	a.putSession(r.Forward.Email, sess, route)
+
+	if _, _, err := a.openStream(r); err == nil {
+		t.Fatal("a stream for an unmapped tag must fail")
+	} else if !strings.Contains(err.Error(), "peer rejected") || !strings.Contains(err.Error(), tag) {
+		t.Fatalf("error should report the peer's rejection and name the tag, got: %v", err)
+	}
+
+	// 关键点: session 必须还在原地, 没被当成坏连接丢弃、也没有尝试(注定失败的)重建。
+	if got := a.session(r.Forward.Email, route); got != sess {
+		t.Fatal("a rejected stream must not cause the session to be dropped and rebuilt")
+	}
+}
+
 // TestDirectRejectsWrongFingerprint 指纹对不上必须拨号失败: 指纹固定是这条链路唯一的
 // 身份校验(自签证书过不了 CA 校验, 我们靠经鉴权的 websocket 下发指纹)。
 func TestDirectRejectsWrongFingerprint(t *testing.T) {
