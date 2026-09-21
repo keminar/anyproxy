@@ -37,12 +37,12 @@ const (
 	// directStreamFile 文件传输流。
 	directStreamFile = "file"
 
-	// directFilePort 文件传输占用的保留"端口"号。
+	// directFileTag 文件传输占用的保留 tag。
 	//
-	// 用 0: 它不是合法 TCP 端口, 所以一定不会跟 client.forward 里的任何一条撞上 ——
-	// 凭证是按端口发放和核验的(见 directConn.authorize), 借用一个真实端口号会让"能传
-	// 文件"和"能连那个端口的服务"变成同一件事。
-	directFilePort = 0
+	// 用空字符串: 不会跟 client.forward 里任何一条配了非空 tag 的规则撞上 ——
+	// 凭证是按 tag 发放和核验的(见 directConn.authorize), 借用一个真实 tag 会让"能传
+	// 文件"和"能连那条转发规则"变成同一件事。
+	directFileTag = ""
 
 	// fileFrameMax 文件首部/尾部这类控制帧的大小上限。
 	fileFrameMax = 8 * 1024
@@ -936,7 +936,7 @@ func (d *directPeer) openFileStream(sess *directSession) (*quic.Stream, error) {
 	if !conf.IsValidUUID(d.cfg.UUID) {
 		return nil, errors.New("websocket.client.uuid is empty or not a valid uuid, refusing to send")
 	}
-	stream, err := d.openHeadedStream(sess, directStreamFile, "", directFilePort)
+	stream, err := d.openHeadedStream(sess, directStreamFile, "", directFileTag)
 	if err != nil {
 		return nil, err
 	}
@@ -948,13 +948,13 @@ func (d *directPeer) openFileStream(sess *directSession) (*quic.Stream, error) {
 }
 
 // openPullStream 在已建立的直连上开一条取件流, 并写好身份声明。与 sendFile 的前半段
-// 完全对称(同样的 uuid 自检、同样的 fileAuth 帧、同样的 directFilePort), 区别只在
+// 完全对称(同样的 uuid 自检、同样的 fileAuth 帧、同样的 directFileTag), 区别只在
 // Kind 和之后的字节流向。
 func (d *directPeer) openPullStream(sess *directSession) (*quic.Stream, error) {
 	if !conf.IsValidUUID(d.cfg.UUID) {
 		return nil, errors.New("websocket.client.uuid is empty or not a valid uuid, refusing to pull")
 	}
-	stream, err := d.openHeadedStream(sess, directStreamPull, "", directFilePort)
+	stream, err := d.openHeadedStream(sess, directStreamPull, "", directFileTag)
 	if err != nil {
 		return nil, err
 	}

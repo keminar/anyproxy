@@ -190,7 +190,7 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", toEmail)
 		}
 		punchStart := time.Now()
-		rule := conf.ClientDirect{Email: toEmail, ForwardPort: directFilePort, Via: relayVia}
+		rule := conf.ClientDirect{Forward: conf.DirectForwardTarget{Email: toEmail, Tag: directFileTag}, Via: relayVia}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was sent: %w", toEmail, err)

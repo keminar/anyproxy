@@ -254,6 +254,7 @@ websocket:
     forward:
       - listen: :2222         # public entry port (raw TCP listen)
         email: home@example.com # forward to the subscriber with this email
+        tag: ssh               # pairs with the subscriber's forward[].tag; changing listen doesn't require changing this
 ```
 
 ```yaml
@@ -267,12 +268,12 @@ websocket:
     pass: SomePass1234567890
     email: home@example.com
     forward:
-      - port: 2222            # corresponds to server entry port
-        target: 127.0.0.1:22  # when a connection arrives on this port, dial the real intranet target (local sshd)
+      - tag: ssh              # must match the server's forward[].tag exactly (string), not a port number
+        target: 127.0.0.1:22  # when a connection arrives with this tag, dial the real intranet target (local sshd)
     # pure raw-TCP forward needs no subscribe: email matching a forward rule permits an empty subscription
 ```
 
-Usage: `ssh -p 2222 youruser@<server IP>` → hits port 22 on the intranet machine. The subscriber only dials `target`s listed in its own `forward`; unlisted ports are rejected (a natural whitelist). For multiple targets add multiple `forward` entries, distinguishing different intranet machines by different `email`.
+Usage: `ssh -p 2222 youruser@<server IP>` → hits port 22 on the intranet machine. The subscriber only dials the `target` whose `tag` is listed in its own `forward`; unlisted tags are rejected (a natural whitelist). For multiple targets add multiple `forward` entries, distinguishing different intranet machines by different `email`/`tag`.
 
 > `listen: off` (or `-l off`) disables the local proxy listener and only runs the websocket backend, suitable for pure penetration. **Note**: only "raw TCP forwarding" can be used this way; websocket's "HTTP-header subscribe" path (8.1) depends on the local proxy port and won't work after disabling it.
 
@@ -281,7 +282,7 @@ Usage: `ssh -p 2222 youruser@<server IP>` → hits port 22 on the intranet machi
 A single subscriber process can connect back to multiple servers at once, each with its own independent account/forward table, using the plural `clients` array (each item is a complete `websocket.client` block from 8.1/8.2):
 
 ```yaml
-# subscriber: penetrate two different servers at once; entry ports may repeat (independent forward tables, no conflict)
+# subscriber: penetrate two different servers at once; tag may repeat (independent forward tables, no conflict)
 listen: off
 websocket:
   clients:
@@ -291,7 +292,7 @@ websocket:
       pass: SomePass1234567890
       email: home@example.com
       forward:
-        - port: 2222
+        - tag: ssh
           target: 127.0.0.1:22
     - connect: <server-b-ip>:3002
       user: anotheruser
@@ -301,7 +302,7 @@ websocket:
         - key: X-Env
           val: office
       forward:
-        - port: 2222
+        - tag: rdp
           target: 192.168.1.10:3389
 ```
 
@@ -359,7 +360,7 @@ websocket:
     direct:
       accept: true              # allow others to connect directly to self; listener starts on demand and frees when idle, no port occupied normally
     forward:
-      - port: 3389              # reuse the same whitelist: unmapped ports are all rejected
+      - tag: rdp                # reuse the same whitelist: unmapped tags are all rejected
         target: 192.168.1.10:3389
 ```
 
@@ -375,8 +376,9 @@ websocket:
     direct:
       rules:
         - listen: "both://:13389" # local entry, mstsc connects here; protocol prefix tcp://(default, optional)/udp://both://, RDP 8+ uses both://
-          email: home@example.com # directly connect to the subscriber with this email
-          forwardPort: 3389        # which rule in the peer's forward[] to pick (whitelist index), not the intranet target port; rejected if peer didn't configure this number
+          forward:
+            email: home@example.com # directly connect to the subscriber with this email
+            tag: rdp                # which rule in the peer's forward[] to pick (whitelist index), not the intranet target port; rejected if peer didn't configure this tag
 ```
 
 Usage: `mstsc` connects to `127.0.0.1:13389`, but the actual bytes go over the A↔C QUIC direct connection, not through the server. Hole punching failure fails directly (connection closed, log states where each candidate got stuck), **no relay fallback** — to go via relay configure `server.forward` as in 8.2; the two paths don't fall back to each other. Fields and punching mechanism in [websocket.md](websocket.md#configuration-fields).
@@ -388,8 +390,9 @@ Usage: `mstsc` connects to `127.0.0.1:13389`, but the actual bytes go over the A
       encrypt: true
       rules:
         - listen: "both://:13389"
-          email: home@example.com
-          forwardPort: 3389
+          forward:
+            email: home@example.com
+            tag: rdp
 ```
 
 **When the two machines are actually on the same LAN**, you can manually add this machine's intranet IP as a candidate via `websocket.client.direct.lanAddrs` (no automatic NIC scan), so direct connection prefers the LAN over routing through the public network; see [websocket.md](websocket.md#multiple-paths-raced-simultaneously-winner-is-whoever-connects).

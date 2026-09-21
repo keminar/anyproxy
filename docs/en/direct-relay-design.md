@@ -67,8 +67,9 @@ websocket:
                                        # only sends after that leg's nudge, so there's no ordering problem (see §6)
       rules:
         - listen: "both://:13389"     # mstsc connects here
-          email: home@example.com  # final target C
-          forwardPort: 2224           # which rule in C's forward[] to use
+          forward:
+            email: home@example.com  # final target C
+            tag: rdp                 # which rule in C's forward[] to use (matched by tag)
           via: relay@example.com  # relay through this VPS; empty = direct to C (current behavior)
 ```
 
@@ -88,7 +89,7 @@ websocket:
 
 **Flow** (setup phase, signaling via B; data not via B):
 
-1. `d_request` (A → B, **with `via`**): A wants to relay via `via` (VPS) to C (`email`)'s `forwardPort`, attaching A's own candidates and the current `token`. B sees `via` non-empty → enters relay mode.
+1. `d_request` (A → B, **with `via`**): A wants to relay via `via` (VPS) to C (`email`)'s `forward.tag`, attaching A's own candidates and the current `token`. B sees `via` non-empty → enters relay mode.
 2. `d_relay_open` (B → VPS): tells the VPS to **create a new dedicated UDP socket** for this `token`, ask the reflector to discover its public relay endpoint **E**, and prepare to accept hole-punches from A and C. The VPS reports E back to B with `d_ready`.
 3. B uses two `d_punch` messages to forward candidates to the VPS separately: one with A's candidate, one with C's candidate (first send a normal `d_punch` to C to obtain C's candidate and fingerprint). The VPS only **registers** them: each registered leg parks and waits for that leg's `d_punching` nudge (see below). There is **no** "wait a while, then punch anyway" fallback timer (see §6).
 4. `d_offer` (B → A): fills the endpoint to dial as **E** and attaches **C's certificate fingerprint**. Simultaneously sends `d_punch` to C, with its `PeerAddrs` filled as **E**, making C punch to E (instead of toward A).
@@ -125,7 +126,7 @@ websocket:
       # separately per direct-punch-order.md
       accept: true
     forward:
-      - port: 2224
+      - tag: rdp
         target: 192.168.1.10:3389
     receive:                         # C keeps a "which A's are allowed" list (see authentication)
       allow:

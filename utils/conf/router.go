@@ -120,6 +120,11 @@ type Subscribe struct {
 type ServerForward struct {
 	Listen string `yaml:"listen"` //监听地址, 可带协议前缀, 如 ":2222"、"both://:2222"
 	Email  string `yaml:"email"`  //转发给此email的订阅方
+
+	// Tag 与订阅方 client.forward[].tag 配对的标识, 决定这条入口的连接落到订阅方
+	// 哪条转发规则。与 Listen 的物理监听端口彻底解耦: 改 Listen 不需要跟着改订阅方
+	// 配置, 也不必再靠"端口数值凑巧相等"这种隐式约定去配对。
+	Tag string `yaml:"tag"`
 }
 
 // Protocol 从 Listen 的协议前缀解出协议名; 没写前缀返回空串(WantTCP 按 tcp 处理)。
@@ -138,16 +143,16 @@ func (f ServerForward) WantUDP() bool { return protoWantUDP(f.Protocol()) }
 func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol()) }
 
 // ClientForward 订阅方(proxy侧)裸TCP端口转发目标。
-// 收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
-// Port 未在本地命中则拒绝(天然白名单)。
+// 收到服务端某条 Tag 一致的入口来的连接时, dial 写死的 Target(内网真实目标)。
+// Tag 未在本地命中则拒绝(天然白名单)。
 type ClientForward struct {
-	Port   uint16 `yaml:"port"`   //对应服务端入口端口
+	Tag    string `yaml:"tag"`    //对应服务端入口的 forward[].tag
 	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
 }
 
 // ClientDirect 订阅方(A侧)的直连入口规则: 在本机 Listen 起裸TCP监听, 进来的连接不再经
-// 服务端中转, 而是用 QUIC 直接连到 Email 对应的另一个订阅方(C), 由对方按 ForwardPort
-// 查它自己的 client.forward[port] 决定 dial 哪个内网目标。
+// 服务端中转, 而是用 QUIC 直接连到 Forward.Email 对应的另一个订阅方(C), 由对方按
+// Forward.Tag 查它自己的 client.forward[tag] 决定 dial 哪个内网目标。
 //
 // 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
 // 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
@@ -163,20 +168,43 @@ type ClientForward struct {
 // both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
 // UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
 //
-// ForwardPort 不是"拨到内网目标的端口"、也不是这条 Listen 自己的端口——容易被
-// 当成前者, 因为名字里有个 port。它选的是 C 自己 client.forward[] 表里的哪一条
-// 规则, 真正 dial 哪个内网 target 由 C 的配置决定, A 这边填错/乱填只会被 C 拒绝。
-// 这是故意设计成白名单: 没有它, A 只凭 Email 就能让 C 转发到 C 配过的**任意**
-// 内网目标, 相当于把 C 的全部转发表都开放给对面; 有了它, C 只认自己在 forward
-// 里列出的端口号, A 连不认识的目标都摸不到。
+// DirectForwardTarget 直连规则"要去连谁、连他哪条转发规则"这两件事收在一起: 语义上
+// 本就是一体的(单独一个 Email 没法定位到具体转发目标, 单独一个 Tag 也不知道是谁的
+// forward 表), 分开平铺反而让人误以为二者互相独立。
+type DirectForwardTarget struct {
+	Email string `yaml:"email"` //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
+
+	// Tag 不是"拨到内网目标的端口"、也不是这条 Listen 自己的端口——这个字段以前叫
+	// forwardPort, 容易被当成端口号看待, 实际上它选的是 C 自己 client.forward[] 表里
+	// 的哪一条规则(按 tag 配对), 真正 dial 哪个内网 target 由 C 的配置决定, A 这边填
+	// 错/乱填只会被 C 拒绝。这是故意设计成白名单: 没有它, A 只凭 Email 就能让 C 转发到
+	// C 配过的**任意**内网目标, 相当于把 C 的全部转发表都开放给对面; 有了它, C 只认
+	// 自己在 forward 里列出的 tag, A 连不认识的目标都摸不到。
+	Tag string `yaml:"tag"`
+}
+
+// ClientDirect 订阅方(A侧)的直连入口规则。
+//
+// 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
+// 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
+//
+// Listen 可以带协议前缀, 形如 "both://:13389"(等价的还有 "tcp://"/"udp://", 不写
+// 前缀按 tcp): 协议与要监听的地址写在一起, 一眼就能看出这个监听口子是什么协议——
+// 之前 Protocol 是与 Listen 分开的独立字段, 两者的关系只能靠读代码/文档才知道。
+//
+// 两种协议在 QUIC 上的承载不同, 语义才对得上: TCP 走 stream(可靠有序), UDP 走
+// datagram(不可靠无序, RFC 9221)。不能拿 stream 扛 UDP —— 那会给 UDP 强加重传与
+// 保序, 把队头阻塞又请回来。
+//
+// both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
+// UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
 type ClientDirect struct {
-	Listen      string `yaml:"listen"`      //本机入口监听地址, 可带协议前缀, 如 ":13389"、"both://:13389"
-	Email       string `yaml:"email"`       //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
-	ForwardPort uint16 `yaml:"forwardPort"` //选用 C 的 client.forward[] 里哪一条规则(白名单选号, 不是目标端口), 对方未映射该端口即拒绝
+	Listen  string              `yaml:"listen"`  //本机入口监听地址, 可带协议前缀, 如 ":13389"、"both://:13389"
+	Forward DirectForwardTarget `yaml:"forward"` //连去哪个订阅方、用它的哪条 forward 规则(见 DirectForwardTarget)
 
 	// Via 经这个 email 对应的订阅方(一台公网 VPS, 需开 directRelay)做**盲转发中继**到
-	// Email(最终目标 C): A、C 各自和 VPS 打洞, QUIC/TLS 仍在 A<->C 端到端, VPS 只在传输层
-	// 盲转发不透明 UDP 包(看不到明文)。留空=直连 C(现状, 不经任何中继)。
+	// Forward.Email(最终目标 C): A、C 各自和 VPS 打洞, QUIC/TLS 仍在 A<->C 端到端, VPS 只在
+	// 传输层盲转发不透明 UDP 包(看不到明文)。留空=直连 C(现状, 不经任何中继)。
 	//
 	// 适用 A、C 都在受限 CGNAT 后、彼此直连打不通、但各自能连通公网 VPS 的场景。VPS 无需为每对
 	// A-C 配 forward/direct/receive.allow, 只需一个 directRelay 总开关。详见

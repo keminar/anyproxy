@@ -67,7 +67,7 @@ type relaySession struct {
 	vps      *Client // VPS 连接
 	aCands   []directCandidate
 	endpoint []directCandidate // VPS 报回的中继端点 E
-	port     uint16
+	tag      string
 	encrypt  bool
 	// twoPhase A 声明了支持两段式 offer(见 DirectRequest.TwoPhase): 拿到中继端点 E 之后
 	// 先把 E 单独发给 A 让它立刻开打, C 的证书指纹到了再补一条完整 offer。
@@ -181,7 +181,7 @@ func (b *directBroker) onRequest(c *Client, msg *Message) {
 	// 别的 email, C 才能放心拿它去查 receive.allow 派生打洞加密密钥(见 DirectPunch
 	// 的字段注释)。
 	punch := DirectPunch{PeerAddrs: reqCands, PeerAddr: firstAddr(reqCands),
-		Token: req.Token, Port: req.Port, Email: c.Email, Encrypt: req.Encrypt, PunchFirst: req.PunchFirst}
+		Token: req.Token, Tag: req.Tag, Email: c.Email, Encrypt: req.Encrypt, PunchFirst: req.PunchFirst}
 	body, err := encodeDirect(punch)
 	if err != nil {
 		b.take(id)
@@ -249,7 +249,7 @@ func (b *directBroker) onRelayRequest(c *Client, msg *Message, req DirectRequest
 	}
 	rs := &relaySession{
 		token: req.Token, asker: c, askerID: msg.ID, aEmail: c.Email, cEmail: req.Email,
-		vpsEmail: req.Via, vps: vps, aCands: aCands, port: req.Port, encrypt: req.Encrypt,
+		vpsEmail: req.Via, vps: vps, aCands: aCands, tag: req.Tag, encrypt: req.Encrypt,
 		twoPhase: req.TwoPhase,
 		deadline: time.Now().Add(directRelaySessionTTL),
 	}
@@ -310,7 +310,7 @@ func (b *directBroker) onRelayReady(c *Client, p *directPending, ready DirectRea
 		}
 		// 让 C 朝 E 打洞(Relay=true: C 立即打并发 nudge)并回自己的候选+指纹(role=punchC)。
 		punch := DirectPunch{PeerAddrs: eCands, PeerAddr: firstAddr(eCands), Token: rs.token,
-			Port: rs.port, Email: rs.aEmail, Encrypt: rs.encrypt, Relay: true}
+			Tag: rs.tag, Email: rs.aEmail, Encrypt: rs.encrypt, Relay: true}
 		body, err := encodeDirect(punch)
 		if err != nil {
 			b.failRelay(rs, "server encode relay punch failed")

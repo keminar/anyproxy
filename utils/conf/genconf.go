@@ -388,11 +388,12 @@ func genWebsocketServer() string {
     # 可接入来源 IP 白名单(CIDR/单 IP), 留空不限制; loopback 始终放行
     allowIP:
     #  - 172.17.0.0/16
-    # 端口转发入口: 在本机 listen 收连接, 转给该 email 的订阅方, 由对方按端口查它的 client.forward
+    # 端口转发入口: 在本机 listen 收连接, 转给该 email 的订阅方, 由对方按 tag 查它的 client.forward
     # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
     forward:
     #  - listen: "tcp://:2222"
     #    email: someone@example.com
+    #    tag: ssh   # 与订阅方 client.forward[].tag 配对, 不再靠端口数值凑巧相等
 `
 }
 
@@ -416,20 +417,21 @@ func genWebsocketClient() string {
     subscribe:
     #  - key:
     #    val:
-    # 裸 TCP 落地表: 服务端(或直连)按 port 找到这里, dial 写死的 target; 未列出的 port 一律拒绝
+    # 裸 TCP 落地表: 服务端(或直连)按 tag 找到这里, dial 写死的 target; 未列出的 tag 一律拒绝
     forward:
-    #  - port: 2222
+    #  - tag: ssh
     #    target: 127.0.0.1:22
     # QUIC 直连(数据不经服务端)与盲转发中继相关的全部配置, 都挂在这一个块下
     direct:
       # 允许别的订阅方 QUIC 直连本机, 监听按需起, 平时不占端口
       accept: false
-      # 本机直连入口: 在 listen 收连接, 直接送给 email 对应的订阅方, 由对方按 forwardPort 查它的 forward
+      # 本机直连入口: 在 listen 收连接, 直接送给 forward.email 对应的订阅方, 由对方按 forward.tag 查它的 forward
       # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
       rules:
       #  - listen: "both://:13389"
-      #    email: someone@example.com
-      #    forwardPort: 3389  # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个端口就拒绝(白名单), 别人不能靠瞎填端口探到对方的其它转发目标
+      #    forward:
+      #      email: someone@example.com
+      #      tag: rdp         # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个 tag 就拒绝(白名单), 别人不能靠瞎填 tag 探到对方的其它转发目标
       #    via: relay-vps     # 可选: 经这个 email 对应的公网 VPS(需开 direct.relay)盲转发中继, 打洞直连打不通时用
       # 直连(QUIC)默认吃 quic-go 对 UDP 的批量收发/ECN 优化; 极少数机器上(常见于某些
       # 网卡驱动/虚拟网卡)这条优化本身会导致丢包、拥塞窗口涨不起来, 症状是直连传输

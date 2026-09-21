@@ -333,12 +333,12 @@ func TestFileTransferEndToEnd(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-file"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -399,12 +399,12 @@ func TestFilePullDirectEndToEnd(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-pull"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -475,12 +475,12 @@ func TestFileReceiveReadOnlyServesButRefusesWrites(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-readonly"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -547,12 +547,12 @@ func TestFilePullDirectRejectsStranger(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-pull-stranger"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -594,12 +594,12 @@ func TestDirectQUICStatsCollected(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-stats"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	items, err := collectFiles([]string{srcPath})
@@ -641,12 +641,12 @@ func TestFileRefusedWhenNoReceiveDir(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-noreceive"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -679,12 +679,12 @@ func TestFileRefusedWhenNoReceiveDirLargeFile(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-noreceive-large"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -730,12 +730,12 @@ func TestFileReceiveAllowList(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-allow"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -764,12 +764,12 @@ func TestFileReceiveAllowRequiresMatchingUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-uuid-mismatch"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -796,12 +796,12 @@ func TestFileSendRefusesEmptyUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-empty-uuid"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -825,12 +825,12 @@ func TestFileSendRefusesMalformedOwnUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-malformed-uuid"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -856,16 +856,16 @@ func TestFileReceiveRefusesMalformedConfiguredUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-malformed-uuid-wire"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
-	stream, err := a.openHeadedStream(sess, directStreamFile, "", directFilePort)
+	stream, err := a.openHeadedStream(sess, directStreamFile, "", directFileTag)
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
@@ -1071,12 +1071,12 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-chunk"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -1158,12 +1158,12 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-bad-chunk"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 

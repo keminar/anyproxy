@@ -24,8 +24,15 @@ import (
 // 卡顿, 只转发 TCP 等于把它堵死。
 
 const (
-	// directDatagramHead datagram 首部长度: sessionID(4) + port(2)。
-	directDatagramHead = 6
+	// directDatagramHead datagram 首部长度: sessionID(4)。
+	//
+	// 以前这里还带 2 字节的 port, 用来在收包时查该落到 forward 表里哪条规则; 现在
+	// tag 是变长字符串, 定长帧塞不下。经确认这个信息在一条 QUIC 连接的生命周期内是
+	// 常量(一条 directSession/directConn 严格 1:1 对应一条转发规则, 见
+	// sessionRouteForRule 的注释与 authorize() 对 token 的一次性校验), 不需要每个
+	// UDP 包都带: C 侧在 authorize() 时把 tag 解析进 directConn, A 侧则是
+	// directSession 上绑定的那唯一一个 directUDPEntry, 都不用再逐包传。
+	directDatagramHead = 4
 	// directUDPIdle UDP 会话空闲多久回收。UDP 无连接可依据, 只能靠空闲判定。
 	//
 	// 取 30 分钟, 与 websocket 转发路径的 forwardIdleTimeout 一致: 交互式会话安静很久
@@ -47,6 +54,11 @@ type directConn struct {
 	conn *quic.Conn
 
 	authed atomic.Bool
+	// tag 是 authorize() 校验 token 时顺带记下的转发规则标识, 只在 authed 变 true
+	// 之前写入、之后只读——靠 authed 这个 atomic.Bool 的 store/load 提供的先后关系
+	// 保证可见性, 不需要额外加锁(与 dc.authed 的用法一致: 别处也都是先看 authed
+	// 再放心读这条连接上的其它状态)。
+	tag string
 
 	udpMu       sync.Mutex
 	udpSessions map[uint32]*directUDPTarget
@@ -61,9 +73,10 @@ type directConn struct {
 }
 
 // directUDPTarget C 侧一条 UDP 会话: 对应对端某个用户源地址, 连到一个内网目标。
+// 这条连接上所有会话的目标其实是同一个(见 directConn.tag 的注释), 不用再各自记
+// 一遍 tag/port。
 type directUDPTarget struct {
 	conn *net.UDPConn
-	port uint16
 }
 
 // authorize 连接级鉴权。首条 stream 必须出示服务端提前经打洞消息交给我们的一次性凭证;
@@ -80,14 +93,15 @@ func (dc *directConn) authorize(stream *quic.Stream, head directStreamHead) erro
 	if !ok {
 		return errors.New("token invalid or expired")
 	}
-	if e.port != head.Port {
-		return fmt.Errorf("token was issued for port %d but stream asks for %d", e.port, head.Port)
+	if e.tag != head.Tag {
+		return fmt.Errorf("token was issued for tag %q but stream asks for %q", e.tag, head.Tag)
 	}
 	if e.relay {
 		if err := verifyRelayPeer(stream, dc.peer.cfg.Receive, e.email, dc.peer.fingerprint); err != nil {
 			return err
 		}
 	}
+	dc.tag = e.tag // 必须在 Store(true) 之前写, 靠 authed 的 store/load 提供可见性
 	dc.authed.Store(true)
 	return nil
 }
@@ -101,7 +115,7 @@ func (dc *directConn) receiveDatagrams() {
 		if err != nil {
 			return
 		}
-		sessionID, port, payload, err := parseDatagram(msg)
+		sessionID, payload, err := parseDatagram(msg)
 		if err != nil {
 			d.logf("datagram from %s: %v", remote, err)
 			continue
@@ -111,7 +125,7 @@ func (dc *directConn) receiveDatagrams() {
 			d.logf("datagram from %s before the connection was authenticated, dropped", remote)
 			continue
 		}
-		target, err := dc.udpTarget(sessionID, port)
+		target, err := dc.udpTarget(sessionID)
 		if err != nil {
 			d.logf("datagram from %s: %v", remote, err)
 			continue
@@ -124,8 +138,9 @@ func (dc *directConn) receiveDatagrams() {
 	}
 }
 
-// udpTarget 取(或新建)某个会话到内网目标的 UDP socket。新建时同样要过 forward 白名单。
-func (dc *directConn) udpTarget(sessionID uint32, port uint16) (*directUDPTarget, error) {
+// udpTarget 取(或新建)某个会话到内网目标的 UDP socket。新建时同样要过 forward 白名单——
+// 用的是 authorize() 时已经校验过 token 的 dc.tag, 这条连接上所有会话都落到同一个目标。
+func (dc *directConn) udpTarget(sessionID uint32) (*directUDPTarget, error) {
 	dc.udpMu.Lock()
 	defer dc.udpMu.Unlock()
 	if dc.udpClosed {
@@ -135,15 +150,12 @@ func (dc *directConn) udpTarget(sessionID uint32, port uint16) (*directUDPTarget
 		dc.udpSessions = make(map[uint32]*directUDPTarget)
 	}
 	if t, ok := dc.udpSessions[sessionID]; ok {
-		if t.port != port {
-			return nil, fmt.Errorf("session %d already bound to port %d, refusing port %d", sessionID, t.port, port)
-		}
 		return t, nil
 	}
 	// 与 TCP 通路共用同一张白名单。
-	addr, ok := dc.peer.forward[port]
+	addr, ok := dc.peer.forward[dc.tag]
 	if !ok {
-		return nil, fmt.Errorf("no forward target for port %d", port)
+		return nil, fmt.Errorf("no forward target for tag %q", dc.tag)
 	}
 	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
@@ -154,9 +166,9 @@ func (dc *directConn) udpTarget(sessionID uint32, port uint16) (*directUDPTarget
 	if err != nil {
 		return nil, fmt.Errorf("dial udp target %s: %w", addr, err)
 	}
-	t := &directUDPTarget{conn: conn, port: port}
+	t := &directUDPTarget{conn: conn}
 	dc.udpSessions[sessionID] = t
-	dc.peer.logf("udp session %d -> %s (port %d)", sessionID, addr, port)
+	dc.peer.logf("udp session %d -> %s (tag %q)", sessionID, addr, dc.tag)
 	go dc.pumpTargetReplies(sessionID, t)
 	return t, nil
 }
@@ -179,7 +191,7 @@ func (dc *directConn) pumpTargetReplies(sessionID uint32, t *directUDPTarget) {
 		if err != nil {
 			return
 		}
-		if err := sendDatagram(dc.conn, sessionID, t.port, buf[:n]); err != nil {
+		if err := sendDatagram(dc.conn, sessionID, buf[:n]); err != nil {
 			dc.peer.logf("udp reply for session %d dropped: %v", sessionID, err)
 			continue
 		}
@@ -265,7 +277,7 @@ func (d *directPeer) listenUDPEntry(r conf.ClientDirect) {
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: make(map[uint32]time.Time),
 	}
-	d.logf("direct udp entry listening on %s -> email %s (port %d)", r.Listen, r.Email, r.ForwardPort)
+	d.logf("direct udp entry listening on %s -> email %s (tag %q)", r.Listen, r.Forward.Email, r.Forward.Tag)
 	go e.run()
 }
 
@@ -292,7 +304,7 @@ func (e *directUDPEntry) pump(getSession func() (*directSession, error)) {
 		}
 		// UDP 没有"连接"可计数, 靠每个包刷新使用时间, 否则正在跑 UDP 的连接会被空闲回收误杀。
 		sess.touch()
-		if err := sendDatagram(sess.conn, sessionID, e.rule.ForwardPort, buf[:n]); err != nil {
+		if err := sendDatagram(sess.conn, sessionID, buf[:n]); err != nil {
 			e.peer.logf("direct udp entry %s: send failed: %v", e.rule.Listen, err)
 			continue
 		}
@@ -381,10 +393,9 @@ func (e *directUDPEntry) deliver(sessionID uint32, payload []byte) {
 
 // ---------- datagram 编解码 ----------
 
-func sendDatagram(conn *quic.Conn, sessionID uint32, port uint16, payload []byte) error {
+func sendDatagram(conn *quic.Conn, sessionID uint32, payload []byte) error {
 	msg := make([]byte, directDatagramHead+len(payload))
 	binary.BigEndian.PutUint32(msg[0:4], sessionID)
-	binary.BigEndian.PutUint16(msg[4:6], port)
 	copy(msg[directDatagramHead:], payload)
 	err := conn.SendDatagram(msg)
 	var tooLarge *quic.DatagramTooLargeError
@@ -396,11 +407,10 @@ func sendDatagram(conn *quic.Conn, sessionID uint32, port uint16, payload []byte
 	return err
 }
 
-func parseDatagram(msg []byte) (sessionID uint32, port uint16, payload []byte, err error) {
+func parseDatagram(msg []byte) (sessionID uint32, payload []byte, err error) {
 	if len(msg) < directDatagramHead {
-		return 0, 0, nil, fmt.Errorf("datagram too short: %d bytes", len(msg))
+		return 0, nil, fmt.Errorf("datagram too short: %d bytes", len(msg))
 	}
 	sessionID = binary.BigEndian.Uint32(msg[0:4])
-	port = binary.BigEndian.Uint16(msg[4:6])
-	return sessionID, port, msg[directDatagramHead:], nil
+	return sessionID, msg[directDatagramHead:], nil
 }

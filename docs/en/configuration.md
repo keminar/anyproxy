@@ -198,17 +198,17 @@ Config is split by role into `server` (server side) / `client` (client side) blo
 | `websocket.server.listen` | Server-side listen address:port |
 | `websocket.server.users` | Authentication account array, each `{user, pass, disable}`, verifies connecting subscribers; `disable: true` can temporarily disable an account |
 | `websocket.server.allowIP` | Allowed client IP whitelist (CIDR/single IP), empty = unrestricted; judged by real TCP source, loopback always allowed |
-| `websocket.server.forward` | Server-side raw TCP forward entry list, elements are `{listen, email}` |
+| `websocket.server.forward` | Server-side raw TCP forward entry list, elements are `{listen, email, tag}`; `tag` pairs with the subscriber's `client.forward[].tag` to decide which of its forward rules a connection lands on |
 | `websocket.client.connect` | Client connection address:port |
 | `websocket.client.host` | connect's domain |
 | `websocket.client.proxy` | The subscriber reconnects to server B **via upstream HTTP/SOCKS5 proxy**, format `scheme://host:port`: `socks5://` (via SOCKS5) / `http://`, `https://` (via HTTP CONNECT); other schemes error out directly, not silently degraded to direct. Used when `connect` is an intranet/loopback address that the local machine cannot reach directly — connect to this reachable proxy first, which forwards to `connect`. Not configured = direct (original behavior). Like `connect`/`forward`, **it is read only once at startup / each reconnect, not part of hot reload** |
 | `websocket.client.user` / `.pass` | Client authentication username / password (sent to server) |
 | `websocket.client.email` | Used to locate the user, not for authentication |
 | `websocket.client.subscribe` | Subscribed header info list, elements are `{key, val}` |
-| `websocket.client.forward` | Subscriber raw TCP forward target list, elements are `{port, target}` |
+| `websocket.client.forward` | Subscriber raw TCP forward target list, elements are `{tag, target}`; `tag` must match the server's `server.forward[].tag` to pair, unmatched connections are rejected |
 | `websocket.client.uuid` | This subscriber's identity credential, used only by both file-transfer sender and receiver; **not written in config**, auto-generated at startup and persisted to a same-name hidden file `.router.uuid`, unchanged across restarts | — |
 | `websocket.client.direct.accept` | When `true`, start QUIC listening and advertise the endpoint to the server, allowing other subscribers to connect to self directly (path C) | — |
-| `websocket.client.direct.rules` | Local QUIC direct-entry rule array, each `{listen, email, forwardPort, via}`; `listen` may carry `tcp://` (default) / `udp://` / `both://` prefix | — |
+| `websocket.client.direct.rules` | Local QUIC direct-entry rule array, each `{listen, forward: {email, tag}, via}`; `listen` may carry `tcp://` (default) / `udp://` / `both://` prefix; `forward.tag` (formerly `forwardPort`, now a string) picks which rule in the peer's `forward[]` to use, not a port number | — |
 | `websocket.client.direct.encrypt` | When `true`, hole-punch control packets get extra AES-256-GCM encryption to prevent operators dropping packets by plaintext features; default `false`, applies to both `direct.rules[]` and `-send`/`-recv` | — |
 | `websocket.client.direct.portmap` | When `true`, direct candidate collection tries UPnP/PCP/NAT-PMP port mapping; default `false` | — |
 | `websocket.client.direct.punchFirst` | `true` declares this machine is behind restrictive CGNAT and, when actively connecting directly, must send the first packet first (letting the peer acceptor delay its punch); set when home broadband connecting to public cloud host fails | — |

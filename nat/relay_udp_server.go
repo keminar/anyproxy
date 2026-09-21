@@ -267,7 +267,7 @@ func (u *udpRelay) openUplink() {
 		fail("token: " + err.Error())
 		return
 	}
-	body, err := encodeDirect(RelayUDPOpen{Port: u.port, Token: token})
+	body, err := encodeDirect(RelayUDPOpen{Port: u.port, Tag: u.rule.Tag, Token: token})
 	if err != nil {
 		fail("encode: " + err.Error())
 		return

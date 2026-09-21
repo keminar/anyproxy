@@ -9,67 +9,67 @@ import (
 	"github.com/keminar/anyproxy/utils/conf"
 )
 
-// TestBuildForward 确认 Port==0 或 Target=="" 的规则被过滤, 不进最终映射;
+// TestBuildForward 确认 Tag=="" 或 Target=="" 的规则被过滤, 不进最终映射;
 // 这是从原全局 SetLocalForward 提炼出的纯函数, 每条 server 连接各自调用一份。
 func TestBuildForward(t *testing.T) {
 	rules := []conf.ClientForward{
-		{Port: 2222, Target: "127.0.0.1:22"},
-		{Port: 0, Target: "127.0.0.1:80"}, // Port 为 0, 应被过滤
-		{Port: 3389, Target: ""},          // Target 为空, 应被过滤
-		{Port: 3306, Target: "10.0.0.1:3306"},
+		{Tag: "ssh", Target: "127.0.0.1:22"},
+		{Tag: "", Target: "127.0.0.1:80"}, // Tag 为空, 应被过滤
+		{Tag: "rdp", Target: ""},          // Target 为空, 应被过滤
+		{Tag: "mysql", Target: "10.0.0.1:3306"},
 	}
 	m := buildForward(rules)
 	if len(m) != 2 {
 		t.Fatalf("expected 2 entries, got %d: %+v", len(m), m)
 	}
-	if m[2222] != "127.0.0.1:22" || m[3306] != "10.0.0.1:3306" {
+	if m["ssh"] != "127.0.0.1:22" || m["mysql"] != "10.0.0.1:3306" {
 		t.Fatalf("unexpected map content: %+v", m)
 	}
-	if _, ok := m[0]; ok {
-		t.Fatalf("port 0 should be filtered")
+	if _, ok := m[""]; ok {
+		t.Fatalf("empty tag should be filtered")
 	}
-	if _, ok := m[3389]; ok {
+	if _, ok := m["rdp"]; ok {
 		t.Fatalf("empty target should be filtered")
 	}
 }
 
-// TestBuildForwardDuplicatePort 重复 port 的规则要保留先出现的那条、丢弃后面的,
+// TestBuildForwardDuplicatePort 重复 tag 的规则要保留先出现的那条、丢弃后面的,
 // 不能悄悄被后一条覆盖(覆盖会让前一条规则的目标永远拨不到, 且没有任何提示)。
 func TestBuildForwardDuplicatePort(t *testing.T) {
 	rules := []conf.ClientForward{
-		{Port: 2222, Target: "127.0.0.1:22"},
-		{Port: 2222, Target: "192.0.2.22:3389"},
+		{Tag: "ssh", Target: "127.0.0.1:22"},
+		{Tag: "ssh", Target: "192.0.2.22:3389"},
 	}
 	m := buildForward(rules)
 	if len(m) != 1 {
 		t.Fatalf("expected 1 entry, got %d: %+v", len(m), m)
 	}
-	if m[2222] != "127.0.0.1:22" {
-		t.Fatalf("expected first rule to win, got %q", m[2222])
+	if m["ssh"] != "127.0.0.1:22" {
+		t.Fatalf("expected first rule to win, got %q", m["ssh"])
 	}
 }
 
-// TestDialForCreateNoForwardTarget 锁定"入口端口没有映射"这条错误的准确文案。
+// TestDialForCreateNoForwardTarget 锁定"入口 tag 没有映射"这条错误的准确文案。
 //
 // 这个字符串现在不只是打在订阅方本地日志里, 还会经 METHOD_CLOSE 的 Body 带回给
 // 服务端、折进它自己的关闭汇总日志(见 Bridge.CloseReason / client.go 的拒绝分支)。
 // 一旦这里的措辞被顺手改掉, 服务端那边看到的原因就跟着变, 所以专门钉一个测试。
 func TestDialForCreateNoForwardTarget(t *testing.T) {
-	c := &Client{forward: map[uint16]string{2222: "127.0.0.1:22"}}
-	_, err := dialForCreate(c, &Message{Type: ConnTCP, Port: 2224})
+	c := &Client{forward: map[string]string{"ssh": "127.0.0.1:22"}}
+	_, err := dialForCreate(c, &Message{Type: ConnTCP, Tag: "unmapped"})
 	if err == nil {
-		t.Fatal("an unmapped entry port should fail, not silently succeed")
+		t.Fatal("an unmapped entry tag should fail, not silently succeed")
 	}
-	want := "no forward target for entry port 2224"
+	want := `no forward target for entry tag "unmapped"`
 	if err.Error() != want {
 		t.Fatalf("got %q, want %q", err.Error(), want)
 	}
-	// 映射了的端口不受影响。
-	if _, err := dialForCreate(c, &Message{Type: ConnTCP, Port: 2222}); err != nil {
+	// 映射了的 tag 不受影响。
+	if _, err := dialForCreate(c, &Message{Type: ConnTCP, Tag: "ssh"}); err != nil {
 		// 22 端口在测试机上多半没监听, dial 本身失败是预期的; 只要不是
 		// "no forward target" 这条就说明查表本身是对的。
 		if strings.Contains(err.Error(), "no forward target") {
-			t.Fatalf("a mapped port was rejected as unmapped: %v", err)
+			t.Fatalf("a mapped tag was rejected as unmapped: %v", err)
 		}
 	}
 }

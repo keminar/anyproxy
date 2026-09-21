@@ -518,7 +518,7 @@ func TestRelayEndToEnd(t *testing.T) {
 	defer stopTarget()
 
 	const (
-		port   = uint16(2223)
+		port   = "2223"
 		aEmail = "a@example.com"
 		cEmail = "c@example.com"
 		token  = "relay-e2e-token"
@@ -528,7 +528,7 @@ func TestRelayEndToEnd(t *testing.T) {
 	c := newDirectPeer("test-c", conf.WsClient{
 		Direct:  conf.DirectSettings{Accept: true},
 		Receive: conf.ClientReceive{Allow: []conf.AllowedSender{{Email: aEmail, UUID: testUUIDA}}},
-	}, map[uint16]string{port: target})
+	}, map[string]string{port: target})
 	if err := c.ensureAccept(); err != nil {
 		t.Skipf("cannot start ipv6 quic listener: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestRelayAuthRejectsWrongUUID(t *testing.T) {
 	defer stopTarget()
 
 	const (
-		port   = uint16(2224)
+		port   = "2224"
 		aEmail = "a@example.com"
 		cEmail = "c@example.com"
 		token  = "relay-badauth-token"
@@ -617,7 +617,7 @@ func TestRelayAuthRejectsWrongUUID(t *testing.T) {
 	c := newDirectPeer("test-c", conf.WsClient{
 		Direct:  conf.DirectSettings{Accept: true},
 		Receive: conf.ClientReceive{Allow: []conf.AllowedSender{{Email: aEmail, UUID: testUUIDA}}},
-	}, map[uint16]string{port: target})
+	}, map[string]string{port: target})
 	if err := c.ensureAccept(); err != nil {
 		t.Skipf("cannot start ipv6 quic listener: %v", err)
 	}

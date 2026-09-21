@@ -110,7 +110,7 @@ var directRelayNudgeGaps = []time.Duration{600 * time.Millisecond, 1200 * time.M
 type directPeer struct {
 	tag     string
 	cfg     conf.WsClient
-	forward map[uint16]string // C 侧: 端口->内网目标, 与 websocket 转发路径共用同一张白名单
+	forward map[string]string // C 侧: tag->内网目标, 与 websocket 转发路径共用同一张白名单
 
 	curClient atomic.Value // *Client, 当前活跃的 websocket 连接; 断线期间可能为陈旧值
 
@@ -162,7 +162,7 @@ type directPeer struct {
 	// A 侧(direct[] 入口)
 	mu       sync.Mutex
 	offers   map[uint]chan DirectOffer // 按请求ID等待服务端回 offer
-	sessions map[string]*directSession // listen + email + forwardPort + via -> 复用的 QUIC 连接
+	sessions map[string]*directSession // listen + email + forward.tag + via -> 复用的 QUIC 连接
 	reqInc   uint32                    // 请求ID采番, 与数据面的 ID 空间无关(仅用于匹配 offer)
 
 	// quiet 一次性的前台命令(-send/-recv)置 true: 打洞过程那一串日志(候选、路径选择、
@@ -290,8 +290,11 @@ type directSession struct {
 	refs    atomic.Int64
 	lastUse atomic.Int64 // unix nano
 
-	udpMu      sync.Mutex
-	udpEntries map[uint16]*directUDPEntry // 本地入口端口 -> 入口, 用于把回程 datagram 投递回去
+	// udpMu 保护 boundUDPEntry。一条 directSession 严格 1:1 对应一条 ClientDirect 规则
+	// (route 里连 listen 都算进了 session key, 见 sessionRouteForRule), 所以一条
+	// 连接上最多只会绑一个 UDP 入口, 不需要按 tag/端口索引的 map。
+	udpMu         sync.Mutex
+	boundUDPEntry *directUDPEntry // 用于把回程 datagram 投递回去, 见 bindUDPEntry/udpEntry
 }
 
 // acquire 标记一条会话开始使用。
@@ -329,21 +332,13 @@ func (s *directSession) idleFor() time.Duration {
 	return time.Since(time.Unix(0, s.lastUse.Load()))
 }
 
-// hasActiveUDP 该连接上是否还有活着的 UDP 会话(任一入口的任一用户源地址在自己的
+// hasActiveUDP 该连接上是否还有活着的 UDP 会话(绑定的入口的任一用户源地址在自己的
 // 空闲窗口内有过流量)。
 func (s *directSession) hasActiveUDP() bool {
 	s.udpMu.Lock()
-	entries := make([]*directUDPEntry, 0, len(s.udpEntries))
-	for _, e := range s.udpEntries {
-		entries = append(entries, e)
-	}
+	e := s.boundUDPEntry
 	s.udpMu.Unlock()
-	for _, e := range entries {
-		if e.hasActiveSessions() {
-			return true
-		}
-	}
-	return false
+	return e != nil && e.hasActiveSessions()
 }
 
 // acceptListener 取当前的 QUIC 监听; 未起或已释放时返回 nil。
@@ -378,23 +373,20 @@ func (d *directPeer) closeTransport() {
 	}
 }
 
-// bindUDPEntry 登记某个入口, 使其能收到该连接上对应端口的回程 datagram。
-func (s *directSession) bindUDPEntry(port uint16, e *directUDPEntry) {
+// bindUDPEntry 登记这条连接绑定的入口, 使其能收到回程 datagram。
+func (s *directSession) bindUDPEntry(e *directUDPEntry) {
 	s.udpMu.Lock()
-	if s.udpEntries == nil {
-		s.udpEntries = make(map[uint16]*directUDPEntry)
-	}
-	s.udpEntries[port] = e
+	s.boundUDPEntry = e
 	s.udpMu.Unlock()
 }
 
-func (s *directSession) udpEntry(port uint16) *directUDPEntry {
+func (s *directSession) udpEntry() *directUDPEntry {
 	s.udpMu.Lock()
 	defer s.udpMu.Unlock()
-	return s.udpEntries[port]
+	return s.boundUDPEntry
 }
 
-func newDirectPeer(tag string, cfg conf.WsClient, forward map[uint16]string) *directPeer {
+func newDirectPeer(tag string, cfg conf.WsClient, forward map[string]string) *directPeer {
 	return &directPeer{
 		tag:      tag,
 		cfg:      cfg,
@@ -474,7 +466,7 @@ type directTokenStore struct {
 }
 
 type directTokenEntry struct {
-	port    uint16
+	tag     string
 	expires time.Time
 
 	// relay 为 true 表示这条连接是经 VPS 盲转发来的: VPS 不可信, 光有 token 不够, 进数据面
@@ -488,13 +480,13 @@ func newDirectTokenStore() *directTokenStore {
 	return &directTokenStore{tokens: make(map[string]directTokenEntry)}
 }
 
-func (s *directTokenStore) put(token string, port uint16) {
-	s.putEntry(token, directTokenEntry{port: port})
+func (s *directTokenStore) put(token string, tag string) {
+	s.putEntry(token, directTokenEntry{tag: tag})
 }
 
-// putRelay 登记一条中继连接的凭证: 除端口外还记下"需 uuid 挑战-应答"及发起方 email。
-func (s *directTokenStore) putRelay(token string, port uint16, email string) {
-	s.putEntry(token, directTokenEntry{port: port, relay: true, email: email})
+// putRelay 登记一条中继连接的凭证: 除 tag 外还记下"需 uuid 挑战-应答"及发起方 email。
+func (s *directTokenStore) putRelay(token string, tag string, email string) {
+	s.putEntry(token, directTokenEntry{tag: tag, relay: true, email: email})
 }
 
 func (s *directTokenStore) putEntry(token string, e directTokenEntry) {
@@ -534,7 +526,7 @@ const (
 	directCapReadyACK = byte(1)
 )
 
-// directStreamPull 取件流: 与 directStreamFile 同一套身份校验和端口(directFilePort),
+// directStreamPull 取件流: 与 directStreamFile 同一套身份校验和端口(directFileTag),
 // 只是字节流向相反 —— 发起方在流上说要什么, 对端把文件推回来(见 nat/file_pull.go)。
 const directStreamPull = "pull"
 
@@ -546,7 +538,7 @@ const directStreamPull = "pull"
 type directStreamHead struct {
 	Kind  string `json:"kind"`
 	Token string `json:"token"`
-	Port  uint16 `json:"port"`
+	Tag   string `json:"tag"`
 	Ready bool   `json:"ready,omitempty"` // 请求 C 在落地目标连通后回一个 ready ACK
 }
 

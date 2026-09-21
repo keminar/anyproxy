@@ -43,7 +43,8 @@ func isRelayUDPMethod(method string) bool {
 // 那是它确实连得通的地址; 让 B 自报公网地址反而容易报错(B 可能在 NAT/负载均衡后面,
 // 也可能有多个出口地址)。
 type RelayUDPOpen struct {
-	Port  uint16 `json:"port"`  //B 上这条中继入口的端口, 同时也是 C 要查的 client.forward 端口
+	Port  uint16 `json:"port"`  //B 上这条中继入口实际绑定的端口, C 用它去真正拨号建上行(不做白名单匹配用)
+	Tag   string `json:"tag"`   //对应 server.forward[].tag, C 据此查 client.forward 的白名单目标
 	Token string `json:"token"` //一次性凭证, C 在注册包里原样出示, 防止别人冒充上行
 }
 
@@ -51,6 +52,7 @@ type RelayUDPOpen struct {
 // B 据此立刻放弃并打日志, 而不是让客户端干等到超时。
 type RelayUDPReady struct {
 	Port uint16 `json:"port"`
+	Tag  string `json:"tag"`
 	Err  string `json:"err"`
 }
 

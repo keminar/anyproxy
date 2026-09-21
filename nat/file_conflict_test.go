@@ -683,12 +683,12 @@ func TestChunkedOverwrite(t *testing.T) {
 			t.Fatalf("transport: %v", terr)
 		}
 		const token = "test-token-chunk-overwrite"
-		c.tokens.put(token, directFilePort)
+		c.tokens.put(token, directFileTag)
 		sess, terr := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 		if terr != nil {
 			t.Fatalf("connect: %v", terr)
 		}
-		if terr := a.authenticateSession(sess, token, directFilePort, false, ""); terr != nil {
+		if terr := a.authenticateSession(sess, token, directFileTag, false, ""); terr != nil {
 			t.Fatalf("authenticate: %v", terr)
 		}
 		items, _ := collectFiles([]string{srcPath})

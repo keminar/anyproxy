@@ -58,7 +58,7 @@ func TestConnectServerSkipsWithoutPersistentReason(t *testing.T) {
 			name: "explicit sendRecvOnly overrides a configured forward",
 			cfg: conf.WsClient{
 				Connect: "127.0.0.1:1", User: "a", Email: "a@example.com", SendRecvOnly: true,
-				Forward: []conf.ClientForward{{Port: 22, Target: "127.0.0.1:22"}},
+				Forward: []conf.ClientForward{{Tag: "22", Target: "127.0.0.1:22"}},
 			},
 		},
 	}

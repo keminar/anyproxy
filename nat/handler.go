@@ -31,7 +31,7 @@ type wsClientConn struct {
 	liveIndex int // 在 conf.RouterConfig().Websocket.ClientList() 里的下标, 用于热加载重新取值, 见 liveAuthCfg
 	hub       *Hub
 	bridge    *BridgeHub
-	forward   map[uint16]string
+	forward   map[string]string
 	tempDelay time.Duration
 	tag       string      // 日志前缀, 用 cfg.Connect 区分是哪条连接
 	direct    *directPeer // QUIC 直连运行时, 未启用时为 nil

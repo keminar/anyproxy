@@ -73,7 +73,7 @@ func (s *wsTunnel) transfer() bool {
 	}()
 
 	// 发送创建连接请求
-	b.Open(0)
+	b.Open("")
 	var err error
 	done := make(chan struct{})
 

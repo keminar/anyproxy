@@ -401,12 +401,12 @@ func TestWsClientWantsPersistentConnect(t *testing.T) {
 	}{
 		{"nothing configured", WsClient{}, false},
 		{"subscribe", WsClient{Subscribe: []Subscribe{{Key: "k", Val: "v"}}}, true},
-		{"forward", WsClient{Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, true},
-		{"direct rule", WsClient{Direct: DirectSettings{Rules: []ClientDirect{{Listen: ":1", Email: "a@example.com", ForwardPort: 1}}}}, true},
+		{"forward", WsClient{Forward: []ClientForward{{Tag: "ssh", Target: "127.0.0.1:22"}}}, true},
+		{"direct rule", WsClient{Direct: DirectSettings{Rules: []ClientDirect{{Listen: ":1", Forward: DirectForwardTarget{Email: "a@example.com", Tag: "1"}}}}}, true},
 		{"direct.accept", WsClient{Direct: DirectSettings{Accept: true}}, true},
 		{"receive.dir", WsClient{Receive: ClientReceive{Dir: "/data"}}, true},
 		{"sendRecvOnly alone", WsClient{SendRecvOnly: true}, false},
-		{"sendRecvOnly overrides forward", WsClient{SendRecvOnly: true, Forward: []ClientForward{{Port: 22, Target: "127.0.0.1:22"}}}, false},
+		{"sendRecvOnly overrides forward", WsClient{SendRecvOnly: true, Forward: []ClientForward{{Tag: "ssh", Target: "127.0.0.1:22"}}}, false},
 		{"sendRecvOnly overrides receive.dir", WsClient{SendRecvOnly: true, Receive: ClientReceive{Dir: "/data"}}, false},
 	}
 	for _, c := range cases {

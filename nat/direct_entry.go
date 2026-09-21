@@ -25,7 +25,7 @@ import (
 // websocket 重连反复创建。
 func (d *directPeer) startEntries(rules []conf.ClientDirect) {
 	for _, r := range rules {
-		if r.Listen == "" || r.Email == "" {
+		if r.Listen == "" || r.Forward.Email == "" {
 			d.logf("skip direct rule with empty listen/email: %+v", r)
 			continue
 		}
@@ -66,7 +66,7 @@ func (d *directPeer) listenEntry(r conf.ClientDirect) {
 		d.logf("direct entry listen %s failed: %v", r.Listen, err)
 		return
 	}
-	d.logf("direct entry listening on %s -> email %s (port %d)", r.Listen, r.Email, r.ForwardPort)
+	d.logf("direct entry listening on %s -> email %s (tag %q)", r.Listen, r.Forward.Email, r.Forward.Tag)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -85,7 +85,7 @@ func (d *directPeer) handleEntry(conn net.Conn, r conf.ClientDirect) {
 	id := uint(forwardInc.ID())
 	src := conn.RemoteAddr()
 	start := time.Now()
-	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry accept %s -> email %s (port %d)", src, r.Email, r.ForwardPort))
+	log.Println(trace.ID(id), fmt.Sprintf("nat direct entry accept %s -> email %s (tag %q)", src, r.Forward.Email, r.Forward.Tag))
 
 	sess, stream, err := d.openStream(r)
 	if err != nil {
@@ -113,18 +113,18 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 	}
 	// 连接已在 ensureSession 里认证过, 数据流不必再带凭证。QUIC 的 stream 相互独立,
 	// 一条连接上并发多个会话不会像单条 TCP 复用那样互相队头阻塞。
-	stream, err := d.openDataStream(sess, r.ForwardPort)
+	stream, err := d.openDataStream(sess, r.Forward.Tag)
 	if err == nil {
 		return sess, stream, nil
 	}
 	// 连接可能已被对端关掉、空闲回收掉或超时老化, 丢弃后完整重建一次。
-	d.dropSession(r.Email, sess, route)
-	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Email, err)
+	d.dropSession(r.Forward.Email, sess, route)
+	d.logf("reusing quic session to %s failed (%v), rebuilding", r.Forward.Email, err)
 	sess, err = d.ensureSession(r)
 	if err != nil {
 		return nil, nil, err
 	}
-	stream, err = d.openDataStream(sess, r.ForwardPort)
+	stream, err = d.openDataStream(sess, r.Forward.Tag)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -135,7 +135,7 @@ func (d *directPeer) openStream(r conf.ClientDirect) (*directSession, *quic.Stre
 // TCP 与 UDP 两条通路共用它。
 func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) {
 	route := sessionRouteForRule(r)
-	if sess := d.session(r.Email, route); sess != nil {
+	if sess := d.session(r.Forward.Email, route); sess != nil {
 		return sess, nil
 	}
 	// A 侧也需要自己的 socket: QUIC 从它拨出去, 它的端点还要报给服务端, 好让 C 朝它
@@ -167,8 +167,8 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 			}
 		}
 	case d.cfg.Direct.PunchFirst:
-		if err := d.send(METHOD_DIRECT_PUNCHING, 0, DirectPunching{Email: r.Email, Token: token}); err != nil {
-			d.logf("send punch-first nudge to %s failed: %v (peer will fall back to its timed delay)", r.Email, err)
+		if err := d.send(METHOD_DIRECT_PUNCHING, 0, DirectPunching{Email: r.Forward.Email, Token: token}); err != nil {
+			d.logf("send punch-first nudge to %s failed: %v (peer will fall back to its timed delay)", r.Forward.Email, err)
 		}
 	}
 	// **端点一到就先打洞**, 不等指纹: 两段式 offer(中继)里第一段只带中继端点 E, 而 C 那边的
@@ -187,23 +187,23 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	// 不是每条候选都拨 QUIC: 打洞包一来一回就够判断通不通与快慢, 通常犯不着为选路
 	// 多付出 N 次完整握手的成本。择优**不等所有候选**(见 pickPeerAddr)。
 	var sess *directSession
-	winner, punchErr := d.pickPeerAddr(r.Email, run)
+	winner, punchErr := d.pickPeerAddr(r.Forward.Email, run)
 	if punchErr == nil {
-		sess, err = d.connectPeer(tr, r.Email, winner.Addr, final.Fingerprint, route)
+		sess, err = d.connectPeer(tr, r.Forward.Email, winner.Addr, final.Fingerprint, route)
 	} else {
 		// 打洞全灭才退这一步: 有状态防火墙/运营商设备可能按明文特征拦了自定义 PUNCH
 		// 协议, 但同一个 socket 上真实的 QUIC Initial 包(标准 TLS 1.3 握手)不容易被
 		// 针对性拦截。不再像以前那样从候选列表里盲选一条去赌, 而是对**所有**候选并行
 		// 发起真实拨号竞速, 谁先握手成功用谁(见 raceQUICDial)。
 		d.logf("path selection for %s: punch all failed (%v), falling back to a quic dial race across all candidates",
-			r.Email, punchErr)
-		sess, err = d.raceQUICDial(tr, r.Email, final.Fingerprint, hs.addrs, route)
+			r.Forward.Email, punchErr)
+		sess, err = d.raceQUICDial(tr, r.Forward.Email, final.Fingerprint, hs.addrs, route)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := d.authenticateSession(sess, token, r.ForwardPort, r.Via != "", final.Fingerprint); err != nil {
-		d.dropSession(r.Email, sess, route)
+	if err := d.authenticateSession(sess, token, r.Forward.Tag, r.Via != "", final.Fingerprint); err != nil {
+		d.dropSession(r.Forward.Email, sess, route)
 		return nil, err
 	}
 	// 回程 datagram 的分发依赖这条 goroutine, TCP-only 的连接上它只是空转等关闭。
@@ -218,8 +218,8 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 // 中继连接(relay=true)在出示 token 之后、等确认之前, 还要应答 C 的 uuid 挑战(见
 // direct_relay_auth.go): C 经不可信 VPS 转来, 要靠这步确认对面确是允许的 A。fingerprint 是
 // C 的证书指纹(A 用它固定 TLS, 也把它绑进应答防中继层重放)。
-func (d *directPeer) authenticateSession(sess *directSession, token string, port uint16, relay bool, fingerprint string) error {
-	stream, err := d.openHeadedStream(sess, directStreamAuth, token, port)
+func (d *directPeer) authenticateSession(sess *directSession, token string, tag string, relay bool, fingerprint string) error {
+	stream, err := d.openHeadedStream(sess, directStreamAuth, token, tag)
 	if err != nil {
 		return fmt.Errorf("open auth stream: %w", err)
 	}
@@ -247,21 +247,22 @@ func (d *directPeer) authenticateSession(sess *directSession, token string, port
 	return nil
 }
 
-// receiveDatagrams A 侧收回程 UDP 数据, 按端口找到对应入口投递回用户。
+// receiveDatagrams A 侧收回程 UDP 数据, 投递回这条连接绑定的那个入口(一条 session
+// 严格对应一条规则, 见 directSession.boundUDPEntry 的注释)。
 func (d *directPeer) receiveDatagrams(sess *directSession) {
 	for {
 		msg, err := sess.conn.ReceiveDatagram(context.Background())
 		if err != nil {
 			return
 		}
-		sessionID, port, payload, err := parseDatagram(msg)
+		sessionID, payload, err := parseDatagram(msg)
 		if err != nil {
 			d.logf("bad datagram from %s: %v", sess.addr, err)
 			continue
 		}
-		entry := sess.udpEntry(port)
+		entry := sess.udpEntry()
 		if entry == nil {
-			continue // 没有对应入口(规则已撤或端口对不上), 丢弃
+			continue // 没有绑定的入口(规则已撤), 丢弃
 		}
 		entry.deliver(sessionID, payload)
 	}
@@ -273,7 +274,7 @@ func (d *directPeer) udpSession(r conf.ClientDirect, e *directUDPEntry) (*direct
 	if err != nil {
 		return nil, err
 	}
-	sess.bindUDPEntry(r.ForwardPort, e)
+	sess.bindUDPEntry(e)
 	return sess, nil
 }
 
@@ -354,9 +355,9 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, *peerHandshake, e
 	// 哪些没探到 —— 排查直连问题时这些缺一不可。encrypt 一起打出来, 排查"punch 是不是
 	// 用了加密"不用再翻配置反推。
 	d.logf("requesting %s: local socket port %d, my candidates %v, encrypt=%v",
-		r.Email, d.localUDPPort(), myCands, d.cfg.Direct.Encrypt)
+		r.Forward.Email, d.localUDPPort(), myCands, d.cfg.Direct.Encrypt)
 
-	req := DirectRequest{Email: r.Email, Port: r.ForwardPort, Token: token,
+	req := DirectRequest{Email: r.Forward.Email, Tag: r.Forward.Tag, Token: token,
 		Candidates: myCands, Endpoint: firstAddr(myCands), Encrypt: d.cfg.Direct.Encrypt,
 		PunchFirst: d.cfg.Direct.PunchFirst, Via: r.Via, TwoPhase: r.Via != ""}
 	if err := d.send(METHOD_DIRECT_REQUEST, reqID, req); err != nil {
@@ -373,7 +374,7 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, *peerHandshake, e
 	}
 	if hs.done != nil {
 		d.logf("server says %s has candidates %v (fingerprint %s)",
-			r.Email, hs.addrs, shortFP(hs.done.Fingerprint))
+			r.Forward.Email, hs.addrs, shortFP(hs.done.Fingerprint))
 	} else {
 		// 半截 offer: 端点已经够开打了, 指纹还在路上 —— 让调用方立刻开始打洞, 与对端
 		// 那边的信令重叠。
@@ -546,8 +547,8 @@ func (d *directPeer) drainDialRace(email, winnerAddr string, ch <-chan directDia
 }
 
 // openHeadedStream 在已建立的连接上开一条流并写好首部。
-func (d *directPeer) openHeadedStream(sess *directSession, kind, token string, port uint16) (*quic.Stream, error) {
-	return d.openStreamWithHead(sess, directStreamHead{Kind: kind, Token: token, Port: port})
+func (d *directPeer) openHeadedStream(sess *directSession, kind, token, tag string) (*quic.Stream, error) {
+	return d.openStreamWithHead(sess, directStreamHead{Kind: kind, Token: token, Tag: tag})
 }
 
 func (d *directPeer) openStreamWithHead(sess *directSession, head directStreamHead) (*quic.Stream, error) {
@@ -567,8 +568,8 @@ func (d *directPeer) openStreamWithHead(sess *directSession, head directStreamHe
 // openDataStream 在新版对端上等待 ready ACK。这个往返既确认 C 已成功 dial 落地目标，也能
 // 识别“VPS 已重启、A 却还缓存着指向旧 relay binding 的 QUIC session”：旧路径上本地开流
 // 可能成功，但 ACK 不会回来，调用方随后会 dropSession 并完整重建一次。
-func (d *directPeer) openDataStream(sess *directSession, port uint16) (*quic.Stream, error) {
-	head := directStreamHead{Kind: directStreamData, Port: port, Ready: sess.streamReady.Load()}
+func (d *directPeer) openDataStream(sess *directSession, tag string) (*quic.Stream, error) {
+	head := directStreamHead{Kind: directStreamData, Tag: tag, Ready: sess.streamReady.Load()}
 	stream, err := d.openStreamWithHead(sess, head)
 	if err != nil || !head.Ready {
 		return stream, err
@@ -609,24 +610,24 @@ func (d *directPeer) onOffer(msg *Message) {
 	}
 }
 
-// directSessionRoute 是一条可复用 QUIC session 的完整入口/路由身份。同一个 C/端口经不同
+// directSessionRoute 是一条可复用 QUIC session 的完整入口/路由身份。同一个 C/tag 经不同
 // VPS 是不同的 UDP 路径；不同 listen 也必须隔离，因为 UDP 回程入口挂在 session 上，复用会
-// 让同 forwardPort 的后一条本地监听覆盖前一条。
+// 让同 tag 的后一条本地监听覆盖前一条。
 type directSessionRoute struct {
 	listen string
-	port   uint16
+	tag    string
 	via    string
 }
 
 func sessionRouteForRule(r conf.ClientDirect) directSessionRoute {
-	return directSessionRoute{listen: r.Listen, port: r.ForwardPort, via: r.Via}
+	return directSessionRoute{listen: r.Listen, tag: r.Forward.Tag, via: r.Via}
 }
 
 func sessionKey(email string, route ...directSessionRoute) string {
 	if len(route) == 0 {
 		return email // compatibility for tests and legacy internal callers
 	}
-	return fmt.Sprintf("%s#%d#via=%s#listen=%s", email, route[0].port, route[0].via, route[0].listen)
+	return fmt.Sprintf("%s#%s#via=%s#listen=%s", email, route[0].tag, route[0].via, route[0].listen)
 }
 
 func (d *directPeer) session(email string, route ...directSessionRoute) *directSession {
@@ -678,11 +679,11 @@ func (d *directPeer) reapSessions() {
 // 能直接回答的依据。只在有变化时打, 免得空闲期刷屏。
 func (d *directPeer) logUDPTraffic() {
 	d.mu.Lock()
-	entries := make(map[uint16]*directUDPEntry)
+	entries := make([]*directUDPEntry, 0, len(d.sessions))
 	for _, s := range d.sessions {
 		s.udpMu.Lock()
-		for port, e := range s.udpEntries {
-			entries[port] = e
+		if s.boundUDPEntry != nil {
+			entries = append(entries, s.boundUDPEntry)
 		}
 		s.udpMu.Unlock()
 	}
@@ -694,7 +695,7 @@ func (d *directPeer) logUDPTraffic() {
 			continue // 这一轮没有新流量, 或还没有上一轮可比
 		}
 		d.logf("direct udp %s -> email %s: sessions=%d up=%dB/%dpkt(%s) down=%dB/%dpkt(%s)",
-			e.rule.Listen, e.rule.Email, e.sessionCount(),
+			e.rule.Listen, e.rule.Forward.Email, e.sessionCount(),
 			snap.UpBytes, snap.UpPkts, snap.UpRate, snap.DownBytes, snap.DownPkts, snap.DownRate)
 	}
 }

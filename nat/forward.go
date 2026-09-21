@@ -25,23 +25,23 @@ const forwardAliveInterval = 60 * time.Second
 // 判定为僵尸连接并主动关闭入口连接触发正常关闭流程。可按需调整。
 const forwardIdleTimeout = 30 * time.Minute
 
-// buildForward 订阅方按自己这条连接的配置构建 端口->target 映射(见 conf.ClientForward)。
+// buildForward 订阅方按自己这条连接的配置构建 tag->target 映射(见 conf.ClientForward)。
 // 每条 server 连接各自持有一份(见 nat/handler.go 的 wsClientConn.forward), 互不干扰。
 //
-// 同一条连接的 forward[] 里配重复 port 时, 保留先出现的那条、丢弃后面的并打警告——
+// 同一条连接的 forward[] 里配重复 tag 时, 保留先出现的那条、丢弃后面的并打警告——
 // 不能像 map 写入那样悄悄用后一条覆盖前一条: 那样两条规则都"看起来配了", 但其中
 // 一条永远拨不到自己的目标, 且没有任何日志能看出发生过这次覆盖, 排查起来无从下手。
-func buildForward(rules []conf.ClientForward) map[uint16]string {
-	m := map[uint16]string{}
+func buildForward(rules []conf.ClientForward) map[string]string {
+	m := map[string]string{}
 	for _, r := range rules {
-		if r.Port == 0 || r.Target == "" {
+		if r.Tag == "" || r.Target == "" {
 			continue
 		}
-		if existing, ok := m[r.Port]; ok {
-			log.Printf("nat local forward: duplicate port %d (target %q ignored, keeping %q)", r.Port, r.Target, existing)
+		if existing, ok := m[r.Tag]; ok {
+			log.Printf("nat local forward: duplicate tag %q (target %q ignored, keeping %q)", r.Tag, r.Target, existing)
 			continue
 		}
-		m[r.Port] = r.Target
+		m[r.Tag] = r.Target
 	}
 	if len(m) > 0 {
 		log.Printf("nat local forward map: %v", m)
@@ -71,13 +71,13 @@ func dialForCreate(c *Client, msg *Message) (*net.TCPConn, error) {
 	var conn net.Conn
 	var err error
 	if msg.Type == ConnTCP {
-		target, ok := c.forward[msg.Port]
+		target, ok := c.forward[msg.Tag]
 		if !ok {
-			return nil, fmt.Errorf("no forward target for entry port %d", msg.Port)
+			return nil, fmt.Errorf("no forward target for entry tag %q", msg.Tag)
 		}
 		conn, err = bypassDial("tcp", target, 5*time.Second)
 		if err == nil {
-			log.Println(trace.ID(msg.ID), c.tag, fmt.Sprintf("local tcp forward connecting to %s (entry port %d)", target, msg.Port))
+			log.Println(trace.ID(msg.ID), c.tag, fmt.Sprintf("local tcp forward connecting to %s (entry tag %q)", target, msg.Tag))
 		}
 	} else {
 		conn = dialProxy() //创建本地与本地代理端口之间的连接
@@ -162,11 +162,12 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	}
 
 	id := forwardInc.ID()
-	// 服务端入口端口: 从监听地址解析, 供订阅方查固定 target
+	// 服务端入口物理端口: 只用于日志和 net.Listen, 不再充当订阅方查表的键——
+	// 那件事现在由 r.Tag 承担, 与监听端口彻底解耦。
 	port := listenPort(r.Addr())
 	src := conn.RemoteAddr()
 	start := time.Now()
-	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d)", src, r.Email, port))
+	log.Println(trace.ID(id), fmt.Sprintf("nat forward accept %s -> email %s (entry port %d, tag %q)", src, r.Email, port, r.Tag))
 
 	b := st.bridge.Register(c, id, ConnTCP, conn)
 	defer b.Unregister()
@@ -206,7 +207,7 @@ func handleForward(conn *net.TCPConn, r conf.ServerForward) {
 	}()
 
 	// 通知订阅方创建到内网目标的连接
-	b.Open(port)
+	b.Open(r.Tag)
 
 	done := make(chan struct{})
 	var upErr error

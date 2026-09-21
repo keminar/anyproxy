@@ -72,8 +72,8 @@ any client ──TCP──▶ server :2222 (bare TCP listener)
      subscriber ──dial hard-coded target 127.0.0.1:22──▶ intranet sshd
 ```
 
-- Server: each `websocket.server.forward[].listen` starts a bare TCP listener (when `listen` carries a `udp://`/`both://` prefix, a UDP relay on the same port is also started) (`StartForward`/`listenForward` in `nat/forward.go`); each incoming connection is bridged to a subscriber by that rule's `email` (`GetClientByEmail`).
-- Subscriber: `websocket.client.forward[].port → target` builds a mapping (`buildForward` in `nat/forward.go`, one copy per server connection). When a connection arrives on the entry port `Port`, it dials the corresponding `target`; **if `Port` is not in the local mapping it is rejected** (`dialForCreate` in `nat/forward.go`) — an inherent whitelist. The rejection reason is returned to the server via `METHOD_CLOSE` (`Bridge.CloseReason`), folded into the server's own `nat forward closed ... reason=peer close: ...` summary line — no need to cross machines to dig through the subscriber's local logs.
+- Server: each `websocket.server.forward[].listen` starts a bare TCP listener (when `listen` carries a `udp://`/`both://` prefix, a UDP relay on the same port is also started) (`StartForward`/`listenForward` in `nat/forward.go`); each incoming connection is bridged to a subscriber by that rule's `email` (`GetClientByEmail`), and that rule's `tag` is passed along to the subscriber together with it.
+- Subscriber: `websocket.client.forward[].tag → target` builds a mapping (`buildForward` in `nat/forward.go`, one copy per server connection). When a connection arrives carrying the server's `tag`, it dials the corresponding `target`; **if the `tag` is not in the local mapping it is rejected** (`dialForCreate` in `nat/forward.go`) — an inherent whitelist. The rejection reason is returned to the server via `METHOD_CLOSE` (`Bridge.CloseReason`), folded into the server's own `nat forward closed ... reason=peer close: ...` summary line — no need to cross machines to dig through the subscriber's local logs. `listen` is now purely about which physical port the server binds — the subscriber doesn't need to change anything to match it; the two sides pair by `tag` string equality, no longer by coincidentally-equal port numbers.
 - Fits: exposing any internal TCP service such as a web server or database (e.g. remote SSH, intranet web).
 
 #### The second channel of Path B: UDP relay (`listen: "udp://..."` or `"both://..."`)
@@ -91,9 +91,10 @@ websocket:
     forward:
       - listen: "both://:3389"   # protocol prefix: tcp://(default, optional)/ udp:// / both://
         email: c@example.com
+        tag: rdp
 ```
 
-The subscriber needs no change: the landing target still consults the same `client.forward[port] → target` whitelist, and unmapped ports are rejected the same way.
+The subscriber needs no change: the landing target still consults the same `client.forward[tag] → target` whitelist, and unmapped tags are rejected the same way.
 
 **Why a separate channel instead of stuffing UDP into the websocket**: websocket runs over TCP; stuffing datagrams into it means re-wrapping every packet with retransmission and ordering — drop one packet and every already-arrived frame behind it must queue waiting for it. That is precisely what the RDP UDP channel deliberately avoids, and doing it would only be laggier than pure TCP. Here all three segments are UDP end to end, so a dropped packet is just a dropped packet, not amplified into a stall.
 
@@ -120,7 +121,7 @@ any client ──TCP──▶ A (subscriber) :13389 (local entry listener)
                       server B (signaling only)
                         │ ②
                         ▼
-     A ══QUIC direct (v4/v6/port mapping, best of)══▶ C (subscriber) ──dial client.forward[port]──▶ intranet RDP
+     A ══QUIC direct (v4/v6/port mapping, best of)══▶ C (subscriber) ──dial client.forward[tag]──▶ intranet RDP
 ```
 
 The code is in [nat/direct.go](../nat/direct.go), [direct_entry.go](../nat/direct_entry.go) (A side), [direct_accept.go](../nat/direct_accept.go) (C side), [direct_broker.go](../nat/direct_broker.go) (server signaling), [direct_reflect.go](../nat/direct_reflect.go) (UDP reflector).
@@ -143,8 +144,8 @@ websocket:
     email: home
     direct:
       accept: true                   # allow others to connect to me directly (listener starts on demand, no port occupied normally)
-    forward:                         # reuse the same whitelist: unmapped ports are rejected
-      - port: 3389
+    forward:                         # reuse the same whitelist: unmapped tags are rejected
+      - tag: rdp
         target: 192.168.1.10:3389
 
 # A (the initiator, the entry is on its own machine)
@@ -157,8 +158,9 @@ websocket:
     direct:
       rules:
         - listen: "both://:13389"    # local entry, mstsc connects here; protocol prefix tcp://(default, optional)/udp:///both://
-          email: home                # connect directly to the subscriber with this email
-          forwardPort: 3389          # which rule in the other side's forward[] (whitelist index), not the intranet target port; rejected if the other side didn't configure this index
+          forward:
+            email: home              # connect directly to the subscriber with this email
+            tag: rdp                 # which rule in the other side's forward[] (whitelist index), not the intranet target port; rejected if the other side didn't configure this tag
 ```
 
 ### Multiple paths raced simultaneously, winner is whoever connects
@@ -239,8 +241,9 @@ websocket:
       encrypt: true   # pure toggle, no uuid/receive.allow needed; applies to rules[] and -send/-recv simultaneously; both ends must match
       rules:
         - listen: "both://:13389"
-          email: home
-          forwardPort: 3389
+          forward:
+            email: home
+            tag: rdp
 ```
 
 ### Blind forwarding relay via VPS (`via` / `direct.relay`)
@@ -258,7 +261,7 @@ The key is that this VPS **needs no per A-C configuration** (no `forward`/`direc
 - **Both legs are "resident→cloud" punching**: A and C both punch first, the VPS waits for their respective nudges before punching back (reusing the `direct.punchFirst` ordering mechanism). If either leg fails to punch, the whole relay fails, with no further fallback.
 - **Authentication is end-to-end between A↔C, bypassing the untrusted VPS**: A uses C's certificate fingerprint to fix-verify the peer is the real C; C does a one-time **uuid challenge-response** on the first stream of the e2e QUIC (sends a random nonce, A replies `HMAC(uuid, nonce ‖ C's certificate fingerprint)`), verified against A's uuid in its own `receive.allow` — **the uuid never goes on the network**, bound to C's fingerprint to prevent VPS-layer replay. So C must configure A's uuid in `receive.allow` (reusing the same list as file transfer).
 - **`direct.encrypt` is unrelated to the relay**: the relay's security does not depend on it; it only anti-DPIs the two legs' punch packets.
-- **Session reuse includes the full entry/route identity**: A keys reusable QUIC sessions by `listen + target email + forwardPort + via`; different local entries, direct versus relayed paths, and different relay VPSes cannot accidentally reuse one another's session. Isolating `listen` also prevents two UDP rules for the same target port from overwriting each other's return entry.
+- **Session reuse includes the full entry/route identity**: A keys reusable QUIC sessions by `listen + target email + forward.tag + via`; different local entries, direct versus relayed paths, and different relay VPSes cannot accidentally reuse one another's session. Isolating `listen` also prevents two UDP rules for the same target port from overwriting each other's return entry.
 
 **Requirement on the VPS: a stable, inbound-reachable public endpoint.** The VPS normally derives E from the reflector probing its own egress mapping, which is fine under **1:1 public IP or endpoint-independent (EIM/cone) NAT** (a normal cloud host 10.x→fixed 49.x is this case). But if the VPS sits behind a **NAT gateway with per-flow random egress IP/port (symmetric)**, the reflector-probed egress ≠ the inbound mapping corresponding to A/C's packets, and the relay fails (same reason as symmetric NAT being unpunchable). In that case, configure a **fixed DNAT inbound rule** on this VPS (public `IP:port` → the VPS's same UDP port), and explicitly fill that public endpoint with `direct.relayPublic`: it skips the reflector and binds the relay socket to that port, with inbound always open regardless of egress randomness. One port can only carry one concurrent relay pair; for more concurrency, configure more ports (each with its DNAT/security group). Of course, the easiest is still giving the relay VPS a real 1:1 public IP.
 
@@ -304,8 +307,9 @@ websocket:
       punchFirst: true
       rules:
         - listen: "both://:13389"     # mstsc connects here
-          email: home                 # final target C
-          forwardPort: 3389
+          forward:
+            email: home                # final target C
+            tag: rdp
           via: relay-vps              # relay through this VPS
 
 # VPS (public): one switch, no per-pair config needed
@@ -322,7 +326,7 @@ websocket:
       punchFirst: true
       accept: true
     forward:
-      - {port: 3389, target: 192.168.1.10:3389}
+      - {tag: rdp, target: 192.168.1.10:3389}
     receive:
       allow:
         - {email: office, uuid: <A's uuid>}
@@ -633,9 +637,9 @@ Each account is **password or key, choose one** (if both are configured, key is 
 | `email` | this subscriber's identity, used for server/peer location (HTTP path assistance, TCP path matches `server.forward.email` by it, file transfer `-to`/`receive.allow` look up by it). Non-empty, itself not part of authentication nor a security boundary |
 | `uuid` | the identity credential of this config, only used between the two sides of file transfer (`-send`), completely invisible to B. **Cannot be configured in the config file**: auto-generated at startup and persisted to a hidden file with the same directory and name as the config file (`router.yaml` → `.router.uuid`), unchanged on restart; `-c` pointing at different config files gives independent ones, not shared. Printed in the startup log after generation, copy to the peer and fill into its `receive.allow[].uuid`. See "File transfer" |
 | `subscribe` | array of HTTP header subscription rules, each `{key, val}`; used by Path A |
-| `forward` | array of bare TCP forward target rules (Path B), each `{port, target}`, see below |
+| `forward` | array of bare TCP forward target rules (Path B), each `{tag, target}`, see below |
 | `direct.accept` | when `true`, starts a QUIC listener and advertises the endpoint to the server, allowing other subscribers to connect to itself directly (Path C, see below); listener starts on demand, releases on idle, occupies no port normally |
-| `direct.rules` | array of local QUIC direct entry rules (Path C), each `{listen, email, forwardPort, via}`, `listen` may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, see below |
+| `direct.rules` | array of local QUIC direct entry rules (Path C), each `{listen, forward: {email, tag}, via}`, `listen` may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, see below |
 | `direct.encrypt` | when `true`, the punch control packets (PUNCH/PONG) sent by this machine as punch initiator get extra encryption, guarding against operator devices dropping packets by cleartext signature; default `false`, pure opt-in. Per-client one-time toggle, applies to `direct.rules[]` and `-send`/`-recv` simultaneously, see "Punch control packet encryption" |
 | `direct.portmap` | when `true`, direct candidate collection will attempt UPnP/PCP/NAT-PMP port mapping; default `false` not tried — low hit rate and waits for three protocol timeouts, see "Multiple paths raced simultaneously, winner is whoever connects" above |
 | `direct.punchFirst` | when `true`, declares this machine is behind restricted operator CGNAT and must send the first packet when actively initiating direct (let the peer receiver delay punching); default `false`. Set it when a home-broadband machine can't connect to a public/cloud host, see [direct-punch-order.md](direct-punch-order.md) |
@@ -706,14 +710,14 @@ websocket:
         - key: X-Env
           val: home
       forward:
-        - port: 2222
+        - tag: ssh
           target: 127.0.0.1:22
     - connect: 198.51.100.10:3002
       user: anotheruser
       pass: anotherpass
       email: office
       forward:
-        - port: 2222          # entry port number may repeat with the previous one, no conflict (each connection has its own forward table)
+        - tag: rdp             # tag only needs to be unique within this server connection; reusing the name from the previous one is fine (each connection has its own forward table)
           target: 192.168.1.10:3389
 ```
 
@@ -727,18 +731,19 @@ Each element is a complete independent `WsClient` (same struct as a single `webs
 
 | Field | Role | Description |
 |------|------|-------------|
-| `listen` | server | entry listening address, e.g. `:2222`; may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, e.g. `both://:2222`. TCP is forwarded over websocket, UDP opens a separate UDP relay, the two going their own ways (see Path B's second channel) |
+| `listen` | server | entry listening address, e.g. `:2222`; may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, e.g. `both://:2222`. TCP is forwarded over websocket, UDP opens a separate UDP relay, the two going their own ways (see Path B's second channel). Which port it binds is purely a physical-layer matter now, no longer needing to equal any field on the subscriber side |
 | `email` | server | forward this entry port's connections to the subscriber with this `email` |
-| `port` | subscriber | corresponds to the server's entry port number (e.g. `2222`), TCP and UDP share the same table |
-| `target` | subscriber | the real intranet target to dial when a connection/datagram arrives on that port, e.g. `127.0.0.1:22` |
+| `tag` | server | tells the subscriber, along with each connection/datagram, which rule this is; only accepted if it string-equals the subscriber's `client.forward[].tag`, independent of the port number bound by `listen` |
+| `tag` | subscriber | matches when it string-equals this server rule's `forward[].tag`; TCP and UDP share the same table |
+| `target` | subscriber | the real intranet target to dial when a connection/datagram arrives with that tag, e.g. `127.0.0.1:22` |
 
 `client.direct.rules` each (`ClientDirect`, Path C's local direct entry, configured on the **initiator** A):
 
 | Field | Description |
 |------|-------------|
 | `listen` | local entry listening address, e.g. `:13389`; `:13389` binds `[::]` dual-stack, IPv4 clients also connect. May carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, e.g. `both://:13389` — the two protocols take different carriers on QUIC (stream / datagram), see "TCP and UDP" below; `both://` is common for RDP |
-| `email` | connect directly to the subscriber with this email (i.e. C, must match another subscriber under this `server` connection) |
-| `forwardPort` | tells C which rule in its own `client.forward[port]` to use; **not** the intranet target port to dial, nor the `listen` port above. Deliberately designed as a whitelist index: without it, A could make C forward to any intranet target C has configured just by `email`; with it, C only accepts ports listed in its own `forward`, and unmapped ones are rejected |
+| `forward.email` | connect directly to the subscriber with this email (i.e. C, must match another subscriber under this `server` connection) |
+| `forward.tag` | tells C which rule in its own `client.forward[]` to use, matched by `tag`; **not** the intranet target port to dial, nor the `listen` port above — it was never a port number at all, just a string selector (this field used to be called `forwardPort`, typed `uint16`, easily mistaken for a port; it has since been renamed to `tag`, typed `string`). Deliberately designed as a whitelist index: without it, A could make C forward to any intranet target C has configured just by `email`; with it, C only accepts tags listed in its own `forward`, and unlisted ones are rejected |
 | `via` | optional. Fill a public VPS's email (that VPS needs `direct.relay` on), then blindly forward to `email` (final target C) through it, rather than direct; empty = direct. Fits A, C both behind restricted CGNAT unable to punch to each other but each able to reach the VPS, see "Blind forwarding relay via VPS" |
 
 `client.receive` (`ClientReceive`, receives files sent via direct, configured on the **receiver** C, requires `direct.accept` too):
@@ -782,7 +787,7 @@ On failure it disconnects and reconnects with backoff (the subscriber has its ow
 - **`email` mismatch** → on bare TCP forward the server log shows `no forward ... no subscriber for email ...`. The server's `server.forward.email` must equal some subscriber's `client.email`.
 - **Clock skew > 300s** → auth failure, the subscriber receives `xtime err: your clock differs from the server by Ns ...` (with the actual skew). Keep both ends' time synced, or **switch to key-pair authentication** (above), which doesn't look at the clock.
 - **Blocked by the server's `allowIP`** → subscriber log `ws connect err: ... (server replied 403 Forbidden ...)`. Note IPv6 addresses rotate (RFC 4941 temporary addresses), so the whitelist should use prefix ranges rather than single addresses.
-- **Subscriber only trusts the whitelist**: it only dials the hard-coded `target` in its own `forward`, and unmapped `port`s are rejected outright — even if someone randomly connects to the server entry port they can't get into the intranet. **`forward[].port` holds the server's `forward.listen` entry port number** (e.g. `:2224` means fill `2224`), not the real intranet service port (e.g. RDP's `3389`) — confusing the two is the most common misconfig. The reason for this rejection is returned to the server via `METHOD_CLOSE`, reflected in the server's `nat forward closed ... reason=peer close: no forward target for entry port N` line, so no need to dig through the subscriber's local logs; old anyproxy versions lacked this return, and the server only saw the symptom (`up=19 down=0 dur=0s reason=...connection reset by peer`, the client sent the handshake packet but received nothing, disconnecting soon after).
+- **Subscriber only trusts the whitelist**: it only dials the hard-coded `target` in its own `forward`, and unmapped `tag`s are rejected outright — even if someone randomly connects to the server entry port they can't get into the intranet. **`forward[].tag` must string-equal the server's corresponding `forward[].tag`** (e.g. both written as `ssh`), unrelated to any port number — whether the server's `listen` binds `:2224` or some other port has no numeric relationship to the string filled in here on the subscriber side, and changing `listen` doesn't require changing the subscriber config to match; mistaking the tag for a port number (e.g. copying the digits from `listen`) is the most common misconfig. The reason for this rejection is returned to the server via `METHOD_CLOSE`, reflected in the server's `nat forward closed ... reason=peer close: no forward target for entry tag "xxx"` line, so no need to dig through the subscriber's local logs; old anyproxy versions lacked this return, and the server only saw the symptom (`up=19 down=0 dur=0s reason=...connection reset by peer`, the client sent the handshake packet but received nothing, disconnecting soon after).
 - **UDP relay's first packet is one beat slow**: the upstream is built only on receiving the first datagram, so the first packet waits one B→C→B round trip. RDP retries on its own, no need to worry; a self-written UDP app that doesn't retry should take note.
 - **UDP relay only starts when `listen` carries `udp://`/`both://` prefix**: without the prefix it defaults to `tcp://`, and just configuring `client.forward` is not enough — the entry rule's `listen` must also carry the protocol prefix.
 - **Path A doesn't support `CONNECT`**: the HTTP header subscription path only handles non-`CONNECT` HTTP requests.

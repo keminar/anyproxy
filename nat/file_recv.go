@@ -139,7 +139,7 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", from)
 		}
 		punchStart := time.Now()
-		rule := conf.ClientDirect{Email: from, ForwardPort: directFilePort, Via: relayVia}
+		rule := conf.ClientDirect{Forward: conf.DirectForwardTarget{Email: from, Tag: directFileTag}, Via: relayVia}
 		sess, err := sender.peer.ensureSession(rule)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was fetched: %w", from, err)

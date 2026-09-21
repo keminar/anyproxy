@@ -254,6 +254,7 @@ websocket:
     forward:
       - listen: :2222         # 公网入口端口（裸TCP监听）
         email: home@example.com # 转发给此 email 的订阅端
+        tag: ssh               # 与订阅端 forward[].tag 配对；改 listen 不用跟着改这个
 ```
 
 ```yaml
@@ -267,12 +268,12 @@ websocket:
     pass: SomePass1234567890
     email: home@example.com
     forward:
-      - port: 2222            # 对应服务端入口端口
-        target: 127.0.0.1:22  # 收到该端口的连接就 dial 内网真实目标（本机 sshd）
+      - tag: ssh              # 必须与服务端该条 forward[].tag 字符串相等，不是端口号
+        target: 127.0.0.1:22  # 收到该 tag 的连接就 dial 内网真实目标（本机 sshd）
     # 纯裸TCP转发无需 subscribe：email 命中 forward 规则即允许空订阅
 ```
 
-用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出的 `target`，未列端口拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email` 区分。
+用法：`ssh -p 2222 youruser@<服务端IP>` → 打到内网机器的 22。订阅端只会 dial 自己 `forward` 列出 `tag` 对应的 `target`，未列的 tag 拒绝（天然白名单）。多目标就加多条 `forward`，不同内网机器用不同 `email`/`tag` 区分。
 
 > `listen: off`（或 `-l off`）关闭本机代理监听，只跑 websocket 后台，适合纯穿透。**注意**：只有「裸 TCP 转发」能这么用；websocket 的「HTTP 头订阅」路径（8.1）依赖本机代理端口，关掉后不生效。
 
@@ -281,7 +282,7 @@ websocket:
 订阅端一个进程可同时回连多台 server，各自独立账号/转发表，用复数的 `clients` 数组（每项就是一个完整的 8.1/8.2 里 `websocket.client` 块）：
 
 ```yaml
-# 订阅端：同时穿透两台不同的服务端，入口端口可以重复(各自独立转发表, 不会冲突)
+# 订阅端：同时穿透两台不同的服务端，tag 可以重复(各自独立转发表, 不会冲突)
 listen: off
 websocket:
   clients:
@@ -291,7 +292,7 @@ websocket:
       pass: SomePass1234567890
       email: home@example.com
       forward:
-        - port: 2222
+        - tag: ssh
           target: 127.0.0.1:22
     - connect: <服务端B IP>:3002
       user: anotheruser
@@ -301,7 +302,7 @@ websocket:
         - key: X-Env
           val: office
       forward:
-        - port: 2222
+        - tag: rdp
           target: 192.168.1.10:3389
 ```
 
@@ -359,7 +360,7 @@ websocket:
     direct:
       accept: true              # 允许别人直连自己；监听按需起、空闲释放，平时不占端口
     forward:
-      - port: 3389              # 复用同一张白名单：未映射的 port 一律拒绝
+      - tag: rdp                # 复用同一张白名单：未映射的 tag 一律拒绝
         target: 192.168.1.10:3389
 ```
 
@@ -375,8 +376,9 @@ websocket:
     direct:
       rules:
         - listen: "both://:13389" # 本机入口，mstsc 连这里；协议前缀 tcp://(默认,可不写)/udp://both://，RDP 8+ 用 both://
-          email: home@example.com # 直连到这个 email 的订阅端
-          forwardPort: 3389        # 选对方 forward[] 里的哪条规则(白名单选号)，不是内网目标端口；对方没配这个号就拒绝
+          forward:
+            email: home@example.com # 直连到这个 email 的订阅端
+            tag: rdp                # 选对方 forward[] 里的哪条规则(白名单选号)，不是内网目标端口；对方没配这个 tag 就拒绝
 ```
 
 用法：`mstsc` 连 `127.0.0.1:13389`，实际字节走 A↔C 的 QUIC 直连，不经服务端。打洞失败就直接失败（连接被关掉，日志写明每条候选卡在哪），**没有中继回落**——要经中继就照 8.2 配 `server.forward`，两条路径互不兜底。字段与打洞机制详见 [websocket.md](websocket.md#配置字段)。
@@ -388,8 +390,9 @@ websocket:
       encrypt: true
       rules:
         - listen: "both://:13389"
-          email: home@example.com
-          forwardPort: 3389
+          forward:
+            email: home@example.com
+            tag: rdp
 ```
 
 **两台机器其实在同一局域网**时，可以用 `websocket.client.direct.lanAddrs` 手工把本机内网 IP 加为候选（不做网卡自动扫描），让直连优先走内网而不是绕公网，详见 [websocket.md](websocket.md#多条路同时打谁通用谁)。

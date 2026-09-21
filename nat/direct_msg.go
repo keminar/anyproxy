@@ -80,7 +80,7 @@ type DirectReady struct {
 // DirectRequest A 向服务端申请连接某个 email 的订阅方。
 type DirectRequest struct {
 	Email      string            `json:"email"`      //目标订阅方
-	Port       uint16            `json:"port"`       //要用对方 client.forward 里的哪条规则
+	Tag        string            `json:"tag"`        //要用对方 client.forward 里的哪条规则
 	Token      string            `json:"token"`      //本次会话的一次性凭证, A 生成, 经 B 转交给 C, 最后由 A 在 QUIC 流首部出示
 	Candidates []directCandidate `json:"candidates"` //A 的全部候选端点, 供 C 朝它们同时打洞
 
@@ -123,7 +123,7 @@ type DirectRequest struct {
 type DirectPunch struct {
 	PeerAddrs []directCandidate `json:"peerAddrs"` //A 的全部候选端点, C 朝它们同时打洞
 	Token     string            `json:"token"`     //期望 A 出示的凭证
-	Port      uint16            `json:"port"`      //A 要访问的转发规则端口, 0 表示文件传输
+	Tag       string            `json:"tag"`       //A 要访问的转发规则, 空串表示文件传输
 
 	// PeerAddr 同 DirectReady.Endpoint, 只为兼容旧版对端。
 	PeerAddr string `json:"peerAddr,omitempty"`

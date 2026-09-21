@@ -72,7 +72,7 @@ func newRelayBrokerFixture(t *testing.T, twoPhase bool) (*directBroker, *relaySe
 		token: "tok", asker: a, askerID: 7, aEmail: a.Email, cEmail: c.Email,
 		vpsEmail: vps.Email, vps: vps,
 		aCands: []directCandidate{{Addr: "198.51.100.1:42700", Source: candSrcReflectV4}},
-		port:   2222, twoPhase: twoPhase,
+		tag:    "2222", twoPhase: twoPhase,
 		deadline: time.Now().Add(time.Minute),
 	}
 	b.mu.Lock()

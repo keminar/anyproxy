@@ -43,7 +43,7 @@ func echoTarget(t *testing.T) (addr string, stop func()) {
 }
 
 // newAcceptPeer 起一个开了 directAccept 的 C 侧 directPeer。
-func newAcceptPeer(t *testing.T, forward map[uint16]string) *directPeer {
+func newAcceptPeer(t *testing.T, forward map[string]string) *directPeer {
 	t.Helper()
 	d := newDirectPeer("test-c", conf.WsClient{}, forward)
 	if err := d.ensureAccept(); err != nil {
@@ -139,8 +139,8 @@ func TestDirectEndToEnd(t *testing.T) {
 	target, stopTarget := echoTarget(t)
 	defer stopTarget()
 
-	const port = uint16(2222)
-	c := newAcceptPeer(t, map[uint16]string{port: target})
+	const port = "2222"
+	c := newAcceptPeer(t, map[string]string{port: target})
 	a := newDialPeer(t)
 
 	// 模拟服务端把请求转交给 C: C 记下这个一次性凭证(回环上不需要真打洞)。
@@ -181,8 +181,8 @@ func TestDirectRejectsUnknownToken(t *testing.T) {
 	target, stopTarget := echoTarget(t)
 	defer stopTarget()
 
-	const port = uint16(2222)
-	c := newAcceptPeer(t, map[uint16]string{port: target})
+	const port = "2222"
+	c := newAcceptPeer(t, map[string]string{port: target})
 	a := newDialPeer(t)
 
 	tr, err := a.ensureTransport()
@@ -210,10 +210,10 @@ func TestDirectRejectsUnknownToken(t *testing.T) {
 // TestDirectRejectsUnmappedPort 端口没在 client.forward 里映射就必须拒绝, 与
 // websocket 转发路径共用同一张白名单。
 func TestDirectRejectsUnmappedPort(t *testing.T) {
-	c := newAcceptPeer(t, map[uint16]string{2222: "127.0.0.1:1"})
+	c := newAcceptPeer(t, map[string]string{"2222": "127.0.0.1:1"})
 	a := newDialPeer(t)
 
-	const unmapped = uint16(3389)
+	const unmapped = "3389"
 	const token = "test-token-2"
 	c.tokens.put(token, unmapped) // 凭证有效, 但端口没映射
 
@@ -241,7 +241,7 @@ func TestDirectRejectsUnmappedPort(t *testing.T) {
 // TestDirectRejectsWrongFingerprint 指纹对不上必须拨号失败: 指纹固定是这条链路唯一的
 // 身份校验(自签证书过不了 CA 校验, 我们靠经鉴权的 websocket 下发指纹)。
 func TestDirectRejectsWrongFingerprint(t *testing.T) {
-	c := newAcceptPeer(t, map[uint16]string{2222: "127.0.0.1:1"})
+	c := newAcceptPeer(t, map[string]string{"2222": "127.0.0.1:1"})
 	a := newDialPeer(t)
 
 	tr, err := a.ensureTransport()
@@ -264,8 +264,8 @@ func TestDirectParallelStreams(t *testing.T) {
 	target, stopTarget := echoTarget(t)
 	defer stopTarget()
 
-	const port = uint16(2222)
-	c := newAcceptPeer(t, map[uint16]string{port: target})
+	const port = "2222"
+	c := newAcceptPeer(t, map[string]string{port: target})
 	a := newDialPeer(t)
 
 	tr, err := a.ensureTransport()
@@ -331,10 +331,10 @@ func TestDirectParallelStreams(t *testing.T) {
 func TestDirectSessionKeyIncludesEntryRoute(t *testing.T) {
 	d := newDirectPeer("test-a", conf.WsClient{}, nil)
 	const email = "c@example.com"
-	directRoute := directSessionRoute{listen: "both://:10001", port: 2222}
-	vps1Route := directSessionRoute{listen: "both://:10001", port: 2222, via: "vps-1@example.com"}
-	vps2Route := directSessionRoute{listen: "both://:10001", port: 2222, via: "vps-2@example.com"}
-	vps2OtherListenRoute := directSessionRoute{listen: "udp://:10002", port: 2222, via: "vps-2@example.com"}
+	directRoute := directSessionRoute{listen: "both://:10001", tag: "2222"}
+	vps1Route := directSessionRoute{listen: "both://:10001", tag: "2222", via: "vps-1@example.com"}
+	vps2Route := directSessionRoute{listen: "both://:10001", tag: "2222", via: "vps-2@example.com"}
+	vps2OtherListenRoute := directSessionRoute{listen: "udp://:10002", tag: "2222", via: "vps-2@example.com"}
 	directSess := &directSession{}
 	vps1Sess := &directSession{}
 	vps2Sess := &directSession{}
@@ -383,8 +383,8 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 		}
 	}()
 
-	const port = uint16(3389)
-	c := newAcceptPeer(t, map[uint16]string{port: tconn.LocalAddr().String()})
+	const port = "3389"
+	c := newAcceptPeer(t, map[string]string{port: tconn.LocalAddr().String()})
 	a := newDialPeer(t)
 
 	tr, err := a.ensureTransport()
@@ -406,7 +406,7 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 	// 起 A 侧 UDP 入口, 并把回程分发绑上去。
 	entry := &directUDPEntry{
 		peer:     a,
-		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", ForwardPort: port},
+		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Forward: conf.DirectForwardTarget{Email: "c@example.com", Tag: port}},
 		byAddr:   make(map[string]uint32),
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: make(map[uint32]time.Time),
@@ -417,7 +417,7 @@ func TestDirectUDPRoundTrip(t *testing.T) {
 	}
 	defer econn.Close()
 	entry.conn = econn
-	sess.bindUDPEntry(port, entry)
+	sess.bindUDPEntry(entry)
 	go entry.pump(func() (*directSession, error) { return sess, nil })
 
 	// 扮演用户: 往入口发 UDP, 应收到内网目标的回声。
@@ -463,8 +463,8 @@ func TestDirectUDPStats(t *testing.T) {
 		}
 	}()
 
-	const port = uint16(3389)
-	c := newAcceptPeer(t, map[uint16]string{port: tconn.LocalAddr().String()})
+	const port = "3389"
+	c := newAcceptPeer(t, map[string]string{port: tconn.LocalAddr().String()})
 	a := newDialPeer(t)
 
 	tr, err := a.ensureTransport()
@@ -484,7 +484,7 @@ func TestDirectUDPStats(t *testing.T) {
 
 	entry := &directUDPEntry{
 		peer:     a,
-		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Email: "c@example.com", ForwardPort: port},
+		rule:     conf.ClientDirect{Listen: "127.0.0.1:0", Forward: conf.DirectForwardTarget{Email: "c@example.com", Tag: port}},
 		byAddr:   make(map[string]uint32),
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: make(map[uint32]time.Time),
@@ -495,7 +495,7 @@ func TestDirectUDPStats(t *testing.T) {
 	}
 	defer econn.Close()
 	entry.conn = econn
-	sess.bindUDPEntry(port, entry)
+	sess.bindUDPEntry(entry)
 	go entry.pump(func() (*directSession, error) { return sess, nil })
 
 	user, err := net.DialUDP("udp", nil, econn.LocalAddr().(*net.UDPAddr))
@@ -724,8 +724,8 @@ func TestDirectAcceptLifecycle(t *testing.T) {
 	target, stopTarget := echoTarget(t)
 	defer stopTarget()
 
-	const port = uint16(2222)
-	c := newDirectPeer("test-c", conf.WsClient{Direct: conf.DirectSettings{Accept: true}}, map[uint16]string{port: target})
+	const port = "2222"
+	c := newDirectPeer("test-c", conf.WsClient{Direct: conf.DirectSettings{Accept: true}}, map[string]string{port: target})
 
 	// 一开始不该占任何端口。
 	if c.acceptListener() != nil {
@@ -814,7 +814,7 @@ func TestDirectIdleKeepsQuietUDPAlive(t *testing.T) {
 		byID:     make(map[uint32]*net.UDPAddr),
 		lastSeen: map[uint32]time.Time{1: time.Now().Add(-directUDPIdle / 2)},
 	}
-	sess.bindUDPEntry(3389, entry)
+	sess.bindUDPEntry(entry)
 
 	if got := sess.idleFor(); got != 0 {
 		t.Fatalf("a session with a live UDP session must not look idle, got %s", got)
@@ -832,11 +832,11 @@ func TestDirectIdleKeepsQuietUDPAlive(t *testing.T) {
 // TestDirectTokenIsOneShot 凭证取走即失效, 重放无效。
 func TestDirectTokenIsOneShot(t *testing.T) {
 	s := newDirectTokenStore()
-	s.put("tok", 2222)
+	s.put("tok", "2222")
 
 	e, ok := s.take("tok")
-	if !ok || e.port != 2222 {
-		t.Fatalf("first take should succeed with the stored port, got %d %v", e.port, ok)
+	if !ok || e.tag != "2222" {
+		t.Fatalf("first take should succeed with the stored tag, got %q %v", e.tag, ok)
 	}
 	if _, ok := s.take("tok"); ok {
 		t.Fatal("token should not be reusable")
@@ -846,7 +846,7 @@ func TestDirectTokenIsOneShot(t *testing.T) {
 // TestDirectStreamHeadRoundTrip 首部编解码。
 func TestDirectStreamHeadRoundTrip(t *testing.T) {
 	var buf strings.Builder
-	in := directStreamHead{Token: "abc", Port: 3389}
+	in := directStreamHead{Token: "abc", Tag: "3389"}
 	if err := writeStreamHead(&buf, in); err != nil {
 		t.Fatalf("write head: %v", err)
 	}
@@ -978,7 +978,7 @@ func TestRaceQUICDialPicksFirstSuccess(t *testing.T) {
 	// 没人监听的端口, 真实 QUIC 拨号最终会失败, 但不该拖住活的那条候选先胜出。
 	dead := directCandidate{Addr: "[::1]:1", Source: candSrcReflectV6}
 
-	route := directSessionRoute{port: 2222}
+	route := directSessionRoute{tag: "2222"}
 	sess, err := a.raceQUICDial(tr, "c@example.com", c.fingerprint, []directCandidate{dead, live}, route)
 	if err != nil {
 		t.Fatalf("race: %v", err)
@@ -1000,7 +1000,7 @@ func TestRaceQUICDialNoUsableCandidates(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	junk := directCandidate{Addr: "garbage", Source: candSrcLocal}
-	if _, err := a.raceQUICDial(tr, "c@example.com", "fp", []directCandidate{junk}, directSessionRoute{port: 2222}); err == nil {
+	if _, err := a.raceQUICDial(tr, "c@example.com", "fp", []directCandidate{junk}, directSessionRoute{tag: "2222"}); err == nil {
 		t.Fatalf("all-unusable candidates must fail, not hang or silently succeed")
 	}
 }
@@ -1017,7 +1017,7 @@ func TestRaceQUICDialClosesExtraWinners(t *testing.T) {
 	}
 	live := directCandidate{Addr: peerEndpoint(c), Source: candSrcReflectV6}
 
-	if _, err := a.raceQUICDial(tr, "c@example.com", c.fingerprint, []directCandidate{live, live}, directSessionRoute{port: 2222}); err != nil {
+	if _, err := a.raceQUICDial(tr, "c@example.com", c.fingerprint, []directCandidate{live, live}, directSessionRoute{tag: "2222"}); err != nil {
 		t.Fatalf("race: %v", err)
 	}
 

@@ -69,8 +69,9 @@ websocket:
                                        # 该腿 nudge 后才发, 不存在"谁先打"的歧义(见 §6)
       rules:
         - listen: "both://:13389"     # mstsc 连这里
-          email: home@example.com  # 最终目标 C
-          forwardPort: 2224           # 用 C 的 forward[] 里哪条规则
+          forward:
+            email: home@example.com  # 最终目标 C
+            tag: rdp                 # 用 C 的 forward[] 里哪条规则(按 tag 匹配)
           via: relay@example.com  # 经这个 VPS 中继; 不填=直连 C(现状)
 ```
 
@@ -95,7 +96,7 @@ VPS 的同一个中继端点 E**,加上 B 居中牵线。所以**现有直连信
 
 **流程**(建立阶段,信令经 B;数据不经 B):
 
-1. `d_request`(A → B,**带 `via`**):A 要经 `via`(VPS)中继到 C(`email`)的 `forwardPort`,
+1. `d_request`(A → B,**带 `via`**):A 要经 `via`(VPS)中继到 C(`email`)的 `forward.tag`,
    附上 A 自己的候选与本次 `token`。B 见 `via` 非空 → 进中继模式。
 2. `d_relay_open`(B → VPS):让 VPS 为本次 `token` **新建一个专用 UDP socket**,问反射器探到
    它的公网中继端点 **E**,准备接受来自 A、C 的打洞。VPS 用 `d_ready` 把 E 报回 B。
@@ -143,7 +144,7 @@ websocket:
       # 且在 CGNAT 后, 那是另一件事, 按 direct-punch-order.md 单独决定要不要开
       accept: true
     forward:
-      - port: 2224
+      - tag: rdp
         target: 192.168.1.10:3389
     receive:                         # C 保留一份"允许哪些 A"的名单(见鉴权)
       allow:

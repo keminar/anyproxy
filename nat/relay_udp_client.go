@@ -29,13 +29,20 @@ type relayLocalSession struct {
 type udpUplink struct {
 	tag     string
 	connect string            // 本条 server 连接的 connect 地址, 取主机名用
-	forward map[uint16]string // 端口 -> 内网目标, 与 websocket 转发路径共用同一张白名单
+	forward map[string]string // tag -> 内网目标, 与 websocket 转发路径共用同一张白名单
 
 	mu       sync.Mutex
 	conn     *net.UDPConn // 到 B 的上行 socket
 	sessions map[uint32]*relayLocalSession
-	stop     chan struct{} // 随 conn 一起换, 用来收掉保活/回收 goroutine
-	last     atomic.Int64  // 上行最近一次收发时间
+
+	// portTarget 是 forward(按 tag 索引的白名单)在"入口物理端口"这个维度上的派生缓存:
+	// onOpen 每收到一个 u_open 就用其中的 Tag 解析一次白名单、连同 Port 一起记下来。
+	// relayUDPHead 这个逐包定长帧只能带 2 字节的端口号(带不了变长的 tag 字符串),
+	// 数据面(session())靠这张表把端口号翻译回目标地址, 不用改动那个定长帧格式。
+	portTarget map[uint16]string
+
+	stop chan struct{} // 随 conn 一起换, 用来收掉保活/回收 goroutine
+	last atomic.Int64  // 上行最近一次收发时间
 
 	// traffic 这条上行的累计流量 + 瞬时速率。up = 从 B 收到、转发给内网目标(对应
 	// B 那侧的 up 方向), down = 从内网目标读到、发回 B(对应 B 那侧的 down 方向)——
@@ -44,8 +51,8 @@ type udpUplink struct {
 	traffic trafficMeter
 }
 
-func newUDPUplink(tag, connect string, forward map[uint16]string) *udpUplink {
-	return &udpUplink{tag: tag, connect: connect, forward: forward, sessions: map[uint32]*relayLocalSession{}}
+func newUDPUplink(tag, connect string, forward map[string]string) *udpUplink {
+	return &udpUplink{tag: tag, connect: connect, forward: forward, sessions: map[uint32]*relayLocalSession{}, portTarget: map[uint16]string{}}
 }
 
 // logTraffic 只在有变化时打, 免得空闲期刷屏。
@@ -88,20 +95,26 @@ func handleRelayUDPClient(c *Client, msg *Message) bool {
 	return true
 }
 
-// onOpen 按 B 的要求建上行。端口不在本机 forward 白名单里就直接回绝, 让 B 立刻放弃,
+// onOpen 按 B 的要求建上行。tag 不在本机 forward 白名单里就直接回绝, 让 B 立刻放弃,
 // 而不是让客户端一路等到超时。
 func (u *udpUplink) onOpen(c *Client, open RelayUDPOpen) {
-	target, ok := u.forward[open.Port]
+	target, ok := u.forward[open.Tag]
 	if !ok {
-		u.reply(c, RelayUDPReady{Port: open.Port, Err: fmt.Sprintf("no forward target for entry port %d", open.Port)})
+		u.reply(c, RelayUDPReady{Port: open.Port, Tag: open.Tag, Err: fmt.Sprintf("no forward target for tag %q", open.Tag)})
 		return
 	}
+	// 逐包定长帧(relayUDPHead)只带得下 2 字节端口号, 带不了变长的 tag——这里把这次
+	// onOpen 用 tag 解出的目标顺手按物理端口缓存一份, 供数据面(session())按端口号
+	// 翻译回目标, 不用改动那个定长帧格式。
+	u.mu.Lock()
+	u.portTarget[open.Port] = target
+	u.mu.Unlock()
 	if err := u.ensureConn(open); err != nil {
-		u.reply(c, RelayUDPReady{Port: open.Port, Err: err.Error()})
+		u.reply(c, RelayUDPReady{Port: open.Port, Tag: open.Tag, Err: err.Error()})
 		return
 	}
-	u.logf("uplink ready for entry port %d -> %s", open.Port, target)
-	u.reply(c, RelayUDPReady{Port: open.Port})
+	u.logf("uplink ready for entry port %d (tag %q) -> %s", open.Port, open.Tag, target)
+	u.reply(c, RelayUDPReady{Port: open.Port, Tag: open.Tag})
 }
 
 func (u *udpUplink) reply(c *Client, r RelayUDPReady) {
@@ -206,11 +219,13 @@ func (u *udpUplink) session(conn *net.UDPConn, h relayUDPHead) (*relayLocalSessi
 		u.mu.Unlock()
 		return s, nil
 	}
-	// 目标每个包都查一次而不是只查首包: UDP 会乱序, 首包未必先到。
-	target, ok := u.forward[h.port]
+	// 目标每个包都查一次而不是只查首包: UDP 会乱序, 首包未必先到。查的是 portTarget
+	// (onOpen 时按 tag 解出、按端口缓存的派生表), 不是按 tag 索引的 forward 本身——
+	// 逐包帧里只有端口号, 没有 tag。
+	target, ok := u.portTarget[h.port]
 	if !ok {
 		u.mu.Unlock()
-		return nil, fmt.Errorf("no forward target for entry port %d", h.port)
+		return nil, fmt.Errorf("no forward target for entry port %d (not opened yet or not in whitelist)", h.port)
 	}
 	u.mu.Unlock()
 
