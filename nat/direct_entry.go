@@ -180,6 +180,7 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	// 只说明中间层还没就绪, 所以必须一直敲到预算结束, 而不是发满 6 个就干等/退到兜底。
 	run := d.startPunchAllFor(token, hs.addrs, afterFirstPunch, punchSendSpan(r.Via != ""))
 	final, err := hs.waitFinal(directOfferWait)
+	hs.close()
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +290,15 @@ type peerHandshake struct {
 	addrs []directCandidate
 	done  *DirectOffer     //非 nil: 第一段就完整(指纹已就位)
 	ch    chan DirectOffer //后续段
+
+	release func() // 两段式时撤销 offers 登记; waitFinal 结束后调用, 可为 nil
+}
+
+// close 撤销等第二段用的登记, 幂等。
+func (h *peerHandshake) close() {
+	if h.release != nil {
+		h.release()
+	}
 }
 
 // waitFinal 等带指纹的那一段; 已经拿到就立即返回。
@@ -308,6 +318,23 @@ func (h *peerHandshake) waitFinal(timeout time.Duration) (DirectOffer, error) {
 		return offer, nil
 	case <-time.After(timeout):
 		return DirectOffer{}, errors.New("timed out waiting for the peer certificate fingerprint from server")
+	}
+}
+
+// registerOffer 登记一个等 offer 的请求, 返回请求 ID、接收通道和撤销函数。
+func (d *directPeer) registerOffer() (uint, chan DirectOffer, func()) {
+	// 容量 2: 两段式 offer 会有两条都进这个通道, 容量 1 时第二段会被 onOffer 当成
+	// "等待方已退出"直接丢掉。
+	ch := make(chan DirectOffer, 2)
+	d.mu.Lock()
+	d.reqInc++
+	id := uint(d.reqInc)
+	d.offers[id] = ch
+	d.mu.Unlock()
+	return id, ch, func() {
+		d.mu.Lock()
+		delete(d.offers, id)
+		d.mu.Unlock()
 	}
 }
 
@@ -337,18 +364,14 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, *peerHandshake, e
 	}
 	d.setMyCandidates(myCands)
 
-	// 容量 2: 两段式 offer 会有两条都进这个通道, 容量 1 时第二段会被 onOffer 当成
-	// "等待方已退出"直接丢掉。
-	offerCh := make(chan DirectOffer, 2)
-	d.mu.Lock()
-	d.reqInc++
-	reqID := uint(d.reqInc)
-	d.offers[reqID] = offerCh
-	d.mu.Unlock()
+	reqID, offerCh, release := d.registerOffer()
+	// 两段式时第二段(带指纹)要在本函数返回**之后**才到, 登记项必须活到 waitFinal 结束,
+	// 否则 onOffer 会把它当成"未知请求"丢掉, A 就一直等到指纹超时。
+	keep := false
 	defer func() {
-		d.mu.Lock()
-		delete(d.offers, reqID)
-		d.mu.Unlock()
+		if !keep {
+			release()
+		}
 	}()
 
 	// 把本端的地址都打出来: 本地 socket 端口用于抓包定位, 各候选用于判断哪些路探到了、
@@ -368,7 +391,7 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, *peerHandshake, e
 	if err != nil {
 		return "", nil, err
 	}
-	hs, err := handshakeFromOffer(first, offerCh)
+	hs, err := handshakeFromOffer(first, offerCh, release)
 	if err != nil {
 		return "", nil, err
 	}
@@ -380,6 +403,7 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, *peerHandshake, e
 		// 那边的信令重叠。
 		d.logf("server sent the endpoint %v ahead of the peer certificate, punching while its fingerprint is still on the way",
 			hs.addrs)
+		keep = true
 	}
 	return token, hs, nil
 }
@@ -389,7 +413,9 @@ func (d *directPeer) requestPeer(r conf.ClientDirect) (string, *peerHandshake, e
 //
 // 单独拆出来是为了这段判定能被用例直接覆盖: 它决定"要不要现在就开打", 判错就会去拨一个
 // 指纹还没到的对端。
-func handshakeFromOffer(first DirectOffer, ch chan DirectOffer) (*peerHandshake, error) {
+//
+// release 只在半截 offer 时挂到返回值上(由调用方在 waitFinal 后 close), 其余情形仍由调用方自己撤销。
+func handshakeFromOffer(first DirectOffer, ch chan DirectOffer, release func()) (*peerHandshake, error) {
 	if first.Err != "" {
 		return nil, errors.New(first.Err)
 	}
@@ -398,7 +424,7 @@ func handshakeFromOffer(first DirectOffer, ch chan DirectOffer) (*peerHandshake,
 		return nil, errors.New("server returned an incomplete offer")
 	}
 	if first.EndpointOnly {
-		return &peerHandshake{addrs: first.PeerAddrs, ch: ch}, nil
+		return &peerHandshake{addrs: first.PeerAddrs, ch: ch, release: release}, nil
 	}
 	if first.Fingerprint == "" {
 		return nil, errors.New("server returned an incomplete offer")

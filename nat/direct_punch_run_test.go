@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/keminar/anyproxy/utils/conf"
 )
 
 // 这组用例盯的是"选路什么时候收手":
@@ -152,7 +154,7 @@ func TestHandshakeFromOfferTwoPhase(t *testing.T) {
 	ch := make(chan DirectOffer, 2)
 
 	// 第一段: 只有中继端点 E —— 端点立刻可用(调用方据此开始打洞), 指纹还得等。
-	hs, err := handshakeFromOffer(DirectOffer{PeerAddrs: e, EndpointOnly: true}, ch)
+	hs, err := handshakeFromOffer(DirectOffer{PeerAddrs: e, EndpointOnly: true}, ch, nil)
 	if err != nil {
 		t.Fatalf("stage one: %v", err)
 	}
@@ -172,7 +174,7 @@ func TestHandshakeFromOfferTwoPhase(t *testing.T) {
 	}
 
 	// 一段式的完整 offer: 立刻可用, 不等第二段。
-	hs, err = handshakeFromOffer(DirectOffer{PeerAddrs: e, Fingerprint: fp}, ch)
+	hs, err = handshakeFromOffer(DirectOffer{PeerAddrs: e, Fingerprint: fp}, ch, nil)
 	if err != nil {
 		t.Fatalf("one stage: %v", err)
 	}
@@ -184,7 +186,7 @@ func TestHandshakeFromOfferTwoPhase(t *testing.T) {
 	}
 
 	// 第二段带来失败原因。
-	hs, err = handshakeFromOffer(DirectOffer{PeerAddrs: e, EndpointOnly: true}, ch)
+	hs, err = handshakeFromOffer(DirectOffer{PeerAddrs: e, EndpointOnly: true}, ch, nil)
 	if err != nil {
 		t.Fatalf("stage one: %v", err)
 	}
@@ -199,8 +201,60 @@ func TestHandshakeFromOfferTwoPhase(t *testing.T) {
 		{EndpointOnly: true},
 		{PeerAddrs: e},
 	} {
-		if _, err := handshakeFromOffer(bad, ch); err == nil {
+		if _, err := handshakeFromOffer(bad, ch, nil); err == nil {
 			t.Fatalf("offer %+v should have been rejected", bad)
 		}
+	}
+}
+
+// TestTwoPhaseOfferSurvivesFirstStage 回归: 中继两段式 offer 的第二段(带指纹)在 requestPeer
+// 拿到第一段并返回**之后**才到。登记项若在此时就撤掉, onOffer 会报 "unknown request id"
+// 把它丢掉, A 只能干等到 "timed out waiting for the peer certificate fingerprint"。
+func TestTwoPhaseOfferSurvivesFirstStage(t *testing.T) {
+	d := newDirectPeer("test-two-phase", conf.WsClient{}, nil)
+	e := []directCandidate{{Addr: "203.0.113.7:21359", Source: candSrcReflectV4}}
+	fp := "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+
+	offerMsg := func(id uint, o DirectOffer) *Message {
+		body, err := encodeDirect(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &Message{ID: id, Method: METHOD_DIRECT_OFFER, Body: body}
+	}
+
+	id, ch, release := d.registerOffer()
+	defer release()
+
+	d.onOffer(offerMsg(id, DirectOffer{PeerAddrs: e, EndpointOnly: true}))
+	first, err := waitOffer(ch, time.Second, "first stage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs, err := handshakeFromOffer(first, ch, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hs.release == nil {
+		t.Fatal("a partial offer must keep the request registered until the fingerprint arrives")
+	}
+
+	// requestPeer 已返回, 第二段现在才到。
+	d.onOffer(offerMsg(id, DirectOffer{PeerAddrs: e, Fingerprint: fp}))
+	final, err := hs.waitFinal(time.Second)
+	if err != nil {
+		t.Fatalf("second stage was lost: %v", err)
+	}
+	if final.Fingerprint != fp {
+		t.Fatalf("fingerprint = %q, want %q", final.Fingerprint, fp)
+	}
+
+	// 握手结束后登记必须撤掉, 不能泄漏。
+	hs.close()
+	d.mu.Lock()
+	_, still := d.offers[id]
+	d.mu.Unlock()
+	if still {
+		t.Fatal("offer registration leaked after the handshake finished")
 	}
 }
