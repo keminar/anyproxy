@@ -18,9 +18,10 @@ Use `./anyproxy -h` to view the full help. The table below lists all startup par
 | `-v` | show build version info | — | — |
 | `-h` | show help | — | — |
 | `-genkey` | generate a pair of websocket auth keys and exit (private key → `websocket.client.key`, public key → `websocket.server.users[].key`) | `websocket.client.key` / `websocket.server.users[].key` | CLI one-shot |
+| `-wol MAC[,MAC2,...]` | send Wake-on-LAN magic packets and exit; MAC accepts a comma-separated list, either `AA:BB:CC:DD:EE:FF` or `AA-BB-CC-DD-EE-FF`; reuses `-to`/`-via` (see the next two rows) instead of dedicated flags; with `-via` left at its default (`direct`, i.e. not passed) it broadcasts from this machine, with an explicit subscriber email it instead asks that subscriber to broadcast; a successful send does not guarantee the target woke up | — | CLI one-shot |
 | `-send PATH` | send file/dir to another subscriber and exit (multiple paths allowed); receiver needs `direct.accept` on, end-to-end encrypted | — | CLI one-shot |
-| `-to EMAIL[:subdir]` / `DIR` | `-send`: receiver email (scp-style `:subdir` lands in `receive.dir/subdir`); `-recv`: local store dir (default current dir) | — | CLI one-shot |
-| `-via direct\|relay\|email-of-VPS` | `-send`/`-recv`: direct hole-punch (`direct`, fails immediately if can't punch), relay via server B (`relay`, no punch needed), or an email of a public VPS (that host needs `direct.relay` on) for blind-relay hole-punching (used when both ends are behind CGNAT and can't connect directly, see [direct-relay-design.md](direct-relay-design.md)); all end-to-end encrypted | `websocket.client.direct.relay`(VPS side) | CLI one-shot |
+| `-to EMAIL[:subdir]` / `DIR` | `-send`: receiver email (scp-style `:subdir` lands in `receive.dir/subdir`); `-recv`: local store dir (default current dir); `-wol`: broadcast target `ADDR[:PORT]`, default `255.255.255.255:9` (limited broadcast, local link only, not forwarded by routers; if the target is on a specific subnet, use that subnet's directed broadcast, e.g. `192.168.1.255`) -- this is the address used by whichever machine actually broadcasts (this one, or the `-via` subscriber) | — | CLI one-shot |
+| `-via direct\|relay\|email-of-VPS` | `-send`/`-recv`: direct hole-punch (`direct`, fails immediately if can't punch), relay via server B (`relay`, no punch needed), or an email of a public VPS (that host needs `direct.relay` on) for blind-relay hole-punching (used when both ends are behind CGNAT and can't connect directly, see [direct-relay-design.md](direct-relay-design.md)); all end-to-end encrypted. `-wol`: the machine to wake is powered off and cannot run this command itself, so this is the email of **another subscriber already on that machine's LAN** who broadcasts on your behalf (does not accept the `direct`/`relay` keywords -- always relayed through the server B, no NAT punching needed for a 102-byte packet), and requires that subscriber's `receive.allow` to list this machine with an explicit `wol: true` on that entry (default `false`, a permission separate from file transfer, see [configuration.md](configuration.md)) | `websocket.client.direct.relay`(VPS side) | CLI one-shot |
 | `-recv EMAIL:PATH` | fetch file/dir back from another subscriber and exit (scp-style, path relative to the other's `receive.dir`) | — | CLI one-shot |
 | `-parallel N` | `-send`/`-recv`: split a single large file into at most N byte-range chunks for parallel transfer (default 1, small files not split) | — | CLI one-shot |
 | `-direct-plain-udp` | direct (NAT hole-punch) connection: skip quic-go batch/ECN fast UDP path, fall back to per-packet I/O; try under high packet loss / stuck congestion window | `websocket.client.direct.plainUdp` | CLI > config |
@@ -74,6 +75,14 @@ The template only opens fields used by that mode; example rules are all commente
 
 # TUN global proxy (needs admin/root; NIC name/address set via config tun.name / tun.addr)
 sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
+
+# Wake a WOL-enabled machine on this LAN; can wake several at once and target a specific subnet
+./anyproxy -wol AA:BB:CC:DD:EE:FF
+./anyproxy -wol AA:BB:CC:DD:EE:FF,11:22:33:44:55:66 -to 192.168.1.255:9
+
+# Wake a machine on another subscriber's LAN (that subscriber must allow this machine in
+# receive.allow; the target itself is off, so this is another already-on machine on its LAN)
+./anyproxy -wol AA:BB:CC:DD:EE:FF -via home@example.com
 ```
 
 > Upstream proxy protocol prefixes supported: `tunnel://`, `socks5://`, `http://`. **When no `://` prefix is written, it defaults to `tunnel://`** (same for global `-p`/`default.proxy` and `hosts[].proxy`). Note: the old help text in `-h` saying "bare address = http" does not match the current implementation; this doc is authoritative. See [routing.md](routing.md).

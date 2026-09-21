@@ -217,7 +217,7 @@ macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`
 | `websocket.client.direct.relayPublic` | 可选公网中继地址数组；全部只写 IP 时每个 binding 使用随机端口并在全部 IP 上通告，全部写 `IP:port` 时使用固定端口；两种形态不能混写 | — |
 | `websocket.client.direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对本条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 | `-direct-plain-udp` |
 | `websocket.client.direct.lanAddrs` | 手工填本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速候选 | — |
-| `websocket.client.receive` | 接收文件传输配置 `{dir, allow[], readonly}`；`allow` 每条 `{email, uuid}`，`readonly: true` 只出不进 | — |
+| `websocket.client.receive` | 接收文件传输配置 `{dir, allow[], readonly}`；`allow` 每条 `{email, uuid, wol, dir}`，`readonly: true` 只出不进，`wol: true` 才允许这个 email 用 `-wol` 让本机代为广播（默认 `false`），`dir` 非空则覆盖该 email 上传时的落地目录（默认落到共享 `dir`） | — |
 | `websocket.client.sendRecvOnly` | `true` 时强制这条配置只给 `-send`/`-recv` 取凭证，常驻进程不为它发起连接 | — |
 
 > `websocket.client` 的直连/中继/文件传输字段（上表 `direct*` / `receive` / `sendRecvOnly`）完整语义、鉴权与示例见 [websocket.md](websocket.md#文件传输-send--recv--receive)；`-genkey` 生成 `key` 亦见该页。

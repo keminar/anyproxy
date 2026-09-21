@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -136,24 +135,25 @@ type fileConn interface {
 }
 
 // authorizeFileSender 读对端在流首部自报的 fileAuth 并按 client.receive.allow 核对,
-// 返回核对通过的 email(仅供日志与记账)。收文件(recvFile)与被取文件(servePull)两条
-// 路径共用: 两者的信任模型是同一个 —— allow 里配的 uuid 才是凭证, email 只是查表用。
-func authorizeFileSender(stream *quic.Stream, cfg conf.ClientReceive) (string, error) {
+// 返回核对通过的那条 allow 配置(email 仅供日志与记账; Dir/Wol 供调用方按需使用,
+// 见 conf.AllowedSender)。收文件(recvFile)与被取文件(servePull)两条路径共用:
+// 两者的信任模型是同一个 —— allow 里配的 uuid 才是凭证, email 只是查表用。
+func authorizeFileSender(stream *quic.Stream, cfg conf.ClientReceive) (conf.AllowedSender, error) {
 	_ = stream.SetReadDeadline(time.Now().Add(30 * time.Second))
 	var auth fileAuth
 	if err := readFrame(stream, &auth, fileFrameMax); err != nil {
-		return "", fmt.Errorf("bad auth head: %v", err)
+		return conf.AllowedSender{}, fmt.Errorf("bad auth head: %v", err)
 	}
 	_ = stream.SetReadDeadline(time.Time{})
 
-	uuid, ok := cfg.Lookup(auth.Email)
+	sender, ok := cfg.LookupSender(auth.Email)
 	// uuid 是查表得到的、本机配置的凭证, auth.UUID 是对方自报的; 两个都必须是合法
 	// uuid 格式才有资格往下比对——哪怕两边碰巧写了同一个不合法的字符串也不行, 格式
 	// 都不对的东西不能当成一次有效的身份匹配。
-	if !ok || !conf.IsValidUUID(uuid) || !conf.IsValidUUID(auth.UUID) || uuid != auth.UUID {
-		return "", fmt.Errorf("email %s is not in websocket.client.receive.allow, or its uuid does not match", auth.Email)
+	if !ok || !conf.IsValidUUID(sender.UUID) || !conf.IsValidUUID(auth.UUID) || sender.UUID != auth.UUID {
+		return conf.AllowedSender{}, fmt.Errorf("email %s is not in websocket.client.receive.allow, or its uuid does not match", auth.Email)
 	}
-	return auth.Email, nil
+	return sender, nil
 }
 
 // recvFile 处理一条文件流(直连路径的入口)。先读一段 fileAuth 核对身份(见 fileAuth
@@ -176,26 +176,36 @@ func (dc *directConn) recvFile(stream *quic.Stream, remote string) {
 		reply(fileReply{Err: readOnlyRefusal})
 		return
 	}
-	email, err := authorizeFileSender(stream, cfg)
+	sender, err := authorizeFileSender(stream, cfg)
 	if err != nil {
 		reply(fileReply{Err: err.Error()})
 		return
 	}
-	recvFileOver(stream, cfg.Dir, email, remote, logf, recvOpts{}, nil)
+	recvFileOver(stream, senderDir(cfg, sender), sender.Email, remote, logf, recvOpts{}, nil)
+}
+
+// senderDir 这个发送者上传时该落到哪个目录: 配了 allow[].dir 就用它, 否则落到
+// 共享的 Dir。共享 Dir 是否非空这道总开关由调用方在此之前已经检查过。
+func senderDir(cfg conf.ClientReceive, sender conf.AllowedSender) string {
+	if sender.Dir != "" {
+		return sender.Dir
+	}
+	return cfg.Dir
 }
 
 // servePullStream 处理一条取件流(直连路径的入口)。身份核对与收文件那条路完全一样,
-// 之后交给两条路共用的 servePull(见 nat/file_pull.go)。
+// 之后交给两条路共用的 servePull(见 nat/file_pull.go)。取件目录不受 allow[].dir
+// 影响——那只覆盖上传落地, 取件看到的仍然是共享 Dir 下的内容(见 conf.AllowedSender.Dir)。
 func (dc *directConn) servePullStream(stream *quic.Stream, remote string) {
 	cfg := dc.peer.cfg.Receive
 	logf := dc.peer.logf
-	email, err := authorizeFileSender(stream, cfg)
+	sender, err := authorizeFileSender(stream, cfg)
 	if err != nil {
 		logf("pull from %s: %s", remote, err)
 		_ = writeFrame(stream, filePullResp{Err: err.Error()})
 		return
 	}
-	servePull(stream, cfg, email, remote, logf)
+	servePull(stream, cfg, sender.Email, remote, logf)
 }
 
 // recvFileOver 接收文件的核心逻辑, 直连/中继共用。错误一律回给发送端, 让它的退出码
@@ -685,7 +695,7 @@ func safeJoin(dir, name string) (string, error) {
 }
 
 // claimName 原子地"认领"一个尚未被占用的文件名: 目标已存在就换下一个候选,
-// 候选名按收方系统习惯生成, 见 dupName(如 x (1).zip / x.zip.1 / x copy.zip)。
+// 候选名见 dupName(如 x 1.zip / x 2.zip)。
 //
 // 不能用"先 os.Stat 探测存不存在、调用方再另外一步 Rename"这种两步走的做法——那两
 // 步之间不是原子的。两个独立进程/goroutine 并发给同一个目标名字发送同名文件时,
@@ -719,7 +729,7 @@ func claimName(dest string) (string, error) {
 	}
 
 	for i := 1; i < 10000; i++ {
-		cand := dupName(dest, i, runtime.GOOS)
+		cand := dupName(dest, i)
 		ok, err := claim(cand)
 		if err != nil {
 			return "", fmt.Errorf("claim %s: %w", cand, err)
@@ -733,17 +743,9 @@ func claimName(dest string) (string, error) {
 	return "", fmt.Errorf("too many files named like %s, giving up", filepath.Base(dest))
 }
 
-// dupName 给出第 i 个(从 1 起)重名候选, 按收方系统(goos)的习惯命名:
-//
-//	windows / 其它: x (1).zip, x (2).zip
-//	linux:          x.zip.1,   x.zip.2      (wget / logrotate 式, 追加在完整文件名后)
-//	darwin:         x copy.zip, x copy 2.zip (Finder 式)
-//
-// 接收方自己落盘, 所以看的是接收进程的 runtime.GOOS, 与发送方系统无关。
-func dupName(dest string, i int, goos string) string {
-	if goos == "linux" {
-		return fmt.Sprintf("%s.%d", dest, i)
-	}
+// dupName 给出第 i 个(从 1 起)重名候选: x 1.zip, x 2.zip ——不分收方系统, 统一在文件名
+// 主体后面加空格+序号。
+func dupName(dest string, i int) string {
 	ext := filepath.Ext(dest)
 	// 纯数字的".1"多半是版本号(如 anyproxy-amd64-v2.1)而不是后缀名 ——
 	// 可执行文件常见这种命名, 按后缀名拆分会把序号插进版本号中间。
@@ -751,13 +753,7 @@ func dupName(dest string, i int, goos string) string {
 		ext = ""
 	}
 	base := strings.TrimSuffix(dest, ext)
-	if goos == "darwin" {
-		if i == 1 {
-			return base + " copy" + ext
-		}
-		return fmt.Sprintf("%s copy %d%s", base, i, ext)
-	}
-	return fmt.Sprintf("%s (%d)%s", base, i, ext)
+	return fmt.Sprintf("%s %d%s", base, i, ext)
 }
 
 // isNumericExt 形如 ".1"、".22" 的"后缀"通篇是数字, 真实文件后缀几乎不会这样, 一般是版本号。

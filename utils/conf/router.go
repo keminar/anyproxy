@@ -395,20 +395,44 @@ type ClientReceive struct {
 type AllowedSender struct {
 	Email string `yaml:"email"`
 	UUID  string `yaml:"uuid"`
+
+	// Wol 默认 false, 为 true 时这个 email 才能用 -wol 让本机代为广播网络唤醒包
+	// (见 nat/wol_action.go)。收发文件与网络唤醒共用同一份名单起步是为了不用为
+	// 同一批人再维护一份名单, 但唤醒不是读写这台机器上的文件, 而是让它去骚扰
+	// 局域网、唤醒别的设备, 性质不同, 所以单独加一道开关, 默认关闭, 需要显式打开
+	// (对称于 ReadOnly 只挡写入方向: 这里是收发文件的名单里再单独放行一个更陌生
+	// 的动作)。
+	Wol bool `yaml:"wol"`
+
+	// Dir 这个 email 上传(-send 过来)时的落地目录, 非空时覆盖同名 ClientReceive.Dir。
+	// 只影响写入方向——取件(-recv)仍然只能看到共享 Dir 下的内容, 不因发送者不同
+	// 而变, 否则"谁能看到别人传上来的东西"会变得难以推理。留空则跟其它人一样落到
+	// 共享 Dir。仍然要求共享 Dir 非空(见 ClientReceive.Dir 的整体开关语义)才会
+	// 生效——每个发送者可以有自己的子目录, 但收发文件这整个功能是否开启, 只由
+	// 共享 Dir 一处决定, 不希望配了这里就绕过那个总开关。
+	Dir string `yaml:"dir"`
 }
 
-// Lookup 按发起方自报的 email(仅作为查找提示, 不是安全判断本身)取它对应配置的 uuid。
-// ok=false 表示这个 email 不在列表里, 调用方应直接拒绝, 不必再做任何后续验证。
-func (r ClientReceive) Lookup(email string) (uuid string, ok bool) {
+// LookupSender 按发起方自报的 email(仅作为查找提示, 不是安全判断本身)取它完整的
+// 一条 allow 配置(uuid、能不能唤醒、落地目录覆盖)。ok=false 表示这个 email 不在
+// 列表里或没配 uuid, 调用方应直接拒绝, 不必再做任何后续验证。
+func (r ClientReceive) LookupSender(email string) (AllowedSender, bool) {
 	if email == "" {
-		return "", false
+		return AllowedSender{}, false
 	}
 	for _, a := range r.Allow {
 		if a.Email == email {
-			return a.UUID, a.UUID != ""
+			return a, a.UUID != ""
 		}
 	}
-	return "", false
+	return AllowedSender{}, false
+}
+
+// Lookup 是 LookupSender 只要 uuid 的简化版, 供只关心身份比对、用不上 Wol/Dir 的
+// 调用点用(见 nat/direct_relay_auth.go)。
+func (r ClientReceive) Lookup(email string) (uuid string, ok bool) {
+	a, ok := r.LookupSender(email)
+	return a.UUID, ok
 }
 
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。

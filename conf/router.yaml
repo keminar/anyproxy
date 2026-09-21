@@ -339,6 +339,8 @@ websocket:
       #                          # 也能取走 dir 下的任何东西, 只配一个方向要靠上面的 readonly
       #   - email: someone@example.com    # 仅备注/查找用, 不是安全边界
       #     uuid: 3fa85f64-5717-4562-b3fc-2c963f66afa6  # 真正的凭证, 抄对方的 websocket.client.uuid
+      #     wol: false          # true 才允许这个 email 用 -wol 让本机代为广播网络唤醒包, 默认 false
+      #     dir:                # 这个 email 上传时的落地目录, 覆盖上面共享的 dir; 留空则跟其他人一样落到 dir
     # true 时强制这条配置只用来给 -send/-recv 命令行取凭证(以及生成/持久化上面的 uuid),
     # 常驻的 anyproxy 进程不会为它发起连接, 哪怕配了 subscribe/forward/direct/
     # receive 中的几项也照样跳过。

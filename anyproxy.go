@@ -53,6 +53,7 @@ var (
 	gCheckFix        bool
 	gGenKey          bool
 	gGenConf         bool
+	gWol             string
 	gSend            string
 	gSendTo          string
 	gSendVia         string
@@ -84,10 +85,19 @@ func init() {
 	// 配置模板生成: 新机器上不知道配置长什么样时, 先生成一份带注释的骨架再改。
 	// 模板按 -mode 裁剪, 写到 -c 指定的路径(默认程序目录 conf/router.yaml, 写 "-" 打到标准输出)。
 	flag.BoolVar(&gGenConf, "genconf", false, "Write a commented config template (tailored to -mode) and exit; -c sets the output path (\"-\" for stdout)")
+	// 网络唤醒(WOL): 广播魔术包唤醒开了 WOL 的机器。不带 -via 时纯本机 UDP 广播,
+	// 与 anyproxy 的隧道/中继能力无关; 带 -via EMAIL 时改成让那个订阅方在它自己的
+	// 局域网里广播——要唤醒的机器本来就没开机, 没法自己接这条命令, 只能请同一个
+	// 局域网里另一台已经开着的机器代劳。固定走服务端中继(不打洞): 魔术包只有 102
+	// 字节, 一来一回就结束, 用不上打洞那一套开销, 见 nat/wol_action.go 顶部说明。
+	// 复用 -send 的 -to/-via 两个 flag, 不单独开两个新名字: -to 在这里是广播地址
+	// (谁执行广播就用谁的), -via 在这里必须是订阅方 email(不认 "direct"/"relay"
+	// 这两个 -send/-recv 专用的关键字), 留空(即保持默认值 "direct")就是本机广播。
+	flag.StringVar(&gWol, "wol", "", "Send Wake-on-LAN magic packets to the given MAC address(es), comma-separated, and exit. Without -via, broadcasts from this machine (see -to for the broadcast address). With -via EMAIL, asks that subscriber (on the target machine's own LAN, since the target itself is powered off and cannot run this command) to broadcast instead, subject to its websocket.client.receive.allow -- always relayed through the server B, no NAT punching")
 
 	flag.StringVar(&gSend, "send", "", "Send a file or directory to another subscriber and exit (extra paths may follow as arguments)")
-	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory")
-	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path), \"relay\" (through the server B, no punching needed), or the email of a public VPS (needs directRelay enabled) to blindly relay the NAT punch through -- for when the two peers cannot punch to each other directly (e.g. both behind CGNAT) but can each reach that VPS; the QUIC/TLS session still ends end-to-end between the two peers, the VPS only forwards opaque UDP packets. All are end-to-end encrypted. See docs/direct-relay-design.md")
+	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory. -wol: broadcast target ADDR[:PORT], default 255.255.255.255:9 (limited broadcast, local link only)")
+	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path), \"relay\" (through the server B, no punching needed), or the email of a public VPS (needs directRelay enabled) to blindly relay the NAT punch through -- for when the two peers cannot punch to each other directly (e.g. both behind CGNAT) but can each reach that VPS; the QUIC/TLS session still ends end-to-end between the two peers, the VPS only forwards opaque UDP packets. All are end-to-end encrypted. See docs/direct-relay-design.md. -wol: the subscriber's email who should broadcast instead of this machine, default (\"direct\") means broadcast locally")
 
 	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
 	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
@@ -133,6 +143,18 @@ func main() {
 		}
 		fmt.Printf("Private key (client, websocket.client.key): %s\n", priv)
 		fmt.Printf("Public key  (server, websocket.server.users[].key): %s\n", pub)
+		return
+	}
+	// 网络唤醒(本机广播): 纯本机 UDP 广播, 不需要配置/凭证, 跑完即退。-via 复用
+	// -send 的 flag, 停在默认值("direct", 即没有显式传别的订阅方 email)时才算本地
+	// 场景; 显式给了 email 时改成让那个订阅方去广播(见下方配置加载之后的分支, 那条
+	// 路要用 websocket.client 的连接与凭证)。
+	if gWol != "" && gSendVia == nat.ViaDirect {
+		macs := splitMacs(gWol)
+		if err := nat.WakeOnLAN(macs, gSendTo); err != nil {
+			log.Fatalln("wol:", err)
+		}
+		fmt.Printf("wol: sent magic packet to %d mac(s)\n", len(macs))
 		return
 	}
 	// 生成配置模板后退出。放在 LoadAllConfig 之前 —— 这条命令存在的前提就是本机
@@ -191,6 +213,21 @@ func main() {
 		}
 		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel, gConflict); err != nil {
 			log.Fatalln("recv:", err)
+		}
+		return
+	}
+
+	// 网络唤醒(远端广播): -wol 配了非默认 -via(即一个订阅方 email)时, 到这里才
+	// 处理——本地场景(-via 留在默认值 "direct")已经在配置加载之前的分支里跑完
+	// 退出了。固定走服务端中继, gSendVia 这里必须是 email, 不是 "direct"/"relay"
+	// 这两个 -send/-recv 专用的关键字(nat.SendWol 会拒绝 "relay")。
+	if gWol != "" {
+		cfg, err := pickClientConfig("wol")
+		if err != nil {
+			log.Fatalln("wol:", err)
+		}
+		if err := nat.SendWol(cfg, gSendVia, splitMacs(gWol), gSendTo); err != nil {
+			log.Fatalln("wol:", err)
 		}
 		return
 	}
@@ -593,6 +630,15 @@ func genConfig() error {
 		fmt.Printf("  %d. %s\n", i+1, s)
 	}
 	return nil
+}
+
+// splitMacs 把 -wol 的逗号分隔 MAC 列表拆开并去掉两侧空白。
+func splitMacs(s string) []string {
+	macs := strings.Split(s, ",")
+	for i := range macs {
+		macs[i] = strings.TrimSpace(macs[i])
+	}
+	return macs
 }
 
 // pickClientConfig 挑一条 websocket.client 配置给 -send/-recv 用。verb 只影响提示

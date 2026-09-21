@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -91,7 +90,7 @@ func TestClaimName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if want := dupName(p, 1, runtime.GOOS); got2 != want {
+	if want := dupName(p, 1); got2 != want {
 		t.Fatalf("got %q, want %q", got2, want)
 	}
 	os.WriteFile(got2, []byte("old"), 0o644)
@@ -100,7 +99,7 @@ func TestClaimName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if want := dupName(p, 2, runtime.GOOS); got3 != want {
+	if want := dupName(p, 2); got3 != want {
 		t.Fatalf("got %q, want %q", got3, want)
 	}
 	// 原文件必须原封不动。
@@ -112,32 +111,24 @@ func TestClaimName(t *testing.T) {
 	// 序号要加在整个文件名后面, 不能拆进版本号中间。
 	vp := filepath.Join(dir, "anyproxy-amd64-v2.1")
 	os.WriteFile(vp, []byte("old"), 0o644)
-	if got, err := claimName(vp); err != nil || got != dupName(vp, 1, runtime.GOOS) {
-		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, dupName(vp, 1, runtime.GOOS))
+	if got, err := claimName(vp); err != nil || got != dupName(vp, 1) {
+		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, dupName(vp, 1))
 	}
 }
 
-// 重名后缀按收方系统习惯命名; 这里直接传 goos, 三个平台的规则在任何系统上都能测。
 func TestDupName(t *testing.T) {
 	cases := []struct {
-		goos, dest string
-		i          int
-		want       string
+		dest string
+		i    int
+		want string
 	}{
-		{"windows", "/d/x.zip", 1, "/d/x (1).zip"},
-		{"windows", "/d/x.zip", 2, "/d/x (2).zip"},
-		{"windows", "/d/v2.1", 1, "/d/v2.1 (1)"}, // 数字后缀是版本号, 序号加在末尾
-		{"linux", "/d/x.zip", 1, "/d/x.zip.1"},
-		{"linux", "/d/x.zip", 2, "/d/x.zip.2"},
-		{"linux", "/d/v2.1", 1, "/d/v2.1.1"},
-		{"darwin", "/d/x.zip", 1, "/d/x copy.zip"},
-		{"darwin", "/d/x.zip", 2, "/d/x copy 2.zip"},
-		{"darwin", "/d/v2.1", 1, "/d/v2.1 copy"},
-		{"freebsd", "/d/x.zip", 1, "/d/x (1).zip"},
+		{"/d/x.zip", 1, "/d/x 1.zip"},
+		{"/d/x.zip", 2, "/d/x 2.zip"},
+		{"/d/v2.1", 1, "/d/v2.1 1"}, // 数字后缀是版本号, 序号加在末尾
 	}
 	for _, c := range cases {
-		if got := dupName(c.dest, c.i, c.goos); got != c.want {
-			t.Errorf("dupName(%q, %d, %q) = %q, want %q", c.dest, c.i, c.goos, got, c.want)
+		if got := dupName(c.dest, c.i); got != c.want {
+			t.Errorf("dupName(%q, %d) = %q, want %q", c.dest, c.i, got, c.want)
 		}
 	}
 }
@@ -908,6 +899,27 @@ func TestClientReceiveLookup(t *testing.T) {
 	}
 	if _, ok := r.Lookup(""); ok {
 		t.Error("an empty email should not match")
+	}
+}
+
+// TestClientReceiveLookupSender: LookupSender 要把 Wol/Dir 一并带出来(Lookup 只是
+// 它的 uuid-only 简化版), 且未配置时保持各自的零值(Wol 默认 false, Dir 默认空
+// 即"跟其他人一样落到共享 Dir")。
+func TestClientReceiveLookupSender(t *testing.T) {
+	r := conf.ClientReceive{Allow: []conf.AllowedSender{
+		{Email: "a@x.com", UUID: "ua"},
+		{Email: "b@x.com", UUID: "ub", Wol: true, Dir: "/srv/b"},
+	}}
+	a, ok := r.LookupSender("a@x.com")
+	if !ok || a.UUID != "ua" || a.Wol || a.Dir != "" {
+		t.Errorf("a@x.com should resolve with zero Wol/Dir, got %+v ok=%v", a, ok)
+	}
+	b, ok := r.LookupSender("b@x.com")
+	if !ok || b.UUID != "ub" || !b.Wol || b.Dir != "/srv/b" {
+		t.Errorf("b@x.com should resolve with Wol=true Dir=/srv/b, got %+v ok=%v", b, ok)
+	}
+	if _, ok := r.LookupSender("c@x.com"); ok {
+		t.Error("an unlisted email should not resolve")
 	}
 }
 

@@ -18,9 +18,10 @@
 | `-v` | 显示编译版本信息 | — | — |
 | `-h` | 显示帮助 | — | — |
 | `-genkey` | 生成一对 websocket 鉴权密钥并退出（私钥填 `websocket.client.key`，公钥填 `websocket.server.users[].key`） | `websocket.client.key` / `websocket.server.users[].key` | CLI 一次性 |
+| `-wol MAC[,MAC2,...]` | 发送网络唤醒(WOL)魔术包后退出，MAC 支持逗号分隔多个、`AA:BB:CC:DD:EE:FF`/`AA-BB-CC-DD-EE-FF` 两种写法均可；复用 `-to`/`-via` 两个 flag（见下两行），不单独开新名字；`-via` 留默认值 `direct`（即不传）时在本机广播，显式传一个订阅端 email 时改为让该订阅端广播；发送成功不代表对方真的醒了 | — | CLI 一次性 |
 | `-send PATH` | 把文件/目录发给另一个订阅端并退出（可跟多个路径）；接收端需开 `direct.accept`，端到端加密 | — | CLI 一次性 |
-| `-to EMAIL[:subdir]` / `DIR` | `-send`：接收方 email（scp 风格 `:subdir` 落到 `receive.dir/subdir`）；`-recv`：本机存放目录（默认当前目录） | — | CLI 一次性 |
-| `-via direct\|relay\|VPS的email` | `-send`/`-recv`：直连打洞(`direct`，打不通直接失败)、经服务端 B 中继(`relay`，无需打洞)，或填一台公网 VPS 的 email（该机需开 `direct.relay`）盲转发中继打洞（双方都在 CGNAT 后无法直连时用，详见 [direct-relay-design.md](direct-relay-design.md)）；均端到端加密 | `websocket.client.direct.relay`(VPS 侧) | CLI 一次性 |
+| `-to EMAIL[:subdir]` / `DIR` | `-send`：接收方 email（scp 风格 `:subdir` 落到 `receive.dir/subdir`）；`-recv`：本机存放目录（默认当前目录）；`-wol`：广播目标地址 `ADDR[:PORT]`，默认 `255.255.255.255:9`（受限广播，只在本机所在链路内扩散，不经路由器转发；目标在特定网段时可填该网段定向广播地址，如 `192.168.1.255`），这是**实际执行广播那一端**（本机或 `-via` 指定的订阅端）用的地址 | — | CLI 一次性 |
+| `-via direct\|relay\|VPS的email` | `-send`/`-recv`：直连打洞(`direct`，打不通直接失败)、经服务端 B 中继(`relay`，无需打洞)，或填一台公网 VPS 的 email（该机需开 `direct.relay`）盲转发中继打洞（双方都在 CGNAT 后无法直连时用，详见 [direct-relay-design.md](direct-relay-design.md)）；均端到端加密。`-wol`：要唤醒的机器本来就没开机，没法自己接这条命令，这里填**同一个局域网里另一台已经开着**的订阅端 email，由它代为广播（不认 `direct`/`relay` 这两个 `-send`/`-recv` 专用关键字，固定走服务端 B 中继，不打洞——魔术包只有 102 字节，用不上打洞开销），需在该订阅端的 `receive.allow` 里放行本机、且那一条要显式加 `wol: true`（默认 `false`，与收发文件是分开的权限，见 [configuration.md](configuration.md)） | `websocket.client.direct.relay`(VPS 侧) | CLI 一次性 |
 | `-recv EMAIL:PATH` | 从另一个订阅端取回文件/目录并退出（scp 风格，路径相对对方 `receive.dir`） | — | CLI 一次性 |
 | `-parallel N` | `-send`/`-recv`：单个大文件按字节区间切最多 N 块并行传（默认 1，小文件不切） | — | CLI 一次性 |
 | `-direct-plain-udp` | 直连(NAT 打洞)连接：跳过 quic-go 批量/ECN 快速 UDP 路径，回落逐包 I/O；高丢包、拥塞窗口卡死时尝试 | `websocket.client.direct.plainUdp` | 命令行 > 配置 |
@@ -74,6 +75,14 @@
 
 # TUN 全局代理（需管理员/root，网卡名/地址经配置 tun.name / tun.addr 指定）
 sudo ./anyproxy -mode tun -p 'socks5://127.0.0.1:10000'
+
+# 唤醒本机局域网内一台开了 WOL 的机器，可一次唤醒多台、指定网段广播地址
+./anyproxy -wol AA:BB:CC:DD:EE:FF
+./anyproxy -wol AA:BB:CC:DD:EE:FF,11:22:33:44:55:66 -to 192.168.1.255:9
+
+# 唤醒另一个订阅端所在局域网里的机器（该订阅端需在 receive.allow 里放行本机；
+# 要唤醒的机器本身没开机，填的是同一局域网里另一台已开机的订阅端）
+./anyproxy -wol AA:BB:CC:DD:EE:FF -via home@example.com
 ```
 
 > 上级代理协议前缀支持 `tunnel://`、`socks5://`、`http://`。**不写 `://` 前缀时默认按 `tunnel://` 处理**（全局 `-p`/`default.proxy` 与 `hosts[].proxy` 一致）。注：`-h` 帮助里"裸地址按 http"的旧描述与当前实现不符，以此为准。详见 [routing.md](routing.md)。

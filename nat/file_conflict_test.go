@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -315,7 +314,7 @@ func checkConflictCase(t *testing.T, c conflictCase, dir string, err error) {
 	} else if got := readFileStr(t, dest); got != c.wantDest {
 		t.Fatalf("x.txt = %q, want %q", got, c.wantDest)
 	}
-	dup := dupName(dest, 1, runtime.GOOS)
+	dup := dupName(dest, 1)
 	if c.wantDup == "" {
 		if exists(dup) {
 			t.Fatalf("unexpected renamed copy %s", dup)

@@ -443,6 +443,8 @@ func genWebsocketClient() string {
     #  allow:                 # 留空 = 谁都不接受; uuid 抄对方的 .<配置文件同名>.uuid(隐藏文件), 名单双向生效
     #    - email: someone@example.com
     #      uuid:
+    #      wol: false          # true 才允许这个 email 用 -wol 让本机代为广播网络唤醒包, 默认 false
+    #      dir:                # 这个 email 上传时的落地目录, 覆盖上面共享的 dir; 留空则跟其他人一样落到 dir
     # 上面 subscribe/forward/direct/receive 全不配时, 常驻进程会自动跳过
     # 这条配置(只留给 -send/-recv 命令行用), 通常不用管这项; 想强制跳过就设 true
     #sendRecvOnly: false

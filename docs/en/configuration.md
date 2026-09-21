@@ -217,7 +217,7 @@ Config is split by role into `server` (server side) / `client` (client side) blo
 | `websocket.client.direct.relayPublic` | Optional public relay address array. If every entry is a bare IP, each binding uses a random port advertised on all IPs; if every entry is `IP:port`, fixed-port mode is used. The two forms cannot be mixed | — |
 | `websocket.client.direct.plainUdp` | Overrides the command-line `-direct-plain-udp` default for this connection, three-state: not set follows global value, explicit `true`/`false` affects only this one | `-direct-plain-udp` |
 | `websocket.client.direct.lanAddrs` | Manually fill this machine's LAN/intranet IP array (no port), extra candidates for hole-punch/QUIC-dial racing | — |
-| `websocket.client.receive` | File-transfer receive config `{dir, allow[], readonly}`; each `allow` is `{email, uuid}`, `readonly: true` is send-only | — |
+| `websocket.client.receive` | File-transfer receive config `{dir, allow[], readonly}`; each `allow` is `{email, uuid, wol, dir}`, `readonly: true` is send-only, `wol: true` (default `false`) is required for that email to use `-wol` to have this machine broadcast on its behalf, and a non-empty `dir` overrides where that email's uploads land (default: the shared `dir`) | — |
 | `websocket.client.sendRecvOnly` | When `true`, force this config to only fetch credentials for `-send`/`-recv`; the resident process does not initiate a connection for it | — |
 
 > The full semantics, authentication, and examples of `websocket.client`'s direct/relay/file-transfer fields (the `direct*` / `receive` / `sendRecvOnly` in the table above) are in [websocket.md](websocket.md#file-transfer--send---recv--receive); `-genkey` generating `key` is also on that page.
