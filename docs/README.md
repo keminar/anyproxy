@@ -32,6 +32,7 @@
 - [direct-handshake-flow.md](direct-handshake-flow.md) — 直连/中继握手全流程与耗时：谁先发、等谁的顺序不变量，VPS 什么时候才开始转发（两腿都"亲耳听到"才转），token 与证书指纹的生成/流向，打洞的三个时间量（总预算/发包窗口/收敛窗），一次真实连接 5.3s 的逐段分解，以及"选路收敛窗"与"两段式 offer"两个已落地的优化；附五张流程图与日志速查表。
 - [tun-dns-vpn-coexist.md](tun-dns-vpn-coexist.md) — TUN 与 VPN(OpenVPN/TAP)共存的三类回包故障：① VPN 内网 DNS 的 /32 路由丢失；② Windows(WinDivert) VPN 传输死循环与 `excludeProcs`/`bypassIPs` 逃逸；③ 入站连接回包被 TUN 吸走(外网 SSH 断)——Linux 源策略路由(自动)、macOS `pf reply-to`(`inboundPorts`)。
 - [windows-winDivert.md](windows-winDivert.md) — Windows WinDivert 运行依赖：`WinDivert.dll`/`.sys` 放置、管理员权限、路径含空格/中文的驱动加载问题、bypass 模式在 Windows 已移除。
+- [windows-wol.md](windows-wol.md) — Windows 网络唤醒（WOL）配置教程：网卡电源管理与魔术包唤醒开关、关闭「快速启动」和 PCIe 节能、BIOS 里开 Wake On LAN 且必须关 ErP，以及有线网卡/不断电/同一局域网等硬性条件；魔法包发送见 [cli.md](cli.md) 的 `-wol` 参数。
 - [todo.md](todo.md) — 待办/待确认：PR #22 审查中暂留未处理的项（透明代理嗅探 `Peek(1)` 无超时 + 实现分叉、`HostBlocksUDP` 热路径线性扫描）。
 - [windows-windivert-redirect.md](windows-windivert-redirect.md) — Windows WinDivert 重定向原理：数据包捕获→NAT 改写→本地代理→恢复目的地转发的完整链路；NAT 表、dual-stack 监听、环路防护。
 - [windows-windivert-escape.md](windows-windivert-escape.md) — Windows WinDivert 逃逸机制（环路防护专题）：anyproxy 自身出站如何逃过捕获避免自环；SOCKS 层 Guard 的竞态缺陷（IPv4 能逃逸、IPv6 稳定自环）与 egress 源端口段根治方案。
