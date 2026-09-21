@@ -2,7 +2,8 @@
 // +build linux
 
 // Package systune 检查/应用 anyproxy 建议的 Linux 内核网络调优(sysctl)与文件句柄。
-// 与 utils/help 里 -h 输出的调优清单保持一致。
+// 这里是调优建议唯一的出处——utils/help 的 -h 输出不再重复整份清单, 只指向 -check/-check-fix,
+// 避免两处各写一份、改一处忘改另一处。
 package systune
 
 import (
@@ -33,7 +34,6 @@ type tunable struct {
 	kind ckind
 }
 
-// 与 utils/help 的 -h 调优清单一致。
 var tunables = []tunable{
 	{"fs.file-max", "1000000", gte},
 	{"net.core.default_qdisc", "fq", eq},
@@ -142,6 +142,9 @@ func Check() int {
 	} else {
 		fmt.Printf("%d item(s) below recommendation; run sudo anyproxy -check-fix to apply.\n", warn)
 	}
+	// 不是任何一项 sysctl 达不达标就能判定的症状, 单独提一句: 出现 syn flood 日志时
+	// 该往哪几个参数上查, 不然这条排查线索只存在于人的记忆里。
+	fmt.Println("tip: if you see syn flood warnings in your kernel log, look at tcp_max_syn_backlog, tcp_synack_retries and tcp_abort_on_overflow.")
 	return warn
 }
 
