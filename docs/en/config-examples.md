@@ -173,7 +173,7 @@ Deployed on the egress server to receive anyproxy's requests. Start with `-mode 
 
 ```yaml
 listen: :3001
-token: anyproxyproxyany       # must be 16 chars, identical on both ends
+token: anyproxyproxyany       # any length, identical on both ends (internally normalized into a 16-byte AES key)
 allowIP:                      # optional: restrict source
   - 203.0.113.0/24
 default:

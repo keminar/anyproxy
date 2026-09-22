@@ -173,7 +173,7 @@ sudo iptables -t nat -A OUTPUT -p tcp -m multiport --dport 80,443 -j REDIRECT --
 
 ```yaml
 listen: :3001
-token: anyproxyproxyany       # 必须 16 位，两端一致
+token: anyproxyproxyany       # 长度不限，两端一致即可（内部会自动归一化成 16 位 AES key）
 allowIP:                      # 可选：限制来源
   - 203.0.113.0/24
 default:

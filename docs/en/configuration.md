@@ -13,7 +13,7 @@ This page explains each config section in turn. Routing semantics (`target`/`pro
 | `listen` | string | `:3000` | Listen address:port; lower priority than `-l`. Set to `off` (or `none`/`-`) to **disable the proxy listener**, running only background services like websocket/tun (pure intranet-penetration scenario, no local proxy port needed). After disabling, the websocket "HTTP header subscription" path stops working (it depends on the local proxy); the "raw TCP forward" is unaffected |
 | `network` | string | `tcp` | Listen protocol: `tcp` (v4+v6) / `tcp4` / `tcp6` |
 | `watcher` | bool | false | Whether to watch config file changes and hot-reload `default`/`hosts` |
-| `token` | string | — | Encryption key for communicating with tunneld; **must be exactly 16 characters** |
+| `token` | string | — | Encryption key for communicating with tunneld; any length works as long as both ends match (internally normalized into a 16-byte AES key) |
 | `allowIP` | []string | empty = unrestricted | Client IPs allowed to access, supports CIDR |
 | `mode` | string | `proxy` | Run mode (mutually exclusive): `proxy` / `tunnel` / `tun` / `bypass` (Linux only) / `tcpcopy`; lower priority than `-mode`. websocket intranet penetration is not a `mode` value — it is an independent switch coexisting with any mode |
 

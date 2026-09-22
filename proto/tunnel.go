@@ -826,7 +826,7 @@ func (s *tunnel) httpConnect(network, connAddr string, target string, encrypt bo
 	}
 	var connectString string
 	if encrypt {
-		key := []byte(getToken())
+		key := getAesKey()
 		var x1 []byte
 		x1, err = crypto.EncryptAES([]byte(target), key)
 		if err != nil {

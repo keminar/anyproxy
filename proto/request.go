@@ -2,6 +2,8 @@ package proto
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"net"
 
 	"github.com/keminar/anyproxy/utils/conf"
@@ -10,7 +12,7 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 )
 
-// AesToken 加密密钥, 必须16位长度
+// AesToken 加密密钥默认值, 不再要求配置的 token 必须凑够16位, 见 getAesKey
 var AesToken = "anyproxyproxyany"
 
 // Request 请求类
@@ -106,4 +108,19 @@ func getToken() string {
 		return AesToken
 	}
 	return conf.RouterConfig().Token
+}
+
+// getAesKey 把配置的 token 归一化成 AES-128 要求的16字节key, 两端只要 token 配的
+// 字符串相同, 不管长度多少都能派生出同一把key: 超过16位截取前16位, 不足16位则先
+// md5(32位hex)再取前16位。这样配置 token 时不用再手数着凑够16个字符。
+func getAesKey() []byte {
+	token := getToken()
+	if len(token) == 16 {
+		return []byte(token)
+	}
+	if len(token) > 16 {
+		return []byte(token[:16])
+	}
+	sum := md5.Sum([]byte(token))
+	return []byte(hex.EncodeToString(sum[:])[:16])
 }

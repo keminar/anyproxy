@@ -707,7 +707,7 @@ type Router struct {
 	Network   string    `yaml:"network"`   //监听协议
 	Log       Log       `yaml:"log"`       //日志目录
 	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
-	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
+	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 两端保持一致即可, 长度不限(内部会自动归一化成16位AES key)
 	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
 	Mode      string    `yaml:"mode"`      //运行模式: proxy=客户端(默认); tunnel=服务端tunneld; tun=建TUN网卡全局代理; bypass=仅绑物理网卡绕行; tcpcopy=端口转发。命令行 -mode 优先
 	Tun       Tun       `yaml:"tun"`       //TUN虚拟网卡全局代理(mode=tun); mode=bypass 复用 tun.linux.excludeNics/device

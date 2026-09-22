@@ -100,7 +100,7 @@ func (that *httpStream) readFistLine() bool {
 func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 	rawurl := that.RequestURI
 	if that.Method == "CONNECT" && from == "server" {
-		key := []byte(getToken())
+		key := getAesKey()
 		x1, err := base64.StdEncoding.DecodeString(that.RequestURI)
 		if err != nil {
 			return false, err

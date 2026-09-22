@@ -99,7 +99,7 @@ func EnsureLogDir() (dir string, created bool, err error) {
 
 // GenNextSteps 生成后的"接下来干什么", 免得拿到文件还得翻文档。
 func GenNextSteps(mode, path string) []string {
-	steps := []string{fmt.Sprintf("edit %s, at least change token (16 chars) and confirm listen", path)}
+	steps := []string{fmt.Sprintf("edit %s, at least change token (any length, both ends must match) and confirm listen", path)}
 	switch mode {
 	case "proxy":
 		steps = append(steps, "set default.proxy, or pass -p at startup to point at an upstream proxy")
@@ -157,7 +157,8 @@ log:
 # 配置文件改动后自动热加载(default/hosts 等即时生效)
 watcher: true
 
-# anyproxy 与 tunneld 之间的通信密钥, 必须 16 位。两端必须一致, 请改掉这个默认值
+# anyproxy 与 tunneld 之间的通信密钥, 长度不限(内部会自动归一化成16位AES key)。
+# 两端必须一致, 请改掉这个默认值
 token: anyproxyproxyany
 
 # 允许连接本机监听端口的客户端 IP(单 IP 或 CIDR), 留空不限制
