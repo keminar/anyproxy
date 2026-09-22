@@ -464,7 +464,7 @@ Troubleshooting: with `-debug 2`, quic-go prints `connection doesn't allow setti
 
 #### Single large file chunked parallel transfer: `-parallel N`
 
-By default each file occupies only one connection (one QUIC stream on `direct`, one relay session on `relay`), which is enough when a single connection's throughput already fills the link, but insufficient when limited by the single-stream congestion window climb or the relay flow-control window — the "single connection" ceiling. `-parallel N` (default 1) splits a **single** large file into at most `N` chunks by byte range, each opening an independent connection for parallel transfer. Both paths (`-via direct`/`-via relay`) and both directions (`-send`/`-recv`) are supported:
+By default each file occupies only one connection (one independently NAT-punched QUIC connection on `direct`/VPS blind-relay, one relay session on `relay`), which is enough when a single connection's throughput already fills the link, but insufficient when limited by the single-stream congestion window climb or the relay flow-control window — the "single connection" ceiling. `-parallel N` (default 1, hard-capped at 4 — anything higher is clamped down to 4) splits a **single** large file into at most `N` chunks for parallel transfer. Both paths (`-via direct`/VPS, `-via relay`) and both directions (`-send`/`-recv`) are supported:
 
 ```bash
 anyproxy -send bigfile.zip -to home@example.com -parallel 4
@@ -472,15 +472,17 @@ anyproxy -recv home@example.com:backup/bigfile.zip -to /data/in -parallel 4
 ```
 
 - **Only splits a single file, no multi-file concurrency**. Batch `-send`/`-recv` of multiple files still transfers one after another — the purpose of chunked parallelism is to let a single large file use the bandwidth faster, not to let multiple files compete for the same bandwidth (that would actually lengthen each file's time).
-- **Files too small are not split**: files below 8MiB always take the single-connection path, the `-parallel` value is ignored, since the chunking handshake/header overhead isn't worth it on small files.
-- **Failure semantics identical to no-chunk**: if any chunk fails (network error, verification failure) the whole file errors out and the `.part` file is cleaned up, leaving no half-done file with only some chunks right, and no auto-retry.
+- **Files too small are not split**: files below 8MiB always take the single-connection path, the `-parallel` value is ignored, since the chunking handshake/header overhead isn't worth it on small files. Chunk count doesn't keep growing with file size either — it tops out at 4 (for files 16MiB and up); a multi-gigabyte file still only splits into 4, not more.
+- **Failure semantics identical to no-chunk, but tolerant of partial connection failure**: on `-via direct`/VPS, as long as at least 1 of the `N` independent connections punches through, the transfer proceeds on whichever ones succeeded (a few candidate paths not working is normal and shouldn't fail the whole transfer). Once connections are up, any chunk transfer failure (network error, verification failure) still errors out the whole file and cleans up the `.part` file — no half-done file, no auto-retry.
 - **On `-via relay`, each chunk negotiates its own encryption session** (independent random salt, independently derived AES-256-GCM key); the protocol has long supported "open a new encryption session anytime", so no handshake change is needed for chunking.
+- **The progress line now shows each connection's own instantaneous rate** (`conn1: ... conn2: ...`), so you can tell if one connection is dragging behind the others.
 
-##### `-parallel` does not always speed up: understand the bottleneck first
+##### Whether `-parallel` actually opens multiple connections differs by path
 
-**Chunking uses the same underlying connection** — on `direct`, the N chunks are N streams on the same QUIC connection; on `relay`, they are N relay sessions on the same websocket (same TCP connection). QUIC/TCP congestion control is computed per **connection**, not per stream/session, meaning these N concurrent paths share the same congestion window and look like **the same five-tuple** (same pair of source/dest IP+port) to network devices. If the bottleneck is operator per-flow rate limiting, or the link itself is congested with packet loss, `-parallel` in this same-connection-multiplexed implementation most likely won't help — the operator still sees "one flow", and won't allocate more bandwidth just because the app opened a few more streams.
+- **`-via direct`/`-via a VPS's email` (blind-relayed punch): genuinely independent QUIC connections.** Each chunk runs its own punch handshake and QUIC handshake, ending up with a fully independent connection that maintains its own congestion window — that's the whole point: on a link with random packet loss, a single QUIC flow's congestion window can get stuck repeatedly pinned low (a real measured case: cwnd stuck around 5~14KB with ~5% loss, throughput ≈ cwnd/RTT), while several independent connections each maintain their own window and the aggregate throughput can recover close to linearly — the same principle multi-threaded download managers rely on. The local UDP socket is still shared (no extra local ports needed), but the QUIC connections themselves, and the bindings on the VPS blind-relay side, are each independent.
+- **`-via relay` (through server B): still the same underlying connection.** The N chunks are N relay sessions on the same websocket (same TCP connection); QUIC/TCP congestion control is computed per **connection**, so these N concurrent paths share the same congestion window and look like the same five-tuple to network devices. If the bottleneck is operator per-flow rate limiting or link congestion, `-parallel` on the `relay` path most likely won't help; it truly helps when a single relay session's own flow-control window fills before the network bandwidth does, or when the bottleneck is actually CPU (hashing, encryption/decryption). To get genuinely independent multiple connections, switch to `-via direct` or `-via a VPS's email`.
 
-The scenarios where `-parallel` truly helps are when a single stream/relay session's own flow-control window (not congestion window) fills before the network bandwidth — e.g. a single stream's window is too small on a high-latency long-distance link, or the bottleneck is actually CPU (hashing, encryption/decryption) rather than network. These two cases benefit from multiple concurrent paths; if the bottleneck is poor operator cross-network interconnection quality or per-flow/per-account rate limiting, opening more won't help.
+##### Use `iperf3` to diagnose the bottleneck first, especially for `-via relay`
 
 **Use `iperf3` to diagnose before relying on feeling** (assuming A transfers slowly, C is the receiving machine, and the two can reach each other):
 
@@ -508,9 +510,11 @@ Reading the results:
 
 | Phenomenon | Conclusion |
 |---|---|
-| Single stream slow, multi-stream (`-P 4`) `[SUM]` much higher than single | per-flow rate limiting / single-stream window can't fill, `-parallel` is worth using |
-| Single stream slow, multi-stream `[SUM]` about the same, high packet loss | link itself congested (common with poor operator cross-network interconnection quality), `-parallel` has limited benefit |
-| TCP results ok, UDP noticeably worse | operator may have separately limited UDP; even reshaping into multiple independent QUIC connections may not help, consider switching to `-via relay` (TCP websocket) to bypass |
+| Single stream slow, multi-stream (`-P 4`) `[SUM]` much higher than single | per-flow rate limiting / single-stream window can't fill, `-parallel` is worth using (especially under `-via direct`/VPS, since those connections really are independent) |
+| Single stream slow, multi-stream `[SUM]` about the same, high packet loss | link itself congested (common with poor operator cross-network interconnection quality); independent flows each still eat their own share of the loss so this can't be fully bypassed, `-parallel` has limited benefit but is usually still somewhat better than a single stream (see the QUIC cwnd/loss stats under `-check`) |
+| TCP results ok, UDP noticeably worse | operator may have separately limited UDP; `-via direct`/VPS rides QUIC/UDP, so multiple independent connections may not help either — consider switching to `-via relay` (TCP websocket) to bypass |
+
+With `-via direct`/VPS, adding `-debug 2` during transfer shows each connection's own `quic cwnd=... inflight=... sent=...pkt lost=...pkt`, plus a summary line at the end (no `-debug` needed for that one) — this is more direct than iperf3 since it reflects the actual connection this transfer is using, not an inference from a separate speed test.
 
 ### TCP and UDP: two protocols carried differently on QUIC
 

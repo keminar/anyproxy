@@ -128,6 +128,7 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	if err != nil {
 		return err
 	}
+	parallel = clampParallel(parallel)
 	actualVia, relayVia := resolveVia(via)
 	if relayVia != "" {
 		if relayVia == cfg.Email {
@@ -170,9 +171,10 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	// 的分块版, 同样两条路径共用一份编排(sendFileParallel)。
 	var send func(it fileItem, onProgress func(int64)) (string, error)
 	var sendChunk func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error)
-	// quicStats 直连路径才有: 传完打一行 QUIC 收发统计, 用来判断"传得慢"是链路丢包
-	// 还是本端的问题(见 nat/direct_stats.go 的判读说明)。
-	var quicStats *directStats
+	// quicStats 直连路径才有: 传完每条连接各打一行 QUIC 收发统计, 用来判断"传得慢"
+	// 是链路丢包还是本端的问题(见 nat/direct_stats.go 的判读说明)。parallel>1 时
+	// 这里会有不止一条, 方便挨个对比是不是某一条连接明显比别的差。
+	var quicStats []*directSession
 	// probe 在一条新通道上探测收方有没有同名文件(同名协商用)。
 	var probe func(it fileItem, noHash bool) (*probeResult, error)
 	notify := func(msg string) { fmt.Fprintln(os.Stderr, msg) }
@@ -191,20 +193,33 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		}
 		punchStart := time.Now()
 		rule := conf.ClientDirect{Forward: conf.DirectForwardTarget{Email: toEmail, Tag: directFileTag}, Via: relayVia}
-		sess, err := sender.peer.ensureSession(rule)
+		// parallel>1 时这里可能打出最多 parallel 条相互独立的连接(见 ensureParallelSessions),
+		// 不是像以前那样只打一条再靠 QUIC stream 复用——目的就是让每条连接各自维护自己的
+		// 拥塞窗口, 链路有丢包时聚合吞吐能接近线性提升。parallel<=1 时行为跟以前完全一样,
+		// 只会拿到一条连接。
+		sessions, err := sender.peer.ensureParallelSessions(rule, parallel)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was sent: %w", toEmail, err)
 		}
-		fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
-			toEmail, sess.addr, time.Since(punchStart).Round(time.Millisecond))
-		quicStats = sess.stats
+		if len(sessions) > 1 {
+			fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s, %d independent connections)\n",
+				toEmail, sessions[0].addr, time.Since(punchStart).Round(time.Millisecond), len(sessions))
+		} else {
+			fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
+				toEmail, sessions[0].addr, time.Since(punchStart).Round(time.Millisecond))
+		}
+		quicStats = sessions
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
-			return sender.peer.sendFile(sess, it, onProgress)
+			return sender.peer.sendFile(sessions[0], it, onProgress)
 		}
 		probe = func(it fileItem, noHash bool) (*probeResult, error) {
-			return sender.peer.probeFile(sess, it, noHash, notify)
+			return sender.peer.probeFile(sessions[0], it, noHash, notify)
 		}
 		sendChunk = func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+			// 分块轮着用打开的这几条连接: chunkCount 可能比 len(sessions) 多(小文件
+			// 阈值与连接数上限是分开算的), 取模让多出来的块回退到"共享一条连接的多个
+			// stream"这个本来就安全的老路径, 不会因为连接数不够就出错。
+			sess := sessions[chunkIdx%len(sessions)]
 			return sender.peer.sendFileChunk(sess, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
 		}
 	case ViaRelay:
@@ -255,9 +270,13 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 			humanBytes(it.size), time.Since(start).Round(time.Millisecond), rate(it.size, time.Since(start)))
 	}
 	fmt.Fprintf(os.Stderr, "done: %d file(s), %s%s\n", len(items)-skipped, humanBytes(sentBytes), skippedNote(skipped))
-	if quicStats != nil {
-		if s := quicStats.summary(); s != "" {
-			fmt.Fprintf(os.Stderr, "quic: %s\n", s)
+	for i, sess := range quicStats {
+		if s := sess.stats.summary(); s != "" {
+			if len(quicStats) > 1 {
+				fmt.Fprintf(os.Stderr, "quic conn%d: %s\n", i+1, s)
+			} else {
+				fmt.Fprintf(os.Stderr, "quic: %s\n", s)
+			}
 		}
 	}
 	return nil
@@ -405,14 +424,24 @@ func sendParallel(it fileItem, chunks []chunkRange,
 // chunkProgress 把多个并行分块各自的进度回调聚合成一份整份文件的进度, 复用
 // progress 已有的节流展示逻辑(见 progress.update), 不重复实现一遍。取件方向
 // (file_recv.go)的分块编排也用它, 两边不必各写一份聚合代码。
+//
+// 除了聚合总量, 它还给 progress 挂一份"每条连接自己多快"的摘要(见 summary)——
+// 分块并行传输本来就是想看"是不是每条连接都在出力、有没有哪一条明显拖后腿",
+// 只看总速率看不出这个。
 type chunkProgress struct {
-	mu   sync.Mutex
-	each []int64
-	p    *progress
+	mu       sync.Mutex
+	each     []int64 // 每块已发送/已取到的累计字节数
+	lastEach []int64 // 上一次 summary() 时的快照, 用来算这一小段区间的瞬时速率
+	lastAt   time.Time
+	p        *progress
 }
 
 func newChunkProgress(n int, p *progress) *chunkProgress {
-	return &chunkProgress{each: make([]int64, n), p: p}
+	cp := &chunkProgress{
+		each: make([]int64, n), lastEach: make([]int64, n), lastAt: time.Now(), p: p,
+	}
+	p.setConnLine(cp.summary)
+	return cp
 }
 
 func (c *chunkProgress) update(i int, sent int64) {
@@ -427,6 +456,26 @@ func (c *chunkProgress) update(i int, sent int64) {
 		total += n
 	}
 	c.p.update(total)
+}
+
+// summary 渲染"connN: 已传 瞬时速率"这一串, 按 progress.render() 的节奏(progressTick)
+// 调用一次——窗口跟总速率的计算对齐, 不是从头到现在的累计平均, 理由与 progress.render()
+// 一致: 排查"是不是某条连接被限速/拥塞退避"要看的是"现在多快", 不是平均值。
+func (c *chunkProgress) summary() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	elapsed := now.Sub(c.lastAt)
+	var b strings.Builder
+	for i, sent := range c.each {
+		if i > 0 {
+			b.WriteString("  ")
+		}
+		fmt.Fprintf(&b, "conn%d: %s %s", i+1, humanBytes(sent), rate(sent-c.lastEach[i], elapsed))
+	}
+	copy(c.lastEach, c.each)
+	c.lastAt = now
+	return b.String()
 }
 
 // ---------- 进度输出 ----------
@@ -452,6 +501,11 @@ type progress struct {
 	last     time.Time
 	shown    bool
 
+	// connLine 非空时(分块并行传输, 见 newChunkProgress), render() 在主进度后面
+	// 追加它返回的这一段"每条连接各自的进度/速率"摘要。单连接传输不设, 输出跟
+	// 改动前完全一样。
+	connLine func() string
+
 	stopOnce sync.Once
 	stop     chan struct{}
 	loopDone chan struct{}
@@ -469,6 +523,15 @@ func newProgress(prefix string, total int64) *progress {
 func (p *progress) update(sent int64) {
 	p.mu.Lock()
 	p.sent = sent
+	p.mu.Unlock()
+}
+
+// setConnLine 挂上 connLine 回调。要过锁: render() 的渲染 goroutine 从 newProgress
+// 返回那一刻就已经在跑, newChunkProgress 是在那之后才调这个方法的, 不加锁就是对
+// 同一个字段的数据竞争。
+func (p *progress) setConnLine(f func() string) {
+	p.mu.Lock()
+	p.connLine = f
 	p.mu.Unlock()
 }
 
@@ -500,13 +563,18 @@ func (p *progress) render() {
 	p.lastSent = sent
 	p.last = now
 	p.shown = true
+	connLine := p.connLine
 	p.mu.Unlock()
 	pct := 0.0
 	if p.total > 0 {
 		pct = float64(sent) * 100 / float64(p.total)
 	}
-	fmt.Fprintf(os.Stderr, "\r%s  %s/%s  %.1f%%  %s   ",
-		p.prefix, humanBytes(sent), humanBytes(p.total), pct, instRate)
+	extra := ""
+	if connLine != nil {
+		extra = "  " + connLine()
+	}
+	fmt.Fprintf(os.Stderr, "\r%s  %s/%s  %.1f%%  %s%s   ",
+		p.prefix, humanBytes(sent), humanBytes(p.total), pct, instRate, extra)
 }
 
 // done 收尾: 先停掉渲染 goroutine 并等它退出(避免和下面的擦行打印互相踩踏), 再把
@@ -528,7 +596,10 @@ func (p *progress) done() {
 		shown := p.shown
 		p.mu.Unlock()
 		if shown {
-			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 100))
+			// 200: 单连接那行不到 100 就够了, 但分块并行时 connLine 会在后面加上
+			// "connN: 已传 速率" 这样的片段, 4 条连接能把整行拉到一百七八十字符,
+			// 擦得不够宽会在终端上留下没盖住的尾巴。
+			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 200))
 		}
 	})
 }

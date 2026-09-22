@@ -848,7 +848,25 @@ const (
 	// transferIDSize 分块传输 ID 的随机字节数, 只用来在接收端把同一次传输的多个块
 	// 对上号, 不是秘密, 不需要跟 relay 那套加密 salt 一样的强度。
 	transferIDSize = 8
+
+	// maxParallelConns -parallel 的硬上限, 不管用户传多大的值都会被夹到这个数。
+	// 依据: 4 条独立连接对家用 NAT/防火墙毫无压力(远小于浏览器对单域名的默认并发),
+	// 丢包驱动的吞吐增益到这个量级基本打平, 再往上更容易撞见对称型 NAT 打洞失败率
+	// 上升、以及并发流互相挤占同一段带宽反而抬高整体丢包率这些副作用。不随文件大小
+	// 变——即使是几个 GB 的大文件也只切到 4 块, 见 planChunks。
+	maxParallelConns = 4
 )
+
+// clampParallel 把 -parallel 夹到 [1, maxParallelConns] 区间。<=0 按 1(不并行)处理。
+func clampParallel(parallel int) int {
+	if parallel <= 1 {
+		return 1
+	}
+	if parallel > maxParallelConns {
+		return maxParallelConns
+	}
+	return parallel
+}
 
 // chunkRange 一个分块在文件里的位置。
 type chunkRange struct {

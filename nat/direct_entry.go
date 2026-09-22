@@ -144,6 +144,80 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	if sess := d.session(r.Forward.Email, route); sess != nil {
 		return sess, nil
 	}
+	sess, err := d.newDirectSession(r)
+	if err != nil {
+		return nil, err
+	}
+	d.putSession(r.Forward.Email, sess, route)
+	return sess, nil
+}
+
+// ensureParallelSessions 拿到最多 n 条相互独立的 QUIC 连接, 供单次文件传输把不同的
+// 分块分摊到不同连接上跑, 不共享同一条连接的拥塞窗口——链路有丢包时单流的拥塞窗口
+// 长不大(实测见 -parallel 相关讨论), 独立连接各自维护自己的窗口, 聚合吞吐能接近
+// 线性提升。
+//
+// n<=1 时完全退化成 ensureSession, 走查缓存/复用那条老路——非并行调用方、以及文件
+// 不够大不需要切块的场景, 行为分毫不变。
+//
+// n>1 时并发发起 n 次独立打洞/QUIC 拨号, 都不进 d.sessions 复用缓存(见
+// newDirectSession 的注释): 这些连接是这一次传输独占使用的, 不该被其它请求当现成
+// 连接捞走, 也不该被 reapSessions 当成"空闲太久"的普通连接收掉。
+//
+// 失败策略是"能打通几条就用几条": 至少 1 条成功就返回, 其余打不通的记日志跳过,
+// 不因为个别候选路径不通(现实中很常见, 比如某几条网络确实互相到不了)就让整个
+// 传输失败——这跟 n<=1 时"唯一一条打不通就报错"的下限是一致的, 只是下限从"必须
+// 那 1 条"变成"至少要有 1 条"。
+func (d *directPeer) ensureParallelSessions(r conf.ClientDirect, n int) ([]*directSession, error) {
+	if n <= 1 {
+		sess, err := d.ensureSession(r)
+		if err != nil {
+			return nil, err
+		}
+		return []*directSession{sess}, nil
+	}
+	type dialResult struct {
+		sess *directSession
+		err  error
+	}
+	results := make(chan dialResult, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			sess, err := d.newDirectSession(r)
+			results <- dialResult{sess: sess, err: err}
+		}()
+	}
+	var sessions []*directSession
+	var errs []string
+	for i := 0; i < n; i++ {
+		res := <-results
+		if res.err != nil {
+			errs = append(errs, res.err.Error())
+			continue
+		}
+		sessions = append(sessions, res.sess)
+	}
+	if len(sessions) == 0 {
+		return nil, fmt.Errorf("all %d parallel connect attempt(s) to %s failed: %s", n, r.Forward.Email, strings.Join(errs, "; "))
+	}
+	if len(errs) > 0 {
+		d.logf("parallel connect to %s: %d/%d independent connection(s) established, %d failed (%s)",
+			r.Forward.Email, len(sessions), n, len(errs), strings.Join(errs, "; "))
+	}
+	return sessions, nil
+}
+
+// newDirectSession 打一次洞、建一条全新的、已认证的 QUIC 连接, 不查也不占用
+// d.sessions 那张单槽位的复用缓存——ensureSession(单连接、要复用)与
+// ensureParallelSessions(n>1、每条都要独立、不给复用)共用这同一段"怎么连上对面"
+// 的逻辑, 缓存要不要收编交给调用方决定。
+//
+// 底层的 connectPeer/raceQUICDial 仍会在拨通的一瞬间把连接短暂写进 d.sessions(这是
+// 它们对所有调用方统一的收尾动作, 不值得为这一个新增用途去改这两个被广泛调用的
+// 函数)——建完这里立刻用 dropSession 撤销登记, 确保方法返回时这条连接不残留在
+// reapSessions 会扫到的那张表里。
+func (d *directPeer) newDirectSession(r conf.ClientDirect) (*directSession, error) {
+	route := sessionRouteForRule(r)
 	// A 侧也需要自己的 socket: QUIC 从它拨出去, 它的端点还要报给服务端, 好让 C 朝它
 	// 打洞。没开 directAccept 的机器在这里按需建一个; 开了的复用监听那一个。
 	tr, err := d.ensureTransport()
@@ -215,6 +289,9 @@ func (d *directPeer) ensureSession(r conf.ClientDirect) (*directSession, error) 
 	}
 	// 回程 datagram 的分发依赖这条 goroutine, TCP-only 的连接上它只是空转等关闭。
 	go d.receiveDatagrams(sess)
+	// 撤销 connectPeer/raceQUICDial 刚才做的登记: 这个方法不负责决定要不要复用,
+	// 交给调用方(ensureSession 会重新登记一次, ensureParallelSessions 不会)。
+	d.dropSession(r.Forward.Email, sess, route)
 	return sess, nil
 }
 
