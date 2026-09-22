@@ -291,7 +291,11 @@ func (d *directPeer) newDirectSession(r conf.ClientDirect) (*directSession, erro
 	go d.receiveDatagrams(sess)
 	// 撤销 connectPeer/raceQUICDial 刚才做的登记: 这个方法不负责决定要不要复用,
 	// 交给调用方(ensureSession 会重新登记一次, ensureParallelSessions 不会)。
-	d.dropSession(r.Forward.Email, sess, route)
+	//
+	// 不能用 dropSession——它是给"连接确实坏了、该整个关掉重建"这个场景用的, 除了
+	// 摘缓存还会顺手把连接关掉(CloseWithError); 这里连接刚握手成功、完全健康,
+	// 只是不想让它赖在复用缓存里, 用 unregisterSession 只摘缓存记录, 不碰连接本身。
+	d.unregisterSession(r.Forward.Email, sess, route)
 	return sess, nil
 }
 
@@ -833,6 +837,21 @@ func (d *directPeer) logUDPTraffic() {
 			e.rule.Listen, e.rule.Forward.Email, e.sessionCount(),
 			snap.UpBytes, snap.UpPkts, snap.UpRate, snap.DownBytes, snap.DownPkts, snap.DownRate)
 	}
+}
+
+// unregisterSession 只把这一条记录从复用缓存里摘掉(前提是它还在里面), 完全不碰底层
+// 连接——专供 newDirectSession 在一条全新连接刚握手成功时用: 这条连接是健康的, 只是
+// 不该被当成"可复用的那一条"留在缓存里(调用方要么马上用 putSession 重新登记一次,
+// 要么就是要拿去单独使用, 见 ensureSession/ensureParallelSessions)。跟 dropSession
+// 不是一回事: 那个是给连接确实坏了、要整个关掉重建的场景用的, 会顺手关连接, 用在
+// 这里会把刚建好、完全健康的连接也关掉。
+func (d *directPeer) unregisterSession(email string, sess *directSession, route ...directSessionRoute) {
+	d.mu.Lock()
+	key := sessionKey(email, route...)
+	if d.sessions[key] == sess {
+		delete(d.sessions, key)
+	}
+	d.mu.Unlock()
 }
 
 // dropSession 仅在当前记录仍是这条失效连接时删除, 避免把别的 goroutine 刚建好的新连接误删。

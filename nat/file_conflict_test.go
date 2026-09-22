@@ -74,8 +74,8 @@ func TestPromptOptions(t *testing.T) {
 		{"same: overwrite", same, "o\n", ConflictOverwrite, false, nil, nil},
 		{"same: default is skip", same, "\n", ConflictSkip, false, nil, nil},
 		{"same: uppercase is sticky", same, "S\n", ConflictSkip, true, nil, nil},
-		// 目标名不接受续传, 内容不同也不提供覆盖(要覆盖用 -conflict overwrite)。
-		{"differ: only rename and skip", differ, "c\no\nr\n", ConflictRename, false, []string{"differs", "[r]ename", "[s]kip"}, []string{"[c]ontinue", "[o]verwrite"}},
+		// 目标名不接受续传, 但覆盖不看内容是否一致都提供(是否覆盖是用户的明确选择)。
+		{"differ: overwrite is offered too", differ, "c\no\n", ConflictOverwrite, false, []string{"differs", "[r]ename", "[o]verwrite", "[s]kip"}, []string{"[c]ontinue"}},
 		{"garbage then answer", differ, "??\nx\ns\n", ConflictSkip, false, []string{"please answer"}, nil},
 	}
 	for _, c := range cases {

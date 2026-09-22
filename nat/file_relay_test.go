@@ -266,10 +266,10 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 	// 必须停掉它的渲染 goroutine: 漏掉的话它会一直往 stderr 刷进度行到进程结束,
 	// 把后面用例的输出和失败信息冲乱(见 progress.done 的说明)。
 	defer p.done()
-	sendChunk := func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
 		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, chunkCount, onProgress)
 	}
-	saved, err := sendParallel(it, chunks, sendChunk, p)
+	saved, err := sendParallel(it, chunks, 3, sendChunk, p)
 	if err != nil {
 		t.Fatalf("chunked send via relay: %v", err)
 	}

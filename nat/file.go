@@ -852,9 +852,17 @@ const (
 	// maxParallelConns -parallel 的硬上限, 不管用户传多大的值都会被夹到这个数。
 	// 依据: 4 条独立连接对家用 NAT/防火墙毫无压力(远小于浏览器对单域名的默认并发),
 	// 丢包驱动的吞吐增益到这个量级基本打平, 再往上更容易撞见对称型 NAT 打洞失败率
-	// 上升、以及并发流互相挤占同一段带宽反而抬高整体丢包率这些副作用。不随文件大小
-	// 变——即使是几个 GB 的大文件也只切到 4 块, 见 planChunks。
+	// 上升、以及并发流互相挤占同一段带宽反而抬高整体丢包率这些副作用。这个数封的是
+	// **同时打开的连接数**, 不是切成几块——块数见 piecesPerWorker, 大文件切出来的块
+	// 会比这个数多, 分给这几条连接抢着传(见 sendParallel/recvParallel)。
 	maxParallelConns = 4
+
+	// piecesPerWorker 分块并行时, 目标片数是"实际连接数(worker 数)"的这么多倍——
+	// 片数比连接数多几倍, 先干完自己手头那片的连接才有多余的片可抢(见 sendParallel
+	// 的"抢活"说明), 不然还是老样子一个 worker 只有一片、谁都别想帮别人分担。片数
+	// 最终还是受 chunkMinSize 天然封顶(见 planChunks), 文件不够大时不会真凑出这么
+	// 多片。
+	piecesPerWorker = 4
 )
 
 // clampParallel 把 -parallel 夹到 [1, maxParallelConns] 区间。<=0 按 1(不并行)处理。
@@ -866,6 +874,17 @@ func clampParallel(parallel int) int {
 		return maxParallelConns
 	}
 	return parallel
+}
+
+// chunkTarget 算给 planChunks 用的目标片数。workers<=1 时原样返回(变成 1),
+// planChunks 的 want<=1 本来就不切块——workers<=1 就是根本没请求并行, 不该因为这个
+// 分片改动平白多切一次、多算一遍哈希。只有真要并行(workers>1)时才把目标片数放大
+// 到 workers*piecesPerWorker, 好让干得快的连接有多余的片可抢。
+func chunkTarget(workers int) int {
+	if workers <= 1 {
+		return workers
+	}
+	return workers * piecesPerWorker
 }
 
 // chunkRange 一个分块在文件里的位置。

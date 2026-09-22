@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/keminar/anyproxy/config"
@@ -128,9 +129,13 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 
 	// openPull 每次给出一条新的取件通道, 之后的清单/取件循环共用 —— 与 SendFiles 里
 	// 那个 send 函数完全同构, 两条路径的差别只在这一层。openPullChunk 是分块并行取用
-	// 的版本, 多接受一个 chunk 序号, 好在 direct 路径下按序号挑打开的那几条连接之一。
+	// 的版本, 接的是 worker 编号(0 开始, 一个 worker 绑一条连接), 好在 direct 路径下
+	// 挑打开的那几条独立连接之一——不是 chunk 下标, 一个 worker 会陆续处理好几片。
 	var openPull func() (fileConn, error)
-	var openPullChunk func(chunkIdx int) (fileConn, error)
+	var openPullChunk func(worker int) (fileConn, error)
+	// workers 是 recvParallel 该开几个抢活的 worker, 含义与 file_send.go 的同名变量
+	// 一致: direct 下是实际打通的独立连接数, relay 下是 parallel 本身当并发上限。
+	var workers int
 	switch actualVia {
 	case ViaDirect:
 		// parallel>1 时这里可能打出最多 parallel 条相互独立的连接(见
@@ -156,11 +161,13 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 			fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
 				from, sessions[0].addr, time.Since(punchStart).Round(time.Millisecond))
 		}
+		workers = len(sessions)
 		openPull = func() (fileConn, error) { return sender.peer.openPullStream(sessions[0]) }
-		openPullChunk = func(chunkIdx int) (fileConn, error) {
-			return sender.peer.openPullStream(sessions[chunkIdx%len(sessions)])
+		openPullChunk = func(worker int) (fileConn, error) {
+			return sender.peer.openPullStream(sessions[worker])
 		}
 	case ViaRelay:
+		workers = parallel
 		openPull = func() (fileConn, error) {
 			conn, _, err := openRelayConn(sender.client, from, fileRelayOpPull)
 			return conn, err
@@ -237,8 +244,8 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, plan)
 				conn.Close()
 			}
-		} else if chunks := planChunks(e.Size, parallel); chunks != nil {
-			saved, err = recvParallel(openPullChunk, dir, e, from, remote, logf, chunks, act, p)
+		} else if chunks := planChunks(e.Size, chunkTarget(workers)); chunks != nil {
+			saved, err = recvParallel(openPullChunk, workers, dir, e, from, remote, logf, chunks, act, p)
 		} else {
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
@@ -260,51 +267,72 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 	return nil
 }
 
-// recvParallel 把一个文件按 chunks 描述的区间拆成多条独立连接并行取, 是 pullFile 的
-// 分块版编排。每一块各自调 openPull(i) 要一条通道——direct 路径下 i 用来挑打开的那
-// 几条独立连接之一(见 RecvFiles 的 openPullChunk), relay 路径忽略 i, 每次都是独立
-// 会话, 两条路径共用这同一份编排。失败语义与 sendParallel 对称: 任意一块出错就让
-// 整份文件报错。
-func recvParallel(openPull func(chunkIdx int) (fileConn, error), dir string, e filePullEntry, from, remote string,
+// recvParallel 把一个文件切成比连接数更多、更细的 chunks, 派 workers 个 worker(每个
+// 绑定一条通道)从共享队列里抢着领活, 是 pullFile 的分块版编排, 与 sendParallel 同一
+// 个理由: 先取完自己那份的连接别闲着, 抢下一片接着干(见 sendParallel 的注释)。
+// openPull(w) 用 worker 编号 w 要一条通道——direct 路径下 w 挑打开的那几条独立连接
+// 之一(见 RecvFiles 的 openPullChunk), relay 路径忽略 w, 每次都是独立会话, 两条
+// 路径共用这同一份编排。失败语义与 sendParallel 对称: 任意一块出错就让整份文件报错,
+// 其它 worker 领下一片之前会先看到错误就地退出。
+func recvParallel(openPull func(worker int) (fileConn, error), workers int, dir string, e filePullEntry, from, remote string,
 	logf func(string, ...interface{}), chunks []chunkRange, act string, p *progress) (string, error) {
 	tid, err := newTransferID()
 	if err != nil {
 		return "", fmt.Errorf("generate transfer id: %w", err)
 	}
-	cp := newChunkProgress(len(chunks), p)
+	// 进度按 worker(连接)算, 不是按 chunk 算, 理由同 sendParallel。
+	cp := newChunkProgress(workers, p)
 
-	var wg sync.WaitGroup
+	var next int64 = -1 // atomic: 每次 Add(1) 领下一片的下标
 	var mu sync.Mutex
 	var firstErr error
 	var saved string
-	for i, c := range chunks {
-		wg.Add(1)
-		go func(i int, c chunkRange) {
+	failed := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return firstErr != nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(w int) {
 			defer wg.Done()
-			conn, err := openPull(i)
-			if err != nil {
+			var done int64 // 这个 worker 迄今已取到的累计字节数, 跨好几片累加
+			for {
+				if failed() {
+					return
+				}
+				idx := int(atomic.AddInt64(&next, 1))
+				if idx >= len(chunks) {
+					return
+				}
+				c := chunks[idx]
+				base := done
+				conn, err := openPull(w)
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, idx, len(chunks), c.offset, c.length, act,
+					func(sent int64) { cp.update(w, base+sent) })
+				conn.Close()
+				done += c.length
 				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+				} else if s != "" {
+					saved = s
 				}
 				mu.Unlock()
-				return
 			}
-			s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, i, len(chunks), c.offset, c.length, act,
-				func(sent int64) { cp.update(i, sent) })
-			conn.Close()
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				return
-			}
-			if s != "" {
-				saved = s
-			}
-		}(i, c)
+		}(w)
 	}
 	wg.Wait()
 	if firstErr != nil {

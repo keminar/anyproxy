@@ -16,11 +16,13 @@ import (
 //
 // 两件互相独立的事, 都发生在真正传数据之前:
 //
-//  1. 目标文件名已存在(收方已经有一份完整的同名文件): 先比对内容(SHA-256), 再问怎么办。
-//     内容一致:  改名重传 / 覆盖 / 跳过
-//     内容不同:  改名重传 / 跳过
-//     「改名」指新传的文件换个名字保存(见 dupName/claimName), 已有文件原封不动。目标文件名
-//     **不接受续传**: 传输总是先写 .part、收全并校验后才改成目标名, 目标名上的一定是完整文件。
+//  1. 目标文件名已存在(收方已经有一份完整的同名文件): 先比对内容(SHA-256), 再问怎么办,
+//     内容一致或不同都是同样三个选项:  改名重传 / 覆盖 / 跳过——是否覆盖是用户的明确选择,
+//     跟内容是否一致无关(哈希不一致的时候更该把选择权交给用户判断, 而不是替他决定"不同就
+//     不许覆盖"), 非交互的 `-conflict overwrite` 本来就是不比较内容直接覆盖的。
+//     「改名」指**新传的文件**换个名字保存(见 dupName/claimName), 已有文件原封不动——提示文案
+//     里写清楚"incoming"就是为了不让人误以为改的是已有那份。目标文件名**不接受续传**: 传输
+//     总是先写 .part、收全并校验后才改成目标名, 目标名上的一定是完整文件。
 //
 //  2. 上次中断的传输留下了 .part 临时文件(x.zip.<16位十六进制>.part): 如果它恰好是新文件的
 //     开头一段(哈希核对过), 可以从断点续传, 收完再改成目标名(重名时照常走 claimName 改名, 不覆盖)。
@@ -302,15 +304,22 @@ func (r *conflictResolver) decidePart(name, where string, have, total int64) (st
 // 直接回车 = 跳过: 提示的是"已有数据可能被动到", 默认走最不具破坏性、也不多耗流量的一项。
 func (r *conflictResolver) prompt(ci conflictInfo) (act string, sticky bool, err error) {
 	fmt.Fprintf(r.out, "\n%q already exists %s (%s).\n", ci.name, ci.where, humanBytes(ci.existing))
-	opts := []option{{'r', ConflictRename, "[r]ename and transfer again"}}
 	if ci.same {
 		fmt.Fprintf(r.out, "  identical to the incoming file (sha256 %s).\n", short(ci.hash))
-		opts = append(opts, option{'o', ConflictOverwrite, "[o]verwrite"})
 	} else {
 		fmt.Fprintf(r.out, "  content differs from the incoming file (existing %s, incoming %s).\n",
 			humanBytes(ci.existing), humanBytes(ci.incoming))
 	}
-	opts = append(opts, option{'s', ConflictSkip, "[s]kip (default)"})
+	// 覆盖不看内容是否一致都提供: 是否覆盖是用户的明确选择(见上面的设计说明), 哈希不一致时
+	// 更该把选择权交给用户, 而不是替他决定"不同就不许覆盖"。
+	//
+	// "rename" 的措辞点名 incoming: 单看 "[r]ename and transfer again" 分不清是改新传的文件
+	// 名字、还是改已有那份的名字——已有文件其实原封不动, 换名字保存的是新传来的这份。
+	opts := []option{
+		{'r', ConflictRename, "[r]ename incoming and transfer"},
+		{'o', ConflictOverwrite, "[o]verwrite the existing file"},
+		{'s', ConflictSkip, "[s]kip (default)"},
+	}
 	return r.ask(opts)
 }
 
