@@ -137,15 +137,10 @@ func Check() int {
 		}
 	}
 
-	if warn == 0 {
-		fmt.Println("All checks passed.")
-	} else {
-		fmt.Printf("%d item(s) below recommendation; run sudo anyproxy -check-fix to apply.\n", warn)
-	}
-
 	// 以前印在 -h 里的那份参考清单, 原样搬过来(不再在 -h 里重复): 上面是"当前系统是否
 	// 达标"的动态报告, 这里是"手动怎么改"的静态操作手册, 两者不是互相替代的关系。
-	fmt.Println(`Some other tunables that enable higher performance (append to /etc/sysctl.conf, then run "sysctl -p"):
+	fmt.Println()
+	fmt.Println(`For reference, here is the full sysctl tuning list (append to /etc/sysctl.conf, then run "sysctl -p"):
   # TCP BBR congestion control (needs kernel >= 4.9)
   net.core.default_qdisc = fq
   net.ipv4.tcp_congestion_control = bbr
@@ -169,6 +164,13 @@ func Check() int {
   net.ipv4.tcp_mtu_probing = 1
   NOTE: if you see syn flood warnings in your logs, you need to adjust tcp_max_syn_backlog, tcp_synack_retries and tcp_abort_on_overflow
   verify BBR: sysctl net.ipv4.tcp_congestion_control (=> bbr) ; lsmod | grep bbr (=> tcp_bbr)`)
+
+	fmt.Println()
+	if warn == 0 {
+		fmt.Println("All checks passed.")
+	} else {
+		fmt.Printf("%d item(s) below recommendation; run sudo anyproxy -check-fix to apply.\n", warn)
+	}
 	return warn
 }
 
