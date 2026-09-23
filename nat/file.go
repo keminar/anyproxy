@@ -90,9 +90,12 @@ type fileHead struct {
 	TotalSize  int64  `json:"ts,omitempty"` // 整份文件大小, 只在 TransferID 非空时有意义
 
 	// Conflict 同名文件已存在时发送方要求的处理: 空是默认(收方自动改名保存, 见 claimName),
-	// "overwrite" 覆盖已有文件(由使用者在协商时明确选择), "resume" 接着上次中断留下的 .part
-	// (ResumePart, 不含目录)从 Offset 处续写, 收全后再改成目标名(此时 Size 是剩余字节数、TransferID
-	// 为空)。目标名上的完整文件不接受续传。见 file_conflict.go。
+	// "overwrite" 覆盖已有文件(由使用者在协商时明确选择)。是否续传由 ResumePart 单独表示
+	// (非空即接着上次中断留下的 .part 从 Offset 处续写, TransferID 为空, 此时 Size 是剩余字节数),
+	// 与"覆盖/重命名"正交——"覆盖"也能续传: 续到的整份校验通过后直接落到 dest 替换已有文件,
+	// "重命名"则落到 claimName 另起的名字。旧的 "resume" 值仍可识别(等价续传+重命名)。
+	// 无论覆盖还是重命名, 传输都先写到 .part、收全校验后才落到目标名; 目标名上既有的完整文件
+	// 只在原子替换那一刻被改动, 从不就地续写。见 file_conflict.go。
 	Conflict   string `json:"conflict,omitempty"`
 	ResumePart string `json:"resumePart,omitempty"`
 
@@ -101,6 +104,16 @@ type fileHead struct {
 	Probe       bool  `json:"probe,omitempty"`
 	ProbeSize   int64 `json:"probeSize,omitempty"`
 	ProbeNoHash bool  `json:"noHash,omitempty"`
+
+	// Abort 表示发送方主动放弃了 TransferID 标记的这次分块并行传输(某个分片出错,
+	// 其余还没来得及发的分片以后也不会再来了), 让接收方立刻收掉攒到一半的 .chunks
+	// 临时文件与内存状态, 不必等 chunkAssemblyIdleTimeout(5 分钟)的空闲回收器兜底。
+	// 只在 -send(推)方向才需要——接收端(chunkAssembly)跑在远端长驻进程里, 发送方
+	// 自己放弃这件事它并不知道, 得显式告诉一声; -recv(取)方向的 assembly 就在发起
+	// 取件的这个一次性进程本地, 直接调 abortChunkAssembly 即可, 不走这个字段(见
+	// file_recv.go 的 recvParallel)。这条通知本身发不出去/对端收不到也无妨, 5 分钟
+	// 的回收器仍是最终兜底, 不影响正确性, 只影响清理有多及时。
+	Abort bool `json:"abort,omitempty"`
 }
 
 // fileTrailer 数据发完之后才发的校验信息。
@@ -111,8 +124,15 @@ type fileHead struct {
 // SHA256 校验的是**这条连接上刚发的这些字节**: 不分块时就是整份文件的摘要; 分块时
 // 是这一块的摘要, 不是整份文件的——按块校验才能一边收一边算, 不用等所有块都到齐再
 // 重新读一遍整份文件。
+//
+// FullSHA256 只在续传(offset>0, 这条连接只发 [offset, size) 这一截)时随尾部一起发, 是
+// **整份**文件(没发的 [0, offset) 前缀 + 刚发的尾部)的摘要。覆盖式续传要在 rename 替换
+// 收方已有文件之前校验整份, 对齐 writeOverwrite 的"先校验再替换"; 普通(重命名)续传不依赖它。
+// 旧发送方不填时, 接收方降级到"协商期比对过的前缀 + 刚校验过的尾部"这一保证(与普通续传同一
+// 前提), 仍安全。
 type fileTrailer struct {
-	SHA256 string `json:"sha256"`
+	SHA256     string `json:"sha256"`
+	FullSHA256 string `json:"full,omitempty"`
 }
 
 // fileReply 接收端的结果。
@@ -249,7 +269,9 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 	// -recv 取件: 同名怎么处理由本机说了算, 对端首部里带的一律不认。
 	if opts.local {
 		head.Conflict = opts.conflict
-		if head.Conflict == ConflictResume {
+		// 续传(覆盖或重命名都会续)由本机决定从头还是接着 .part 写: 只要本机给过
+		// resumePart, 就把 Offset/ResumePart 填进首部, 让落盘逻辑走 resumeIncoming。
+		if opts.resumePart != "" {
 			head.Offset, head.ResumePart = opts.resumeAt, opts.resumePart
 		}
 	}
@@ -259,6 +281,16 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 		if onDone != nil {
 			onDone(fileReply{})
 		}
+		return
+	}
+	// 发送方放弃了这次分块并行传输(见 fileHead.Abort 的注释): 立刻收掉, 不接收任何
+	// 数据。走 reply() 而不是直接 return, 是为了复用它"回一帧再触发 onDone"这套收尾
+	// (中继路径的 onDone 会关掉这次会话的 fileRelaySession, 不然会一直占着)。
+	if head.Abort {
+		if head.TransferID != "" {
+			abortChunkAssembly(head.TransferID)
+		}
+		reply(fileReply{})
 		return
 	}
 	switch head.Conflict {
@@ -295,10 +327,13 @@ func recvFileOver(conn fileConn, dir, fromEmail, remote string, logf func(string
 			head.Conflict = ""
 		}
 	}
-	if head.Conflict != "" {
+	if head.Conflict != "" || head.ResumePart != "" {
 		var saved string
 		var err error
-		if head.Conflict == ConflictResume {
+		if head.ResumePart != "" {
+			// 续传(覆盖或重命名都会续): 接到上次中断留下的 .part 后面接着写, 落点按
+			// head.Conflict 决定——overwrite 直接落到 dest(替换已有文件), 否则 claimName
+			// (被占则换名, 绝不覆盖)。
 			saved, err = resumeIncoming(dest, conn, head)
 		} else {
 			saved, err = writeOverwrite(dest, conn, head)
@@ -987,6 +1022,10 @@ func (c *chunkCursor) claim(want int64) (offset, length int64, idx int, ok bool)
 // (只关心"这个 worker 迄今发/收了多少字节", 不关心分片大小), 返回收方存成的名字
 // (非分块场景才有意义, 这里几个 worker 都可能返回同一个值)和错误。
 //
+// 每认领到一片就先把它的大小记进 cp(见 chunkProgress.setPieceSize), 供进度行展示
+// "当前这一片有多大"——这个值跟 do 的进度回调无关, 不必等 do 开始跑才知道, 认领的
+// 那一刻就定了。
+//
 // 失败语义与改动前一致: 任意一片出错就让其它 worker 不再认领新的一片(但已经在
 // 传的那一片会传完, 不中途打断), 不重试、不跳过。
 func runChunkWorkers(size int64, workers int, cp *chunkProgress,
@@ -1018,6 +1057,7 @@ func runChunkWorkers(size int64, workers int, cp *chunkProgress,
 				if !ok {
 					return
 				}
+				cp.setPieceSize(w, length)
 				base := done
 				start := time.Now()
 				s, err := do(w, offset, length, idx, func(sent int64) { cp.update(w, base+sent) })
@@ -1079,6 +1119,23 @@ func (d *directPeer) probeFile(sess *directSession, it fileItem, noHash bool, no
 	return probeOver(stream, it, noHash, notify)
 }
 
+// abortTransfer 告诉对端放弃 tid 标记的这次分块并行传输(见 fileHead.Abort 的注释),
+// 让它立刻收掉攒了一半的临时文件。尽力而为: 开流/读回应失败都不当错误处理——通知
+// 本身发不出去, 兜底的空闲回收器仍会在 5 分钟内收掉, 不影响正确性。
+func (d *directPeer) abortTransfer(sess *directSession, tid string) {
+	stream, err := d.openFileStream(sess)
+	if err != nil {
+		return
+	}
+	defer stream.Close()
+	if err := writeFrame(stream, fileHead{TransferID: tid, Abort: true}); err != nil {
+		return
+	}
+	_ = stream.SetReadDeadline(time.Now().Add(probeAckTimeout))
+	var r fileReply
+	_ = readFrame(stream, &r, fileFrameMax)
+}
+
 // sendFileChunk 是 sendFile 的分块版: 单独开一条流发文件里的 [offset, offset+length)
 // 这一段, 供单文件并行分块传输用(见 file_send.go 的 parallel 参数)。除了多传
 // offset/length/tid/chunkIdx, 与 sendFile 完全一样——每个分块各自开一条独立的
@@ -1131,9 +1188,10 @@ func (d *directPeer) openPullStream(sess *directSession) (*quic.Stream, error) {
 // sendFileOver 发送一整个文件, 是 sendFileOverRange 在"不分块"时的薄包装——
 // offset=0、length=文件全长、TransferID 为空, 语义与今天完全一样。
 func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (string, error) {
-	if it.conflict == ConflictResume {
-		// 续传: 只发收方还没有的后半段。摘要(尾部)也只覆盖这一段——前半段已经在协商时
-		// 比对过哈希, 收方续写失败时会把文件截回原长度(见 resumeIncoming)。
+	if it.resumePart != "" {
+		// 续传(覆盖或重命名都会续): 只发收方还没有的后半段。摘要(尾部)也只覆盖这一段——
+		// 前半段已经在协商时比对过哈希, 收方续写失败时会把文件截回原长度(见 resumeIncoming)。
+		// 整份摘要(供覆盖式续传校验)由 sendFileOverRange 额外计算。
 		return sendFileOverRange(conn, it, it.resumeAt, it.size-it.resumeAt, "", 0, onProgress)
 	}
 	return sendFileOverRange(conn, it, 0, it.size, "", 0, onProgress)
@@ -1172,8 +1230,23 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 	}
 
 	h := sha256.New()
+	// 续传时这条连接只发 [offset, size) 这一截, 但覆盖式续传要求在替换收方已有文件前
+	// 校验整份, 故额外算一个"整份摘要": 先把没发的 [0, offset) 前缀喂进 full, 再让发出的
+	// 尾部同时写进 h(尾部)和 full(整份)。
+	full := sha256.New()
+	if offset > 0 {
+		pf, perr := os.Open(it.path)
+		if perr != nil {
+			return "", perr
+		}
+		if _, perr = io.CopyN(full, pf, offset); perr != nil {
+			pf.Close()
+			return "", perr
+		}
+		pf.Close()
+	}
 	// 边发边算摘要: 摘要放在尾部就是为了这个, 不用为了算它先把文件读一遍。
-	src := io.TeeReader(&progressReader{r: f, on: onProgress}, h)
+	src := io.TeeReader(&progressReader{r: f, on: onProgress}, io.MultiWriter(h, full))
 	buf := make([]byte, fileCopyBuf)
 	sent, err := io.CopyBuffer(conn, io.LimitReader(src, length), buf)
 	if err != nil {
@@ -1191,7 +1264,14 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 		// 传输途中文件被改小了。继续发下去收端只会校验失败, 不如当场说清楚。
 		return "", fmt.Errorf("file shrank while sending: sent %d of %d bytes", sent, length)
 	}
-	if err := writeFrame(conn, fileTrailer{SHA256: hex.EncodeToString(h.Sum(nil))}); err != nil {
+	var fullSum string
+	if offset > 0 {
+		fullSum = hex.EncodeToString(full.Sum(nil))
+	}
+	if err := writeFrame(conn, fileTrailer{
+		SHA256:     hex.EncodeToString(h.Sum(nil)),
+		FullSHA256: fullSum,
+	}); err != nil {
 		if reason := peerRejectReason(conn); reason != "" {
 			return "", errors.New(reason)
 		}

@@ -296,7 +296,10 @@ func conflictCases() []conflictCase {
 		{name: "part longer than the file is ignored", part: src + "more", policy: ConflictResume, wantDest: src, wantPart: true},
 		{name: "part, resume, final differs -> finished part is renamed, final untouched", final: "abcde", part: "01234", policy: ConflictResume, wantDest: "abcde", wantDup: src},
 		{name: "part, ask, final differs: rename then continue", final: "abcde", part: "01234", policy: ConflictAsk, input: "r\nc\n", wantDest: "abcde", wantDup: src},
-		{name: "part, overwrite ignores it", part: "01234", policy: ConflictOverwrite, wantDest: src, wantPart: true},
+		{name: "part, overwrite resumes a matching .part", part: "01234", policy: ConflictOverwrite, wantDest: src},
+		{name: "part, overwrite fresh when prefix differs", part: "abcde", policy: ConflictOverwrite, wantDest: src, wantPart: true},
+		{name: "part, ask overwrite then continue", final: "abcde", part: "01234", policy: ConflictAsk, input: "o\nc\n", wantDest: src},
+		{name: "part, ask overwrite then restart", final: "abcde", part: "01234", policy: ConflictAsk, input: "o\nr\n", wantDest: src, wantPart: true},
 		{name: "part, rename policy ignores it", part: "01234", policy: ConflictRename, wantDest: src, wantPart: true},
 	}
 }
@@ -523,6 +526,17 @@ func TestResumeIncoming(t *testing.T) {
 		}
 		return &w
 	}
+	// wireFull 同 wire, 但尾部帧额外带整份摘要(供覆盖式续传校验)。
+	wireFull := func(tail, sum, full string) *bytes.Buffer {
+		var w bytes.Buffer
+		w.WriteString(tail)
+		if sum != "" {
+			if err := writeFrame(&w, fileTrailer{SHA256: sum, FullSHA256: full}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return &w
+	}
 	tailSum := func(s string) string {
 		p := filepath.Join(t.TempDir(), "s")
 		writeFile(t, p, s)
@@ -628,6 +642,59 @@ func TestResumeIncoming(t *testing.T) {
 		defer activeParts.Delete(part)
 		if _, err := resumeIncoming(dest, wire("56789", tailSum("56789")), newHead(dest, "r.bin."+testTok+".part", 5, 5)); err == nil {
 			t.Fatal("a part in use must not be taken over")
+		}
+	})
+
+	// 覆盖式续传: 落点由 head.Conflict 决定, 与"是否续传"解耦 —— 这里直接落到 dest 替换已有文件。
+	t.Run("overwrite lands on the target, replacing the existing file", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		writeFile(t, dest, "precious")
+		writeFile(t, dest+"."+testTok+".part", "01234")
+		full := "0123456789"
+		final, err := resumeIncoming(dest, wireFull("56789", tailSum("56789"), tailSum(full)),
+			fileHead{Name: filepath.Base(dest), Size: 5, Offset: 5, Conflict: ConflictOverwrite, ResumePart: "r.bin." + testTok + ".part"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final != dest {
+			t.Fatalf("overwrite must land on dest, got %q", final)
+		}
+		if got := readFileStr(t, dest); got != full {
+			t.Fatalf("target = %q, want %q (the existing file must be replaced)", got, full)
+		}
+		if exists(dest + "." + testTok + ".part") {
+			t.Fatal(".part should be gone")
+		}
+	})
+
+	t.Run("overwrite refuses a whole-file checksum mismatch", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		writeFile(t, dest, "precious")
+		writeFile(t, dest+"."+testTok+".part", "01234")
+		_, err := resumeIncoming(dest, wireFull("56789", tailSum("56789"), "deadbeef"),
+			fileHead{Name: filepath.Base(dest), Size: 5, Offset: 5, Conflict: ConflictOverwrite, ResumePart: "r.bin." + testTok + ".part"})
+		if err == nil || !strings.Contains(err.Error(), "whole-file checksum") {
+			t.Fatalf("want a whole-file checksum error, got %v", err)
+		}
+		if got := readFileStr(t, dest); got != "precious" {
+			t.Fatalf("the existing target must be untouched, got %q", got)
+		}
+		if got := readFileStr(t, dest+"."+testTok+".part"); got != "01234" {
+			t.Fatalf(".part should be kept back at its original content, got %q", got)
+		}
+	})
+
+	t.Run("overwrite without FullSHA256 still lands (old sender compat)", func(t *testing.T) {
+		dest := filepath.Join(t.TempDir(), "r.bin")
+		writeFile(t, dest, "precious")
+		writeFile(t, dest+"."+testTok+".part", "01234")
+		final, err := resumeIncoming(dest, wireFull("56789", tailSum("56789"), ""),
+			fileHead{Name: filepath.Base(dest), Size: 5, Offset: 5, Conflict: ConflictOverwrite, ResumePart: "r.bin." + testTok + ".part"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final != dest || readFileStr(t, dest) != "0123456789" {
+			t.Fatalf("overwrite must land and replace, got %q %q", final, readFileStr(t, dest))
 		}
 	})
 }

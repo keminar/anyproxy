@@ -180,12 +180,36 @@ func resumeIncoming(dest string, conn io.Reader, head fileHead) (string, error) 
 		return "", fmt.Errorf("checksum mismatch (got %s, sender says %s), the appended data was discarded", short(sum), short(tr.SHA256))
 	}
 
-	final, err := claimName(dest)
-	if err != nil {
-		return "", fmt.Errorf("%w (data kept at %s)", err, part)
+	// 覆盖式续传: 在 rename 替换收方已有文件之前, 校验整份(前缀+尾部)摘要, 对齐
+	// writeOverwrite 的"先校验再替换"。旧发送方不随续传发 FullSHA256 时, 降级到
+	// "协商期比对过的前缀 + 刚校验过的尾部"这一保证(与普通续传同一前提), 仍安全。
+	if head.Conflict == ConflictOverwrite && tr.FullSHA256 != "" {
+		full, err := hashFilePrefix(part, head.Offset+head.Size)
+		if err != nil {
+			return "", fmt.Errorf("hash the resumed file: %w (data kept at %s)", err, part)
+		}
+		if full != tr.FullSHA256 {
+			_ = os.Truncate(part, head.Offset)
+			return "", fmt.Errorf("whole-file checksum mismatch (got %s, sender says %s), the resumed file was discarded", short(full), short(tr.FullSHA256))
+		}
+	}
+
+	// 落点: 覆盖直接落到 dest(替换已有文件), 其余走 claimName(被占则换名, 绝不覆盖)。
+	// 之前无条件 claimName, 于是续传永远落不到 dest; 现在由"覆盖/重命名"这个选择决定,
+	// 与"是否续传"解耦。
+	var final string
+	if head.Conflict == ConflictOverwrite {
+		final = dest
+	} else {
+		final, err = claimName(dest)
+		if err != nil {
+			return "", fmt.Errorf("%w (data kept at %s)", err, part)
+		}
 	}
 	if err := renameWithRetry(part, final); err != nil {
-		os.Remove(final) // claimName 留下的空占位
+		if head.Conflict != ConflictOverwrite {
+			os.Remove(final) // claimName 留下的空占位
+		}
 		return "", fmt.Errorf("rename: %w (data kept at %s)", err, part)
 	}
 	return final, nil

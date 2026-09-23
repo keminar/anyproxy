@@ -268,7 +268,7 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
 		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, onProgress)
 	}
-	saved, err := sendParallel(it, 3, sendChunk, p)
+	saved, err := sendParallel(it, 3, sendChunk, nil, p)
 	if err != nil {
 		t.Fatalf("chunked send via relay: %v", err)
 	}

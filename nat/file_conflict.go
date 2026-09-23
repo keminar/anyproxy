@@ -14,24 +14,28 @@ import (
 
 // 同名文件与断点续传的协商。
 //
-// 两件互相独立的事, 都发生在真正传数据之前:
+// 两件事正交, 都发生在真正传数据之前:
 //
-//  1. 目标文件名已存在(收方已经有一份完整的同名文件): 先比对内容(SHA-256), 再问怎么办,
-//     内容一致或不同都是同样三个选项:  改名重传 / 覆盖 / 跳过——是否覆盖是用户的明确选择,
-//     跟内容是否一致无关(哈希不一致的时候更该把选择权交给用户判断, 而不是替他决定"不同就
-//     不许覆盖"), 非交互的 `-conflict overwrite` 本来就是不比较内容直接覆盖的。
-//     「改名」指**新传的文件**换个名字保存(见 dupName/claimName), 已有文件原封不动——提示文案
-//     里写清楚"incoming"就是为了不让人误以为改的是已有那份。目标文件名**不接受续传**: 传输
-//     总是先写 .part、收全并校验后才改成目标名, 目标名上的一定是完整文件。
+//  1. 落点(目标名上已有完整文件时怎么办): 改名重传 / 覆盖 / 跳过。是否覆盖是用户的明确选择,
+//     跟内容是否一致无关(哈希不一致时更该把选择权交给用户, 而不是替他决定"不同就不许覆盖";
+//     非交互的 `-conflict overwrite` 本来就不比较内容直接覆盖)。「改名重传」指**新传的文件**
+//     换个名字保存(见 dupName/claimName), 已有文件原封不动——提示文案里写清楚"incoming"就是
+//     为了不让人误以为改的是已有那份。
 //
-//  2. 上次中断的传输留下了 .part 临时文件(x.zip.<16位十六进制>.part): 如果它恰好是新文件的
-//     开头一段(哈希核对过), 可以从断点续传, 收完再改成目标名(重名时照常走 claimName 改名, 不覆盖)。
+//  2. 续传(上次中断留下的 .part): 若该 .part 恰好是新文件的开头一段(逐字节哈希核对过), 可以从
+//     断点续传, 省掉已收到的那段流量。续传与落点**正交**——无论落点是改名还是覆盖, 只要前缀
+//     对得上都优先续那个 .part。续完后怎么落到目标名仍按第 1 点: 改名则走 claimName(被占换名,
+//     绝不覆盖已有文件); 覆盖则校验整份摘要(对齐 writeOverwrite)后直接落到 dest、替换已有文件。
+//
+// 不论哪种落点, 传输总是先写 .part、收全并校验后才改名/替换, 目标名上的一定是完整文件; 收方
+// 已有的同名文件也只会在原子替换那一刻被改动, 中途出错原封不动。
 //
 // 覆盖会改动收方已有的文件, 只在使用者明确选择时发生(allow 名单里的发送方本来就有写这个
 // 目录的权限, 不再单设开关)。
 //
 //	-send: 先开一条只带 fileHead{Probe} 的流探一下(收方回目标名与可续传 .part 的情况, 必要时
-//	       再回哈希), 发送方在本地比对、问用户, 再带着决定(fileHead.Conflict)发数据。
+//	       再回哈希), 发送方在本地比对、问用户, 再带着决定(fileHead.Conflict, 必要时再加
+//	       fileHead.ResumePart)发数据。
 //	-recv: 本机自己 stat/找 .part, 需要对端哈希时用 pull 的 "hash" 操作取, 决定通过 recvOpts
 //	       传给落盘逻辑。
 
@@ -39,9 +43,9 @@ import (
 const (
 	ConflictAsk       = "ask"       // 逐个询问(终端交互时的默认)
 	ConflictRename    = "rename"    // 自动改名保存, 不问不探测(非交互时的默认, 也是旧版行为)
-	ConflictOverwrite = "overwrite" // 覆盖
+	ConflictOverwrite = "overwrite" // 覆盖; 若发现前缀对得上的 .part 会一并续传, 整份校验后才替换目标名
 	ConflictSkip      = "skip"      // 跳过
-	ConflictResume    = "resume"    // 有可续传的 .part 就续传; 目标名上已有一致的完整文件则跳过, 内容不同则改名
+	ConflictResume    = "resume"    // 自动续传匹配前缀的 .part; 目标名上已有完整文件时: 一致则跳过, 不同则改名重传
 )
 
 // ParseConflict 校验 -conflict 的取值。空串交给调用方按环境决定默认。
@@ -278,7 +282,8 @@ func (r *conflictResolver) decide(ci conflictInfo) (string, error) {
 // decidePart 决定发现了一个可续传的 .part 时怎么办, 返回 ConflictResume(续传) / ConflictRename
 // (放弃它、从头传) / ConflictSkip。
 func (r *conflictResolver) decidePart(name, where string, have, total int64) (string, error) {
-	if r.policy == ConflictResume {
+	// 续传与覆盖都自动续: 覆盖式续传既省流量、最终仍是覆盖, 与用户"覆盖"的意图一致。
+	if r.policy == ConflictResume || r.policy == ConflictOverwrite {
 		return ConflictResume, nil
 	}
 	if r.policy != ConflictAsk {
@@ -358,17 +363,16 @@ func (r *conflictResolver) ask(opts []option) (act string, sticky bool, err erro
 
 // prepareSend 在发一个文件之前做协商, 并把决定写进 it(conflict/resumePart/resumeAt)。skip 为
 // true 表示这个文件不要发了。probe 是「在一条新通道上探测收方」的闭包(直连/中继各自实现)。
+//
+// "覆盖/重命名" 与 "续传/全新" 是两件事, 正交: overwrite 也允许续传——能接着上次中断的 .part
+// 写就续, 最终仍是覆盖。故 overwrite 不再提前 return, 而是走完两步协商, 续传信息记在
+// it.resumePart(与 it.conflict 并存)。
 func (r *conflictResolver) prepareSend(it *fileItem, probe func(it fileItem, noHash bool) (*probeResult, error)) (skip bool, err error) {
-	switch r.policy {
-	case ConflictRename:
+	if r.policy == ConflictRename {
 		return false, nil // 收方自己会改名, 不需要多一趟往返
-	case ConflictOverwrite:
-		// 不探测直接带覆盖标记发: 收方对不存在的目标会当成普通传输。省掉每个文件一趟往返,
-		// 也省掉对端算哈希。
-		it.conflict = ConflictOverwrite
-		return false, nil
 	}
-	// ask / skip / resume 都要先探测。skip 只问有没有同名, 不比内容、不找 .part。
+	// 其余策略(含 overwrite)都要先探测: overwrite 也要看有没有可续的 .part。skip 只问有没有
+	// 同名, 不比内容、不找 .part。
 	pr, err := probe(*it, r.policy == ConflictSkip)
 	if errors.Is(err, errProbeUnsupported) {
 		if !r.warnedUnsupported {
@@ -401,7 +405,7 @@ func (r *conflictResolver) prepareSend(it *fileItem, probe func(it fileItem, noH
 			return true, nil
 		case ConflictOverwrite:
 			it.conflict = ConflictOverwrite
-			return false, nil // 覆盖是从头重传, 不用续
+			// 不 return: 继续看第二步有没有可续的 .part(覆盖也能续传)。
 		}
 	}
 
@@ -420,7 +424,9 @@ func (r *conflictResolver) prepareSend(it *fileItem, probe func(it fileItem, noH
 			case ConflictSkip:
 				return true, nil
 			case ConflictResume:
-				it.conflict, it.resumePart, it.resumeAt = ConflictResume, pr.Part, pr.PartSize
+				// 续传: 保留 it.conflict(覆盖则仍是 overwrite, 其余保持默认重命名),
+				// 只记下来要续哪个 .part、从哪接着写。落盘由 resumeIncoming 按 conflict 决定落点。
+				it.resumePart, it.resumeAt = pr.Part, pr.PartSize
 			}
 		}
 	}
@@ -444,8 +450,10 @@ func (r *conflictResolver) preparePull(dir string, e filePullEntry, remoteHash f
 	if err != nil {
 		return def, nil // 名字不合法的话落盘时会如实报错, 这里不抢着报
 	}
-	needHash := r.policy != ConflictSkip && r.policy != ConflictOverwrite
+	// overwrite 也要查 .part(能续就续), 故不能跳过哈希; 只有 skip 跳过。
+	needHash := r.policy != ConflictSkip
 
+	overwrite := false
 	// 第一步: 目标名上已有完整文件。
 	if info, err := os.Stat(dest); err == nil && info.Mode().IsRegular() {
 		ci := conflictInfo{name: e.Name, where: "locally", existing: info.Size(), incoming: e.Size}
@@ -470,7 +478,8 @@ func (r *conflictResolver) preparePull(dir string, e filePullEntry, remoteHash f
 		case ConflictSkip:
 			return pullPlan{act: ConflictSkip}, nil
 		case ConflictOverwrite:
-			return pullPlan{act: ConflictOverwrite}, nil
+			overwrite = true
+			// 不 return: 继续看第二步有没有可续的 .part(覆盖也能续传)。
 		}
 	}
 
@@ -495,10 +504,20 @@ func (r *conflictResolver) preparePull(dir string, e filePullEntry, remoteHash f
 				case ConflictSkip:
 					return pullPlan{act: ConflictSkip}, nil
 				case ConflictResume:
-					return pullPlan{act: ConflictResume, resumePart: partName(p), resumeAt: size}, nil
+					// 续传: 覆盖则落点仍是 dest, 否则走 claimName(换名)。act 只记"覆盖/重命名"。
+					pp := pullPlan{resumePart: partName(p), resumeAt: size}
+					if overwrite {
+						pp.act = ConflictOverwrite
+					} else {
+						pp.act = ConflictResume
+					}
+					return pp, nil
 				}
 			}
 		}
+	}
+	if overwrite {
+		return pullPlan{act: ConflictOverwrite}, nil
 	}
 	return def, nil
 }

@@ -610,3 +610,18 @@ func probeFileViaRelay(client *Client, toEmail string, it fileItem, noHash bool,
 	}
 	return probeOver(secured, it, noHash, notify)
 }
+
+// abortTransferViaRelay 是 abortTransfer(nat/file.go)的中继版, 见其注释: 告诉对端放弃
+// tid 标记的这次分块并行传输。同样尽力而为, 开会话/读回应失败都不当错误处理。
+func abortTransferViaRelay(client *Client, toEmail, tid string) {
+	secured, _, err := openRelayConn(client, toEmail, "")
+	if err != nil {
+		return
+	}
+	defer secured.Close()
+	if err := writeFrame(secured, fileHead{TransferID: tid, Abort: true}); err != nil {
+		return
+	}
+	var r fileReply
+	_ = readFrame(secured, &r, fileFrameMax)
+}

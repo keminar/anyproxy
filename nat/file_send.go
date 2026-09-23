@@ -175,6 +175,9 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	// 好几片(每片大小按这条连接自己的实测速度动态决定, 见 file.go 的
 	// chunkSizeForRate), 每次调 sendChunk 的 worker 编号不变。
 	var sendChunk func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error)
+	// abort 在一次分块并行传输失败后通知对端放弃 tid(见 sendParallel 的注释), 尽力
+	// 而为、不返回错误。
+	var abort func(tid string)
 	// workers 是 sendParallel 该开几个抢活的 worker——direct 下是实际打通的独立连接数
 	// (可能因为个别候选没打通而少于 parallel), relay 下没有"独立连接"这回事, 就是
 	// parallel 本身当并发上限。
@@ -227,6 +230,11 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		sendChunk = func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
 			return sender.peer.sendFileChunk(sessions[worker], it, offset, length, tid, chunkIdx, onProgress)
 		}
+		abort = func(tid string) {
+			// 随便挑一条打通的连接告诉对端就行, 不需要凑齐所有 worker——这条通知与
+			// "哪个分片失败"无关, 只是"这个 tid 不用再等了"。
+			sender.peer.abortTransfer(sessions[0], tid)
+		}
 	case ViaRelay:
 		workers = parallel
 		send = func(it fileItem, onProgress func(int64)) (string, error) {
@@ -240,10 +248,16 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 			// sendFileChunkViaRelay), worker 编号在这条路径上只是并发上限, 不用来挑连接。
 			return sendFileChunkViaRelay(sender.client, toEmail, it, offset, length, tid, chunkIdx, onProgress)
 		}
+		abort = func(tid string) {
+			abortTransferViaRelay(sender.client, toEmail, tid)
+		}
 	}
 
 	var sentBytes int64
 	skipped := 0
+	// warnedParallelNoResume 只提示一次: 一次 -send 可能发好几个文件, 每个都走
+	// -parallel 的话没必要每个文件都重复这句话。
+	warnedParallelNoResume := false
 	for i, it := range items {
 		start := time.Now()
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(items), it.name)
@@ -260,12 +274,16 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		}
 		p := newProgress(prefix, it.size)
 		var saved string
-		if it.conflict == ConflictResume {
-			// 续传只发一段尾巴, 不做分块并行; 进度从收方已有的字节数起算。
+		if it.resumePart != "" {
+			// 续传(覆盖或重命名都会续)只发一段尾巴, 不做分块并行; 进度从收方已有的字节数起算。
 			at := it.resumeAt
 			saved, err = send(it, func(n int64) { p.update(at + n) })
 		} else if wantParallel(it.size, workers) {
-			saved, err = sendParallel(it, workers, sendChunk, p)
+			if !warnedParallelNoResume {
+				warnedParallelNoResume = true
+				fmt.Fprintln(os.Stderr, "note: -parallel transfers write several independent .chunks temp files and cannot be resumed if interrupted; an interrupted file restarts from scratch")
+			}
+			saved, err = sendParallel(it, workers, sendChunk, abort, p)
 		} else {
 			saved, err = send(it, p.update)
 		}
@@ -396,8 +414,15 @@ func dialSender(cfg conf.WsClient, tag string) (*oneShotSender, error) {
 // 与非分块路径同一个失败语义: 任意一块出错就让整份文件报错, 不重试、不跳过——但不必
 // 等其它 worker 也各自出错或认领完手头的活: 一旦有 worker 报错, 其它 worker 认领下
 // 一片之前会先看到这个错误就地退出, 不会再白白多传几片注定要被扔掉的数据。
+//
+// 失败时用 abort 通知对端放弃 tid(见 fileHead.Abort 的注释): 接收端的 chunkAssembly
+// 跑在对端(daemon 场景是远端长驻进程), 光是这边报错退出并不会让它知道要收拾, 不发
+// 这条通知的话它只能靠 5 分钟的空闲回收器兜底——多个 worker 里只要有已经真正传出去
+// 的分片报了错, 光凭字节计数就能立刻收尾(见 recvFileChunk), 但还没轮到认领、这里
+// 就直接放弃的那些分片, 接收端根本不知道"还有一块永远不会来", 必须显式告诉它。
 func sendParallel(it fileItem, workers int,
 	sendChunk func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error),
+	abort func(tid string),
 	p *progress) (string, error) {
 	tid, err := newTransferID()
 	if err != nil {
@@ -407,9 +432,13 @@ func sendParallel(it fileItem, workers int,
 	// 下一片, conn1/conn2/... 这几栏该是"这条连接迄今为止总共传了多少", 不是"当前
 	// 这一片传了多少"(片与片之间切换不该让进度条看着往回跳)。
 	cp := newChunkProgress(workers, p)
-	return runChunkWorkers(it.size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+	saved, err := runChunkWorkers(it.size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
 		return sendChunk(w, it, offset, length, tid, idx, onProgress)
 	})
+	if err != nil && abort != nil {
+		abort(tid)
+	}
+	return saved, err
 }
 
 // chunkProgress 把多个并行分块各自的进度回调聚合成一份整份文件的进度, 复用
@@ -423,13 +452,14 @@ type chunkProgress struct {
 	mu       sync.Mutex
 	each     []int64 // 每块已发送/已取到的累计字节数
 	lastEach []int64 // 上一次 summary() 时的快照, 用来算这一小段区间的瞬时速率
+	piece    []int64 // 每个 worker 当前正在传的这一片有多大(见 setPieceSize)
 	lastAt   time.Time
 	p        *progress
 }
 
 func newChunkProgress(n int, p *progress) *chunkProgress {
 	cp := &chunkProgress{
-		each: make([]int64, n), lastEach: make([]int64, n), lastAt: time.Now(), p: p,
+		each: make([]int64, n), lastEach: make([]int64, n), piece: make([]int64, n), lastAt: time.Now(), p: p,
 	}
 	p.setConnLine(cp.summary)
 	return cp
@@ -447,6 +477,16 @@ func (c *chunkProgress) update(i int, sent int64) {
 		total += n
 	}
 	c.p.update(total)
+}
+
+// setPieceSize 记下 worker i 刚认领到的这一片有多大, 供 summary() 展示。分片大小是
+// 各连接按自己实测速度动态决定的(见 chunkSizeForRate), 不是配置项, 第一片固定是
+// probeChunkSize(探测片), 之后每个 worker 各走各的——展示出来才看得出是不是某条
+// 连接因为测速偏低被分到了明显更小的分片、一直追不上其它连接。
+func (c *chunkProgress) setPieceSize(i int, length int64) {
+	c.mu.Lock()
+	c.piece[i] = length
+	c.mu.Unlock()
 }
 
 // summary 渲染"connN: 已传 瞬时速率"这一串, 并把总速率也一并算出来返回, 按
@@ -472,8 +512,10 @@ func (c *chunkProgress) summary() (line string, totalRate string) {
 		delta := sent - c.lastEach[i]
 		totalDelta += delta
 		// %-8s/%-10s: 固定最小宽度, 数值变短时用空格补齐——不然"0B/s"跟"23.7MB/s"
-		// 长度差一大截, 每次刷新后面的文字都要跟着左右挪, 看着比较闹心。
-		fmt.Fprintf(&b, "conn%d: %-8s %-10s", i+1, humanBytes(sent), rate(delta, elapsed))
+		// 长度差一大截, 每次刷新后面的文字都要跟着左右挪, 看着比较闹心。piece(当前
+		// 这一片的大小)放最后, 不参与宽度对齐——它比字节数/速率稳定得多(同一个
+		// worker 好几次渲染之间通常还在传同一片), 不值得为它也留固定宽度。
+		fmt.Fprintf(&b, "conn%d: %-8s %-10s piece=%s", i+1, humanBytes(sent), rate(delta, elapsed), humanBytes(c.piece[i]))
 	}
 	copy(c.lastEach, c.each)
 	c.lastAt = now

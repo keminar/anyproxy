@@ -306,12 +306,14 @@ func pullFile(conn fileConn, dir string, e filePullEntry, from, remote string,
 }
 
 // pullFileAct 是 pullFile 带同名处理决定的版本: act 为空/ConflictRename 走默认(自动改名),
-// ConflictOverwrite 覆盖本机已有文件, ConflictResume 从 resumeAt 起续传(本机已有前 resumeAt 字节)。
+// ConflictOverwrite 覆盖本机已有文件, 带 resumePart 表示从 resumeAt 起续传(本机已有前 resumeAt 字节,
+// 落点按 act 是否 overwrite 决定)。"覆盖/重命名"与"续传/全新"正交。
 func pullFileAct(conn fileConn, dir string, e filePullEntry, from, remote string,
 	logf func(string, ...interface{}), onProgress func(int64), plan pullPlan) (string, error) {
 	req := filePullReq{Op: filePullGet, Path: e.Path, Name: e.Name}
 	size := e.Size
-	if plan.act == ConflictResume {
+	// 续传(覆盖或重命名都会续)由 resumePart 决定, 不限于 act==ConflictResume。
+	if plan.resumePart != "" {
 		req.Offset, req.Length, req.Resume = plan.resumeAt, e.Size-plan.resumeAt, true
 		size = req.Length
 	}

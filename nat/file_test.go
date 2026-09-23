@@ -1165,6 +1165,38 @@ func TestWantParallel(t *testing.T) {
 	}
 }
 
+// TestChunkProgressSummaryShowsPieceSize 覆盖 chunkProgress.setPieceSize/summary:
+// 每条连接当前正在传的这一片有多大要出现在进度行里, 这样才看得出是不是某条连接
+// 因为测速偏低被分到了明显更小的分片(见 setPieceSize 的注释)。
+func TestChunkProgressSummaryShowsPieceSize(t *testing.T) {
+	p := newProgress("test", 100)
+	defer p.done()
+	cp := newChunkProgress(2, p)
+
+	cp.setPieceSize(0, 2*1024*1024)
+	cp.setPieceSize(1, 6*1024*1024)
+	cp.update(0, 1000)
+	cp.update(1, 2000)
+
+	line, _ := cp.summary()
+	if !strings.Contains(line, "piece="+humanBytes(2*1024*1024)) {
+		t.Fatalf("summary %q missing conn1's piece size", line)
+	}
+	if !strings.Contains(line, "piece="+humanBytes(6*1024*1024)) {
+		t.Fatalf("summary %q missing conn2's piece size", line)
+	}
+
+	// 换了一片之后展示的应该是新的那个大小, 不是停留在上一片。
+	cp.setPieceSize(0, 3*1024*1024)
+	line, _ = cp.summary()
+	if !strings.Contains(line, "piece="+humanBytes(3*1024*1024)) {
+		t.Fatalf("summary %q did not pick up the new piece size", line)
+	}
+	if strings.Contains(line, "piece="+humanBytes(2*1024*1024)) {
+		t.Fatalf("summary %q still shows the stale piece size", line)
+	}
+}
+
 func TestRunChunkWorkersCoverage(t *testing.T) {
 	const size = 10 * probeChunkSize
 	const workers = 3
@@ -1173,6 +1205,7 @@ func TestRunChunkWorkersCoverage(t *testing.T) {
 	var mu sync.Mutex
 	var claims []claim
 	firstLength := make([]int64, workers)
+	lastLength := make([]int64, workers)
 	for i := range firstLength {
 		firstLength[i] = -1
 	}
@@ -1187,6 +1220,7 @@ func TestRunChunkWorkersCoverage(t *testing.T) {
 		if firstLength[w] == -1 {
 			firstLength[w] = length
 		}
+		lastLength[w] = length
 		mu.Unlock()
 		onProgress(length)
 		return "", nil
@@ -1215,6 +1249,11 @@ func TestRunChunkWorkersCoverage(t *testing.T) {
 		}
 		if l > want {
 			t.Errorf("worker %d's first claim was %d bytes, want <= probeChunkSize(%d)", w, l, want)
+		}
+		// runChunkWorkers 应该在每次认领之后把片大小记进 cp(见 setPieceSize), 供
+		// 进度行展示——认领完最后一片, cp 里记的该是那一片的大小, 不是别的。
+		if got := cp.piece[w]; got != lastLength[w] {
+			t.Errorf("worker %d: chunkProgress.piece = %d, want its last claimed length %d", w, got, lastLength[w])
 		}
 	}
 }
@@ -1307,7 +1346,7 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
 		return a.sendFileChunk(sess, it, offset, length, tid, chunkIdx, onProgress)
 	}
-	saved, err := sendParallel(it, 3, sendChunk, p)
+	saved, err := sendParallel(it, 3, sendChunk, nil, p)
 	if err != nil {
 		t.Fatalf("chunked send: %v", err)
 	}
@@ -1509,5 +1548,151 @@ func TestChunkAssemblyByteCompletion(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(filepath.Join(recvDir, "small.bin.*"+filePartSuffix)); len(matches) != 0 {
 		t.Fatalf("the .part file was left behind: %v", matches)
+	}
+}
+
+// TestAbortChunkAssemblyOverWire 覆盖 fileHead.Abort(见其注释): 只有一部分分片真的
+// 发出去过, 其余那些从未认领/从未打开过连接的分片永远不会来——光靠字节计数
+// (chunkAssembly.remaining)永远等不到归零, 没有这条显式通知的话只能靠 5 分钟的
+// 空闲回收器兜底(见 reapChunkAssemblies)。发一帧 Abort 应该让接收端立刻收掉
+// .chunks 临时文件与内存状态, 不必等那么久——这正是 -send 用 -parallel 时, 某个
+// worker 出错后 sendParallel 会做的事(见 file_send.go)。
+func TestAbortChunkAssemblyOverWire(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := make([]byte, 4*probeChunkSize)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "abort.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+
+	// 只发第一片(总共本该切成 4 片), 模拟"其余分片永远不会来"——不是靠一个显式
+	// 出错的分片让 remaining 提前扣到零, 是那些分片压根没被认领、没开过连接。
+	aSide, cSide := net.Pipe()
+	go func() {
+		defer cSide.Close()
+		recvFileOver(cSide, recvDir, "a@example.com", "test", func(string, ...interface{}) {}, recvOpts{}, nil)
+	}()
+	quarter := it.size / 4
+	if _, err := sendFileOverRange(aSide, it, 0, quarter, tid, 0, nil); err != nil {
+		t.Fatalf("send first chunk: %v", err)
+	}
+
+	chunkAssemblies.mu.Lock()
+	_, ok := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if !ok {
+		t.Fatal("expected an in-progress assembly after the first chunk")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "abort.bin.*.chunks"+filePartSuffix)); len(matches) != 1 {
+		t.Fatalf("expected one .chunks temp file, got %v", matches)
+	}
+
+	// 发送方这时放弃了(比如另一个 worker 出的错), 告诉接收端别再等了。
+	aSide2, cSide2 := net.Pipe()
+	go func() {
+		defer cSide2.Close()
+		recvFileOver(cSide2, recvDir, "a@example.com", "test", func(string, ...interface{}) {}, recvOpts{}, nil)
+	}()
+	if err := writeFrame(aSide2, fileHead{TransferID: tid, Abort: true}); err != nil {
+		t.Fatalf("send abort: %v", err)
+	}
+	var r fileReply
+	if err := readFrame(aSide2, &r, fileFrameMax); err != nil {
+		t.Fatalf("read abort reply: %v", err)
+	}
+
+	chunkAssemblies.mu.Lock()
+	_, stillThere := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if stillThere {
+		t.Fatal("abort should remove the assembly immediately, not wait for the idle reaper")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "abort.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("abort should delete the .chunks temp file immediately, got %v", matches)
+	}
+}
+
+// TestDirectPeerAbortTransfer 用真实的直连 QUIC 会话覆盖 directPeer.abortTransfer
+// 本身(帧怎么开流/怎么写), 而不是像 TestAbortChunkAssemblyOverWire 那样直接摆一个
+// 手搭的 Abort 帧——两个测试合起来才覆盖了"sendParallel 失败后怎么通知对端"这条
+// 路径从发送方方法到接收端落地的完整链路。
+func TestDirectPeerAbortTransfer(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := make([]byte, 4*probeChunkSize)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "abort2.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	c := newAcceptPeer(t, nil)
+	c.cfg.Receive = conf.ClientReceive{Dir: recvDir, Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
+	a := newDialPeer(t)
+	a.cfg.Email, a.cfg.UUID = "a@example.com", testUUIDA
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	const token = "test-token-abort"
+	c.tokens.put(token, directFileTag)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+	// 只发第一片, 其余当作发送方已经放弃、永远不会再发。
+	if _, err := a.sendFileChunk(sess, it, 0, it.size/4, tid, 0, nil); err != nil {
+		t.Fatalf("send first chunk: %v", err)
+	}
+	chunkAssemblies.mu.Lock()
+	_, ok := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if !ok {
+		t.Fatal("expected an in-progress assembly after the first chunk")
+	}
+
+	a.abortTransfer(sess, tid)
+
+	chunkAssemblies.mu.Lock()
+	_, stillThere := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if stillThere {
+		t.Fatal("abortTransfer should remove the assembly immediately")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "abort2.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("abortTransfer should delete the .chunks temp file immediately, got %v", matches)
 	}
 }

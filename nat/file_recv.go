@@ -206,6 +206,8 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 
 	var gotBytes int64
 	skipped := 0
+	// warnedParallelNoResume 只提示一次, 理由同 file_send.go 的同名变量。
+	warnedParallelNoResume := false
 	for i, e := range entries {
 		start := time.Now()
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(entries), e.Name)
@@ -232,19 +234,23 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 			}
 		}
 		p := newProgress(prefix, e.Size)
-		act, resumeAt := plan.act, plan.resumeAt
+		resumeAt := plan.resumeAt
 
 		var saved string
 		var err error
-		if act == ConflictResume {
-			// 续传只取一段尾巴, 不做分块并行; 进度从已有的字节数起算。
+		if plan.resumePart != "" {
+			// 续传(覆盖或重命名都会续)只取一段尾巴, 不做分块并行; 进度从已有的字节数起算。
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
 				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, plan)
 				conn.Close()
 			}
 		} else if wantParallel(e.Size, workers) {
-			saved, err = recvParallel(openPullChunk, workers, dir, e, from, remote, logf, act, p)
+			if !warnedParallelNoResume {
+				warnedParallelNoResume = true
+				fmt.Fprintln(os.Stderr, "note: -parallel transfers write several independent .chunks temp files and cannot be resumed if interrupted; an interrupted file restarts from scratch")
+			}
+			saved, err = recvParallel(openPullChunk, workers, dir, e, from, remote, logf, plan.act, p)
 		} else {
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
