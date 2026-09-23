@@ -49,6 +49,37 @@ func buildForward(rules []conf.ClientForward) map[string]string {
 	return m
 }
 
+// buildRelayForward 从同一份 rules 里筛出允许服务端B经websocket/UDP中转触发的tag,
+// 是 buildForward 全量表的子集——AllowRelay 显式为 false 的条目只对A的QUIC直连路径
+// 开放(direct_accept.go/direct_udp.go 仍拿 buildForward 的全量表), 不进这张表。B 发来
+// CREATE/OPEN 带这类 tag 时会落到调用方既有的"tag未命中"拒绝逻辑, 不需要单独分支。
+//
+// 去重规则与 buildForward 一致(同 tag 保留先出现的那条, 含它的 AllowRelay 取值),
+// 复用 buildForward 的结果取 target, 避免两处各写一遍"Tag/Target 是否为空"的过滤。
+func buildRelayForward(rules []conf.ClientForward) map[string]string {
+	full := buildForward(rules)
+	if len(full) == 0 {
+		return full
+	}
+	m := make(map[string]string, len(full))
+	seen := map[string]bool{}
+	for _, r := range rules {
+		if r.Tag == "" || r.Target == "" || seen[r.Tag] {
+			continue
+		}
+		seen[r.Tag] = true
+		target, ok := full[r.Tag]
+		if !ok || !r.RelayRequestAllowed() {
+			continue
+		}
+		m[r.Tag] = target
+	}
+	if len(m) != len(full) {
+		log.Printf("nat local forward map (relay-triggerable by server B subset): %v", m)
+	}
+	return m
+}
+
 // isForwardEmail 该email是否为某条服务端forward规则的目标。命中则允许其空订阅
 // 接入(仅用于裸TCP转发, 不参与http头订阅匹配)。
 func isForwardEmail(email string) bool {

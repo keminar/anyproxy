@@ -31,11 +31,15 @@ type wsClientConn struct {
 	liveIndex int // 在 conf.RouterConfig().Websocket.ClientList() 里的下标, 用于热加载重新取值, 见 liveAuthCfg
 	hub       *Hub
 	bridge    *BridgeHub
-	forward   map[string]string
-	tempDelay time.Duration
-	tag       string      // 日志前缀, 用 cfg.Connect 区分是哪条连接
-	direct    *directPeer // QUIC 直连运行时, 未启用时为 nil
-	uplink    *udpUplink  // UDP 中继上行运行时, 没有 forward 目标时为 nil
+	forward   map[string]string // 全量tag->目标, 给A的QUIC直连路径(direct)用
+	// relayForward 是 forward 的子集(AllowRelay!=false 的部分), 给经服务端B中转的
+	// 路径用(websocket裸TCP转发的 Client.forward、UDP relay 的 uplink)——两条路径
+	// 权限不同, 不能共用同一张表, 见 conf.ClientForward.AllowRelay。
+	relayForward map[string]string
+	tempDelay    time.Duration
+	tag          string      // 日志前缀, 用 cfg.Connect 区分是哪条连接
+	direct       *directPeer // QUIC 直连运行时, 未启用时为 nil
+	uplink       *udpUplink  // UDP 中继上行运行时, 没有 forward 目标时为 nil
 }
 
 // liveAuthCfg 每次重连前重新取一遍 user/pass/host/email/subscribe, 保留热加载语义
@@ -87,12 +91,13 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	}
 
 	w := &wsClientConn{
-		cfg:       cfg,
-		liveIndex: liveIndex,
-		hub:       newHub(),
-		bridge:    newBridgeHub(),
-		forward:   buildForward(cfg.Forward),
-		tag:       cfg.Connect,
+		cfg:          cfg,
+		liveIndex:    liveIndex,
+		hub:          newHub(),
+		bridge:       newBridgeHub(),
+		forward:      buildForward(cfg.Forward),
+		relayForward: buildRelayForward(cfg.Forward),
+		tag:          cfg.Connect,
 	}
 	go w.hub.run()
 	go w.bridge.run()
@@ -107,8 +112,8 @@ func ConnectServer(cfg conf.WsClient, liveIndex int) {
 	// 空闲时零后台流量, 也不存在"开机时 IPv6 还没就绪导致永久禁用"的问题。
 	// UDP 中继上行: 只要本端有 forward 落地目标就备着。这里只建运行时不占端口 ——
 	// 真正的 socket 要等服务端下发 u_open 才建(见 nat/relay_udp_client.go)。
-	if len(w.forward) > 0 {
-		w.uplink = newUDPUplink(w.tag, cfg.Connect, w.forward)
+	if len(w.relayForward) > 0 {
+		w.uplink = newUDPUplink(w.tag, cfg.Connect, w.relayForward)
 	}
 
 	if cfg.Direct.Accept || len(cfg.Direct.Rules) > 0 || cfg.Direct.Relay {
@@ -218,7 +223,7 @@ func (w *wsClientConn) connect(interrupt chan os.Signal) {
 	}
 	w.logf("websocket auth and subscribe ok")
 
-	client := &Client{hub: w.hub, conn: c, send: make(chan *Message, SEND_CHAN_LEN), bridge: w.bridge, forward: w.forward, tag: w.tag, receive: w.cfg.Receive, uuid: w.cfg.UUID}
+	client := &Client{hub: w.hub, conn: c, send: make(chan *Message, SEND_CHAN_LEN), bridge: w.bridge, forward: w.relayForward, tag: w.tag, receive: w.cfg.Receive, uuid: w.cfg.UUID}
 	if w.direct != nil {
 		// 直连信令要经这条新连接收发, 每次重连都要重新挂上。
 		// 不需要在这里通告端点: 端点是收到请求时当场探测的, 不预先上报。

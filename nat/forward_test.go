@@ -49,6 +49,46 @@ func TestBuildForwardDuplicatePort(t *testing.T) {
 	}
 }
 
+// TestBuildRelayForwardExcludesDirectOnly allowRelay:false 的tag不该出现在B可触发的
+// relay表里, 但依旧要留在 buildForward 的全量表里给A的direct路径用——两张表权限
+// 不同, 不能因为限了B就连A也一起挡了。
+func TestBuildRelayForwardExcludesDirectOnly(t *testing.T) {
+	no := false
+	rules := []conf.ClientForward{
+		{Tag: "ssh", Target: "127.0.0.1:22"},                      // 默认allow, 应在relay表里
+		{Tag: "admin", Target: "127.0.0.1:9999", AllowRelay: &no}, // 显式禁止B触发
+	}
+	full := buildForward(rules)
+	if len(full) != 2 {
+		t.Fatalf("buildForward should keep both tags, got %+v", full)
+	}
+	relay := buildRelayForward(rules)
+	if len(relay) != 1 {
+		t.Fatalf("expected 1 relay-allowed entry, got %+v", relay)
+	}
+	if relay["ssh"] != "127.0.0.1:22" {
+		t.Fatalf("ssh should be relay-allowed, got %+v", relay)
+	}
+	if _, ok := relay["admin"]; ok {
+		t.Fatalf("admin has allowRelay:false, must not appear in the relay table")
+	}
+}
+
+// TestBuildRelayForwardDuplicateTagUsesFirstRule 重复tag时relay表要跟着
+// buildForward的去重结果走(保留先出现的那条), 不能只看后一条的AllowRelay取值——
+// 否则一条被丢弃的规则还能通过AllowRelay字段影响最终判定, 令人困惑。
+func TestBuildRelayForwardDuplicateTagUsesFirstRule(t *testing.T) {
+	no := false
+	rules := []conf.ClientForward{
+		{Tag: "ssh", Target: "127.0.0.1:22"},                     // 先出现, allow默认true
+		{Tag: "ssh", Target: "192.0.2.22:3389", AllowRelay: &no}, // 后出现且禁止relay, 应被整体忽略
+	}
+	relay := buildRelayForward(rules)
+	if relay["ssh"] != "127.0.0.1:22" {
+		t.Fatalf("expected first rule (relay-allowed) to win, got %+v", relay)
+	}
+}
+
 // TestDialForCreateNoForwardTarget 锁定"入口 tag 没有映射"这条错误的准确文案。
 //
 // 这个字符串现在不只是打在订阅方本地日志里, 还会经 METHOD_CLOSE 的 Body 带回给

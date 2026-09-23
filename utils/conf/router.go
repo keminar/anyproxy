@@ -148,6 +148,28 @@ func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol()) }
 type ClientForward struct {
 	Tag    string `yaml:"tag"`    //对应服务端入口的 forward[].tag
 	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
+
+	// AllowRelay 这条tag是否允许经服务端B的中转(websocket裸TCP转发、UDP relay)触发。
+	// 留空(nil)按true处理, 与改动前的行为一致。
+	//
+	// 同一张 forward 表被两条路径共用: A 走 QUIC 直连(direct_accept.go/direct_udp.go),
+	// 连接建立本身要过身份比对那一关; B 走 websocket/UDP 中转(nat/forward.go、
+	// relay_udp_client.go), 只要是这条连接的对端(即B自己)敢发 CREATE/OPEN 带上某个
+	// tag, C 就会直接 dial, 没有任何"这个 tag 该不该让 B 碰"的判断——B 对具体触发哪个
+	// tag 拥有的权力其实等同于"C 配过的任意内网目标都能被它点名转发", 而部分 forward
+	// 条目的本意只是开给认证过的 A 直连, 不想连 B 都能代为触发。
+	//
+	// 显式配 allowRelay: false 即可把这条 tag 从 B 可见的白名单里摘掉(见
+	// nat/forward.go buildRelayForward), A 的直连路径不受影响, 仍用全量表。
+	AllowRelay *bool `yaml:"allowRelay"`
+}
+
+// RelayRequestAllowed 这条tag是否允许经服务端B的中转路径触发。AllowRelay 留空按true处理。
+func (f ClientForward) RelayRequestAllowed() bool {
+	if f.AllowRelay != nil {
+		return *f.AllowRelay
+	}
+	return true
 }
 
 // ClientDirect 订阅方(A侧)的直连入口规则: 在本机 Listen 起裸TCP监听, 进来的连接不再经
