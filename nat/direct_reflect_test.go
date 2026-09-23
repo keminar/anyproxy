@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,32 @@ func TestDirectReflectorRetriesOccupiedPort(t *testing.T) {
 	oldConfig := conf.RouterConfig()
 	conf.SetRouterConfig(&conf.Router{})
 	t.Cleanup(func() { conf.SetRouterConfig(oldConfig) })
+
+	// 抓住重试路径里异步绑定出来的 conn 与其读循环的退出信号: 不这样做的话, 反射器
+	// 的后台 goroutine 会在本用例返回后继续跑, 与后续用例并发 touch reflectorLog/
+	// log.SetOutput 这类全局状态, 引出跨用例的 data race(而不是本用例自身的 bug)。
+	var (
+		hookMu      sync.Mutex
+		reflectConn *net.UDPConn
+		stopped     <-chan struct{}
+	)
+	directReflectorStartedHook = func(c *net.UDPConn, s <-chan struct{}) {
+		hookMu.Lock()
+		reflectConn, stopped = c, s
+		hookMu.Unlock()
+	}
+	t.Cleanup(func() { directReflectorStartedHook = nil })
+	t.Cleanup(func() {
+		hookMu.Lock()
+		c, s := reflectConn, stopped
+		hookMu.Unlock()
+		if c != nil {
+			c.Close()
+		}
+		if s != nil {
+			<-s
+		}
+	})
 
 	blocker, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {

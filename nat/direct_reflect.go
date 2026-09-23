@@ -151,11 +151,23 @@ func StartDirectReflector(wsListen string) {
 	serveDirectReflector(conn)
 }
 
+// directReflectorStartedHook 仅供测试观测。重试路径(SIGHUP 端口交接)里实际绑定的
+// conn 是在后台 goroutine 里异步产生的, 调用方 StartDirectReflector 拿不到句柄；测试
+// 若不能显式关掉这个 socket 并等读循环真正退出, 它会在测试函数返回后继续跑, 与后面
+// 的用例并发访问同一份全局状态(reflectorLog 限速表、log.SetOutput 重定向的目标),
+// 就是 -race 抓到的那类跨用例数据竞争。stopped 在读循环返回时关闭, 供测试等待退出。
+var directReflectorStartedHook func(conn *net.UDPConn, stopped <-chan struct{})
+
 // serveDirectReflector 在已经绑定好的 socket 上启动反射器读循环。把绑定和服务拆开，
 // 让 SIGHUP 重叠期的后台重试成功后能走回与首次启动完全相同的路径。
 func serveDirectReflector(conn *net.UDPConn) {
 	log.Printf("nat direct reflector listening on udp %s", conn.LocalAddr())
+	stopped := make(chan struct{})
+	if directReflectorStartedHook != nil {
+		directReflectorStartedHook(conn, stopped)
+	}
 	go func() {
+		defer close(stopped)
 		buf := make([]byte, 1500)
 		for {
 			n, from, err := conn.ReadFromUDP(buf)
