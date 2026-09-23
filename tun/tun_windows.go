@@ -39,8 +39,19 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Printf("WARNING: %s", adv)
 	}
 
+	redirectPorts := []uint16{80, 443}
+	if len(cfg.RedirectPorts) > 0 {
+		redirectPorts = make([]uint16, 0, len(cfg.RedirectPorts))
+		for _, p := range cfg.RedirectPorts {
+			if p > 0 && p <= 0xffff {
+				redirectPorts = append(redirectPorts, uint16(p))
+			} else {
+				log.Printf("tun(windivert): ignore invalid redirectPort %d", p)
+			}
+		}
+	}
 	engCfg := &wdengine.Config{
-		RedirectPorts:          []uint16{80, 443},
+		RedirectPorts:          redirectPorts,
 		BlockQUIC:              dnsutil.BlockQUICEnabled(),
 		IPv6:                   true,
 		BypassPrivate:          cfg.BypassPrivate, // 不配默认 true: 私网/LAN(含虚拟机网段)一律直连不进引擎; 配 tun.windows.bypassPrivate=false 则私网 80/443 进引擎按 router 规则。loopback 始终直连

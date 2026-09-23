@@ -641,6 +641,7 @@ type TcpCopy struct {
 //	bypassIPs                三平台: linux/darwin 加 /32 直连路由；windows 排除捕获(直连)
 //	blockQUIC                三平台
 //	excludeProcs             仅 windows(WinDivert 按进程名排除, 逃 OpenVPN 等同机隧道)
+//	redirectPorts            仅 windows(WinDivert 捕获的出站TCP目标端口, 不配默认[80,443])
 //	inboundPorts             仅 darwin(pf reply-to 放行入站服务回包; linux 自动, windows 无需)
 //	excludeNics/device       仅 linux 且 mode=bypass(物理网卡绕行, 见 Tun 注释)
 type TunOS struct {
@@ -652,6 +653,7 @@ type TunOS struct {
 	BypassPrivate *bool    `yaml:"bypassPrivate"` //仅windows: 不配默认true=私网/LAN/链路本地(含虚拟机/VM网段)一律直连不进引擎; 显式false则私网80/443进引擎按router规则。loopback始终直连
 	BlockQUIC     *bool    `yaml:"blockQUIC"`     //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
 	ExcludeProcs  []string `yaml:"excludeProcs"`  //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
+	RedirectPorts []int    `yaml:"redirectPorts"` //仅windows: WinDivert捕获的出站TCP目标端口; 不配默认[80,443]; 一旦配置则完全覆盖(需要的话把80,443也写进去)。目的地是loopback(127.0.0.1/::1)的连接不受此项影响, 始终直连不会被捕获
 	InboundPorts  []int    `yaml:"inboundPorts"`  //仅darwin: 需pf放行回包的入站TCP端口(如22)
 	WindivertDir  string   `yaml:"windivertDir"`  //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
 	ExcludeNics   []string `yaml:"excludeNics"`   //仅linux且mode=bypass: 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)

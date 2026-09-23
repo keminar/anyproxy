@@ -1,4 +1,5 @@
-# 监听端口IP, 优先级低于启动传参，不监听设置为off
+# 监听端口IP, 优先级低于启动传参，不监听设置为off。可逗号分隔写多个完整地址(各自带端口),
+# 同时绑定多个内网网段的具体 IP, 如 192.168.1.5:3000,10.0.0.5:3000
 listen:
 # 日志目录
 log:
@@ -82,6 +83,14 @@ tun:
 #      - 203.0.113.10
 #    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)
 #      - openvpn.exe
+#    redirectPorts:           # 捕获的出站TCP目标端口; 不配默认[80,443]; 一旦配置则完全覆盖
+#      - 80                   # (需要的端口都要写全, 比如还想抓某远程服务的5000端口)
+#      - 443
+#      - 5000
+#    # 重要: 目的地是 loopback(127.0.0.1/::1)的连接永远不会被 WinDivert 捕获,
+#    # 不受 redirectPorts/bypassPrivate/skipPorts 等任何配置影响(硬编码防环, 见
+#    # docs/windows-windivert-redirect.md)。想代理"本机 localhost:port"的流量,
+#    # 这条路走不通, 只能让发起连接的程序直接配置用 anyproxy 做代理。
 
 # 死循环兜底熔断器(不仅仅应用于全局代理，经过anyproxy的死循环都有效)。
 # 同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署时, 正常应由 bypass 从路由层根治环路;

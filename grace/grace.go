@@ -95,6 +95,21 @@ func IsChild() bool {
 	return isChild
 }
 
+// InheritedFDCount 返回 -graceful 重启时从父进程继承的监听 fd 数量(从 fd 3 起连续排列)。
+// 用于 listen 改成 off 等"这次不再需要任何继承 fd"的场景, 正确关掉全部继承 fd 再通知旧
+// 进程退出, 避免只关 fd 3、其余(listen 配过多个地址时)被漏关而泄漏。
+// -socketorder 只在旧进程有 2 个及以上监听地址时才会传(见 fork()); 不带该参数但确实
+// 是 -graceful 子进程时, 老进程必然只有 1 个监听地址, fd 3 单个。
+func InheritedFDCount() int {
+	if !isChild {
+		return 0
+	}
+	if socketOrder == "" {
+		return 1
+	}
+	return len(strings.Split(socketOrder, ","))
+}
+
 // NewServer returns a new graceServer.
 func NewServer(addr string, handler ConnHandler, network string) (srv *Server) {
 	regLock.Lock()

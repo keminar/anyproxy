@@ -439,8 +439,8 @@ func sendParallel(it fileItem, workers int,
 		return "", fmt.Errorf("generate transfer id: %w", err)
 	}
 	// 进度按 worker(也就是按连接)算, 不是按 chunk 算——一个 worker 干完一片接着领
-	// 下一片, c1/c2/... 这几栏该是"这条连接迄今为止总共传了多少", 不是"当前这一片
-	// 传了多少"(片与片之间切换不该让进度条看着往回跳)。
+	// 下一片, 进度行方括号里按顺序排开的每一栏该是"这条连接迄今为止总共传了多少",
+	// 不是"当前这一片传了多少"(片与片之间切换不该让进度条看着往回跳)。
 	cp := newChunkProgress(workers, p)
 	saved, err := runChunkWorkers(it.size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
 		return sendChunk(w, it, offset, length, tid, idx, onProgress)
@@ -499,10 +499,12 @@ func (c *chunkProgress) setPieceSize(i int, length int64) {
 	c.mu.Unlock()
 }
 
-// summary 渲染"cN: 已传 瞬时速率"这一串, 并把总速率也一并算出来返回, 按
-// progress.render() 的节奏(progressTick)调用一次——窗口跟总速率的计算对齐, 不是
-// 从头到现在的累计平均, 理由与 progress.render() 一致: 排查"是不是某条连接被
-// 限速/拥塞退避"要看的是"现在多快", 不是平均值。
+// summary 渲染"[已传 瞬时速率/当前这一片有多大, ...]"这一串(每个逗号分隔的段落对
+// 应一条连接, 顺序就是连接的顺序, 不再单独标 cN——方括号加逗号已经能看出这是"几条
+// 连接各一份"的一组数字, 标签本身没什么信息量, 省掉能再挤出不少宽度), 并把总速率
+// 也一并算出来返回, 按 progress.render() 的节奏(progressTick)调用一次——窗口跟
+// 总速率的计算对齐, 不是从头到现在的累计平均, 理由与 progress.render() 一致: 排查
+// "是不是某条连接被限速/拥塞退避"要看的是"现在多快", 不是平均值。
 //
 // 总速率**由这几条连接各自的字节增量直接加总算出**, 不是另外单独采样一次——如果
 // 各算各的(这里一份时间窗口, progress.render() 自己再采一份), 两边取的时间点会
@@ -514,26 +516,25 @@ func (c *chunkProgress) summary() (line string, totalRate string) {
 	now := time.Now()
 	elapsed := now.Sub(c.lastAt)
 	var b strings.Builder
+	b.WriteByte('[')
 	var totalDelta int64
 	for i, sent := range c.each {
 		if i > 0 {
-			b.WriteString("  ")
+			b.WriteString(", ")
 		}
 		delta := sent - c.lastEach[i]
 		totalDelta += delta
-		// "c%d:" 而不是 "conn%d:"——每条连接都要占一遍这个标签, 4 条连接下来省的
-		// 宽度很可观, 标签本身没什么信息量, 认得出是第几条连接就够了。
-		//
-		// 两个 %-8s: 固定最小宽度, 数值变短时用空格补齐——不然"0B/s"跟"23.7MB/s"长度
-		// 差一大截, 每次刷新后面的文字都要跟着左右挪, 看着比较闹心。8 是常见速率
+		// %-8s: 固定最小宽度, 数值变短时用空格补齐——不然"0B/s"跟"23.7MB/s"长度差
+		// 一大截, 每次刷新后面的文字都要跟着左右挪, 看着比较闹心。8 是常见速率
 		// (KB/s~几百MB/s)的字面宽度, 只比它们略宽一点点, 不像更早给到 10 那样在
 		// "0B/s"这类短值后面拖出一大截空白——GB/s 这种更长的值本来就不常见, 且
-		// %-8s 只规定最小宽度, 真出现了也不会被截断, 只是不再帮着对齐。当前这一片
-		// 的大小放最后, 用括号而不是 "piece=" 这样的文字标签, 理由同上; 不参与宽度
-		// 对齐, 是因为它比字节数/速率稳定得多(同一个 worker 好几次渲染之间通常还在
-		// 传同一片)。
-		fmt.Fprintf(&b, "c%d: %-8s %-8s (%s)", i+1, humanBytes(sent), rate(delta, elapsed), humanBytes(c.piece[i]))
+		// %-8s 只规定最小宽度, 真出现了也不会被截断, 只是不再帮着对齐。速率后面
+		// 直接跟一个 "/当前这一片有多大", 不额外补宽度——它比字节数/速率稳定得多
+		// (同一个 worker 好几次渲染之间通常还在传同一片), 用括号/文字标签都嫌多
+		// 占地方, 一个斜杠分隔就够看清是两个数。
+		fmt.Fprintf(&b, "%-8s %s/%s", humanBytes(sent), rate(delta, elapsed), humanBytes(c.piece[i]))
 	}
+	b.WriteByte(']')
 	copy(c.lastEach, c.each)
 	c.lastAt = now
 	return b.String(), rate(totalDelta, elapsed)

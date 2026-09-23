@@ -1003,7 +1003,7 @@ func TestProgressEraseWidthTracksActualContent(t *testing.T) {
 	// 最大值", 好让 render()/done() 用它补足空格盖住上一行的残留, 而不是跟着新
 	// 内容一起缩短、留下一截没擦掉的尾巴。
 	p.setConnLine(func() (string, string) {
-		return "c1: 10B  1B/s  (5B)  c2: 20B  2B/s  (5B)  c3: 30B  3B/s  (5B)  c4: 40B  4B/s  (5B)", "10B/s"
+		return "[10B  1B/s/5B, 20B  2B/s/5B, 30B  3B/s/5B, 40B  4B/s/5B]", "10B/s"
 	})
 	p.update(20)
 	p.render()
@@ -1014,7 +1014,7 @@ func TestProgressEraseWidthTracksActualContent(t *testing.T) {
 		t.Fatalf("expected the wider connLine render to grow lastLineLen past %d, got %d", firstLen, widerLen)
 	}
 
-	p.setConnLine(func() (string, string) { return "c1: 40B  4B/s  (5B)", "4B/s" })
+	p.setConnLine(func() (string, string) { return "[40B  4B/s/5B]", "4B/s" })
 	p.update(40)
 	p.render()
 	p.mu.Lock()
@@ -1246,20 +1246,20 @@ func TestChunkProgressSummaryShowsPieceSize(t *testing.T) {
 	cp.update(1, 2000)
 
 	line, _ := cp.summary()
-	if !strings.Contains(line, "("+humanBytes(2*1024*1024)+")") {
-		t.Fatalf("summary %q missing conn1's piece size", line)
+	if !strings.Contains(line, "/"+humanBytes(2*1024*1024)) {
+		t.Fatalf("summary %q missing the first connection's piece size", line)
 	}
-	if !strings.Contains(line, "("+humanBytes(6*1024*1024)+")") {
-		t.Fatalf("summary %q missing conn2's piece size", line)
+	if !strings.Contains(line, "/"+humanBytes(6*1024*1024)) {
+		t.Fatalf("summary %q missing the second connection's piece size", line)
 	}
 
 	// 换了一片之后展示的应该是新的那个大小, 不是停留在上一片。
 	cp.setPieceSize(0, 3*1024*1024)
 	line, _ = cp.summary()
-	if !strings.Contains(line, "("+humanBytes(3*1024*1024)+")") {
+	if !strings.Contains(line, "/"+humanBytes(3*1024*1024)) {
 		t.Fatalf("summary %q did not pick up the new piece size", line)
 	}
-	if strings.Contains(line, "("+humanBytes(2*1024*1024)+")") {
+	if strings.Contains(line, "/"+humanBytes(2*1024*1024)) {
 		t.Fatalf("summary %q still shows the stale piece size", line)
 	}
 }

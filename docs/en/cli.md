@@ -4,7 +4,7 @@ Use `./anyproxy -h` to view the full help. The table below lists all startup par
 
 | param | description | config-file equivalent | priority |
 |------|------|----------------|--------|
-| `-l ADDRPORT` | listen address:port, e.g. `:3000` or `127.0.0.1:3000`; set to `off` (or `none`/`-`) to **disable the proxy listener**, running only background services like websocket/tun (pure intranet penetration) | `listen` | CLI > config > `:3000` |
+| `-l ADDRPORT` | listen address:port, e.g. `:3000` or `127.0.0.1:3000`; comma-separated to bind multiple specific addresses at once, e.g. `192.168.1.5:3000,10.0.0.5:3000` (bind several internal-network IPs without listening on `0.0.0.0`, or being limited to a single IP); set to `off` (or `none`/`-`) to **disable the proxy listener**, running only background services like websocket/tun (pure intranet penetration) | `listen` | CLI > config > `:3000` |
 | `-p PROXIES` | upstream proxy, e.g. `tunnel://10.2.2.2:3001` / `socks5://10.2.2.2:3128` / `http://10.1.1.1:80`; supports comma-separated multiple proxies with trailing `local`/`deny` suffix (see [routing.md](routing.md#proxy-field)) | `default.proxy` | CLI > config |
 | `-c FILEPATH` | config file path, default `conf/router.yaml` | — | — |
 | `-mode` | run mode (mutually exclusive): `proxy` (default) / `tunnel`(tunneld server) / `tun`(TUN global proxy) / `bypass`(physical NIC bypass, Linux only) / `tcpcopy`(port forwarding) | `mode` | CLI > config |

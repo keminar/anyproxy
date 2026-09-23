@@ -776,6 +776,20 @@ After that the subscriber sends `subscribe` (may be empty). If `subscribe` is em
 
 On failure it disconnects and reconnects with backoff (the subscriber has its own reconnect loop).
 
+## Encryption and confidentiality overview
+
+Authentication answers "who is this", not "is the content encrypted in transit" — the two are separate in anyproxy, and different content on the same deployment follows different encryption policies depending on which path it takes:
+
+| Content | Encrypted? | Notes |
+|---|---|---|
+| The signaling connection itself (login, `direct` candidate exchange, forward negotiation — everything covered in "Authentication and handshake" above) | Plaintext by default | The anyproxy process only speaks `ws` and has no built-in TLS; turning it into `wss` requires putting a TLS gateway (nginx/caddy, etc.) in front to terminate the certificate — `websocket.client.host` is the Host header field meant for this scenario (see "Configuration fields") |
+| `-send`/`-recv` file-transfer content (see "Two forwarding paths") | End-to-end encrypted, independent of whether the signaling connection has TLS | `-via direct`: native QUIC TLS 1.3 + self-signed certificate fingerprint pinning, data never passes through the server; `-via relay`: an AES-256-GCM key derived at the application layer from the `uuid` in `receive.allow`, the server only relays ciphertext and never sees the plaintext |
+| TCP forwarding content under `server.forward` (path A, path B) | Plaintext by default | Data rides directly on the same `ws` signaling connection, so confidentiality is the same as the first row — without a TLS gateway, forwarded intranet traffic (e.g. SSH) is plaintext as it passes through the server |
+| The `both://` parallel UDP channel of `server.forward` (`nat/relay_udp.go`) | Not encrypted | Server↔subscriber carries a bare header plus bare data, with no extra encryption layer — confidentiality relies entirely on the forwarded protocol itself (e.g. RDP's own DTLS); forwarding some other plaintext UDP protocol means it travels fully exposed |
+| Punching control packets (PUNCH/PONG/WHOAMI/SEEN) | Plaintext by default, AES-256-GCM when `direct.encrypt: true` | See "Encrypting punch control packets" |
+
+Bottom line: **file transfer (`-send`/`-recv`) is end-to-end encrypted regardless of whether it goes via `direct` or `relay` — the server never sees the content.** But login/authentication signaling and plain TCP/UDP port forwarding (`server.forward`) both have confidentiality that depends entirely on whether an extra TLS layer sits in front of `websocket.server.listen`. If a production deployment cares about intermediate nodes not seeing this traffic, put a TLS gateway in front of that port — don't assume anyproxy already handles it.
+
 ## Command-line equivalents
 
 | Parameter | Config item |

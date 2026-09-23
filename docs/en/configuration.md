@@ -10,7 +10,7 @@ This page explains each config section in turn. Routing semantics (`target`/`pro
 
 | Field | Type | Default | Description |
 |------|------|------|------|
-| `listen` | string | `:3000` | Listen address:port; lower priority than `-l`. Set to `off` (or `none`/`-`) to **disable the proxy listener**, running only background services like websocket/tun (pure intranet-penetration scenario, no local proxy port needed). After disabling, the websocket "HTTP header subscription" path stops working (it depends on the local proxy); the "raw TCP forward" is unaffected |
+| `listen` | string | `:3000` | Listen address:port; lower priority than `-l`. Comma-separated to bind multiple complete addresses at once (each needs its own port, e.g. `192.168.1.5:3000,10.0.0.5:3000`), letting you bind several internal-network IPs without listening on `0.0.0.0` or being limited to a single IP. Set to `off` (or `none`/`-`) to **disable the proxy listener**, running only background services like websocket/tun (pure intranet-penetration scenario, no local proxy port needed). After disabling, the websocket "HTTP header subscription" path stops working (it depends on the local proxy); the "raw TCP forward" is unaffected |
 | `network` | string | `tcp` | Listen protocol: `tcp` (v4+v6) / `tcp4` / `tcp6` |
 | `watcher` | bool | false | Whether to watch config file changes and hot-reload `default`/`hosts` |
 | `token` | string | — | Encryption key for communicating with tunneld; any length works as long as both ends match (internally normalized into a 16-byte AES key) |

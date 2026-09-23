@@ -65,7 +65,7 @@ var (
 
 func init() {
 	flag.Usage = help.Usage
-	flag.StringVar(&gListenAddrPort, "l", "", "listen address of socks5 and http proxy")
+	flag.StringVar(&gListenAddrPort, "l", "", "listen address of socks5 and http proxy; comma-separated to bind multiple addresses at once (e.g. 192.168.1.5:3000,10.0.0.5:3000)")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
@@ -250,11 +250,14 @@ func main() {
 	// listen 显式设为 off/none/- 时不起代理监听, 仅跑 websocket/tun 等后台服务
 	// (典型: 纯 websocket 裸TCP穿透, 不需要本机代理端口)。
 	listenOff := isListenOff(gListenAddrPort)
+	// listen 支持逗号分隔写多个地址, 用来同时绑定多个内网网段的具体 IP(比监听 0.0.0.0
+	// 更收敛, 又不必受限于只能绑一个 IP)。
+	var listenAddrs []string
 	if listenOff {
 		gListenAddrPort = ""
 	} else {
-		gListenAddrPort = tools.FillPort(gListenAddrPort)
-		config.SetListenPort(gListenAddrPort)
+		listenAddrs = parseListenAddrs(gListenAddrPort)
+		config.SetListenAddrs(listenAddrs)
 	}
 
 	var writer io.Writer
@@ -321,13 +324,14 @@ func main() {
 			autoRoute = *conf.RouterConfig().Tun.AutoRoute
 		}
 		tunCfg := tun.Config{
-			Name:         conf.RouterConfig().Tun.Name,
-			Addr:         conf.RouterConfig().Tun.Addr,
-			MTU:          conf.RouterConfig().Tun.MTU,
-			AutoRoute:    autoRoute,
-			ExcludeProcs: conf.RouterConfig().Tun.ExcludeProcs,
-			InboundPorts: conf.RouterConfig().Tun.InboundPorts,
-			WindivertDir: conf.RouterConfig().Tun.WindivertDir,
+			Name:          conf.RouterConfig().Tun.Name,
+			Addr:          conf.RouterConfig().Tun.Addr,
+			MTU:           conf.RouterConfig().Tun.MTU,
+			AutoRoute:     autoRoute,
+			ExcludeProcs:  conf.RouterConfig().Tun.ExcludeProcs,
+			RedirectPorts: conf.RouterConfig().Tun.RedirectPorts,
+			InboundPorts:  conf.RouterConfig().Tun.InboundPorts,
+			WindivertDir:  conf.RouterConfig().Tun.WindivertDir,
 			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
 			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
 			BypassIPs: withProxyBypassIPs(conf.RouterConfig().Tun.BypassIPs),
@@ -401,9 +405,21 @@ func main() {
 		waitForShutdown(tunCancel, &tunWG)
 		return
 	}
-	server := grace.NewServer(gListenAddrPort, handler, network)
-	registerTUNCleanup(server, tunCancel, &tunWG)
-	server.ListenAndServe()
+	// 逗号分隔的每个地址各起一个 grace.Server 并发监听; grace 包本身按地址分别
+	// 记录监听 fd(见 socketPtrOffsetMap), SIGHUP 平滑重启时会把所有 fd 一起交给新进程。
+	var serveWG sync.WaitGroup
+	for _, addr := range listenAddrs {
+		server := grace.NewServer(addr, handler, network)
+		registerTUNCleanup(server, tunCancel, &tunWG)
+		serveWG.Add(1)
+		go func(s *grace.Server) {
+			defer serveWG.Done()
+			if err := s.ListenAndServe(); err != nil {
+				log.Println(s.Addr, "listen err:", err)
+			}
+		}(server)
+	}
+	serveWG.Wait()
 }
 
 // isListenOff 判断监听地址是否被显式关闭(off/none/no/disable/-, 大小写不敏感)。
@@ -414,6 +430,28 @@ func isListenOff(s string) bool {
 		return true
 	}
 	return false
+}
+
+// parseListenAddrs 把 -l/listen 配置解析成实际要监听的地址列表: 支持用逗号分隔写多个
+// 完整地址(如 "192.168.1.5:3000,10.0.0.5:3000"), 用来同时绑定多个内网网段的具体 IP,
+// 既不必监听 0.0.0.0(*) 那么宽, 也不受限于只能绑一个 IP。每个地址单独走 FillPort 补全
+// (只写纯数字端口才会补成 ":端口" 通配地址), 不会跨地址互相补全 host/port。
+func parseListenAddrs(spec string) []string {
+	var addrs []string
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		part = tools.FillPort(part)
+		if seen[part] {
+			continue
+		}
+		seen[part] = true
+		addrs = append(addrs, part)
+	}
+	return addrs
 }
 
 // waitForShutdown 在关闭代理监听时替代 grace server 的阻塞并处理信号:
@@ -462,12 +500,15 @@ func restartSelf() error {
 }
 
 // notifyOldProcessExit 在「端口 -> listen off」的 SIGHUP 重启里补上 grace.Server
-// 原本在 ListenAndServe() 里做的握手: 关掉从旧进程继承来但用不上的监听 fd(固定为
-// fd 3, 本项目只有一个 grace 监听, 单监听场景 grace 也是这样假设 offset=0 的),
+// 原本在 ListenAndServe() 里做的握手: 关掉从旧进程继承来但用不上的监听 fd(从 fd 3 起
+// 连续排列, 数量按 grace.InheritedFDCount() 来定, 旧进程配过几个 listen 地址就有几个,
+// 不能只关 fd 3——否则 listen 配了多个地址时会漏关、泄漏 fd),
 // 再给旧进程发 SIGTERM 让它退出、释放端口。不这样做旧进程会一直占着端口不退出。
 func notifyOldProcessExit() {
-	if f := os.NewFile(3, ""); f != nil {
-		f.Close()
+	for i := 0; i < grace.InheritedFDCount(); i++ {
+		if f := os.NewFile(uintptr(3+i), ""); f != nil {
+			f.Close()
+		}
 	}
 	ppid := os.Getppid()
 	if ppid <= 1 { // 安全检查, 避免误杀 init/被收养的孤儿进程

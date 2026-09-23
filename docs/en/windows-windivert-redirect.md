@@ -41,7 +41,21 @@ WinDivert registers a filter at the Windows kernel network layer, intercepting a
 optimized to the simplest level by level, to ensure compatibility across WinDivert versions.
 
 In non-all-ports mode, the filter only captures TCP packets whose destination port is in `RedirectPorts`
-(default 80, 443), plus return packets whose source port equals `ProxyPort` (the proxy→application return traffic).
+(default 80, 443; extra ports can be configured via `tun.windows.redirectPorts`, e.g. a remote service on 5000),
+plus return packets whose source port equals `ProxyPort` (the proxy→application return traffic).
+
+```yaml
+mode: tun
+tun:
+  windows:
+    redirectPorts: [80, 443, 5000]   # overrides the default — list every port you need
+```
+
+Note: connections whose destination is loopback (`127.0.0.1`/`::1`) are **always sent direct** and never
+reach the `redirectPorts` check — this is the loop-protection design (see "Two connections and the direct
+decision" below). There is no configuration that makes WinDivert intercept connections to `localhost:port`
+on the local machine; `redirectPorts` only applies to connections whose destination is another host/remote
+server.
 
 ### 2. process() decision and classification
 

@@ -143,6 +143,10 @@ Client proxy settings: point your OS / browser proxy at the anyproxy listen port
 
 Full table of contents see [docs/README.md](docs/en/README.md).
 
+## Disclaimer
+
+anyproxy is a general-purpose traffic forwarding and NAT-traversal tool, built for legitimate connectivity needs — routing traffic by domain, remote access to your own devices behind NAT, bridging services across private networks, ad-hoc file transfer, and similar. **It is not designed for, and is not well-suited to, circumventing network censorship or accessing restricted content**; any consequences arising from such use are the user's own and not the project's or its author's.
+
 ## License
 
 [MIT](LICENSE) © [keminar](https://github.com/keminar)

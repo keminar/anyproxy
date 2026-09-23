@@ -52,8 +52,14 @@ var DebugLevel int
 // 绕开一条路径上的问题而牺牲其它路径本来正常的快速路径。
 var DirectPlainUDP bool
 
-// ListenPort 监听端口
+// ListenPort 监听端口。多地址(ListenAddrs)时取第一个地址的端口, 供只关心"一个端口"
+// 的场景使用(回环拨号默认地址、pprof/日志文件名等)。
 var ListenPort uint16
+
+// ListenAddrs 代理实际监听的全部地址(host:port)。支持在 -l/配置文件 listen 里用逗号
+// 分隔写多个地址, 用来同时绑定多个内网网段的具体 IP, 而不必监听 0.0.0.0(*) 那么宽,
+// 也不受限于只能绑一个 IP。
+var ListenAddrs []string
 
 // TUNBypassDev TUN 模式下出向连接绑定的物理网卡名（Linux SO_BINDTODEVICE 用）。
 var TUNBypassDev string
@@ -152,6 +158,32 @@ func SetListenPort(gListenAddrPort string) {
 		log.Printf("SetListenPort err %s\n", err.Error())
 	}
 	ListenPort = uint16(intNum)
+}
+
+// SetListenAddrs 设置代理实际监听的地址列表。ListenPort 取第一个地址的端口。
+func SetListenAddrs(addrs []string) {
+	ListenAddrs = addrs
+	if len(addrs) == 0 {
+		ListenPort = 0
+		return
+	}
+	SetListenPort(addrs[0])
+}
+
+// IsListenPort 判断端口是否是本进程某个监听地址的端口。用于死循环检测(代理请求
+// 打回自己的监听器); ListenAddrs 可能有多个不同端口, 不能只比较 ListenPort。
+func IsListenPort(port uint16) bool {
+	if port == 0 {
+		return false
+	}
+	for _, addr := range ListenAddrs {
+		intStr := tools.GetPort(addr)
+		intNum, err := strconv.Atoi(intStr)
+		if err == nil && uint16(intNum) == port {
+			return true
+		}
+	}
+	return false
 }
 
 // IfEmptyThen 取值

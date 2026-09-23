@@ -142,7 +142,7 @@ func genHead(mode string) string {
 
 func genBase(mode string) string {
 	listen := ":3000"
-	listenNote := "# 代理监听地址端口, 优先级低于启动传参 -l。填 off 则不起代理监听, 只跑 websocket/tun 等后台服务"
+	listenNote := "# 代理监听地址端口, 优先级低于启动传参 -l。可逗号分隔写多个完整地址(各自带端口), 同时绑定多个内网网段 IP。填 off 则不起代理监听, 只跑 websocket/tun 等后台服务"
 	if mode == "tunnel" {
 		listen = ":3001"
 		listenNote = "# tunneld 服务端监听地址端口, 客户端用 -p tunnel://<本机IP>:3001 指过来"

@@ -657,7 +657,7 @@ func (s *tunnel) handshake(proto string, dstName, dstIP string, dstPort uint16) 
 // isSelfProxy 判断配置的上游代理是否就是本进程自己的监听地址(回环/本机IP + 监听端口)。
 // 是则代理请求会打回自己的监听器、被再次转发, 形成应用层死循环。
 func isSelfProxy(server string, port uint16) bool {
-	if config.ListenPort == 0 || port != config.ListenPort {
+	if !config.IsListenPort(port) {
 		return false
 	}
 	ip := net.ParseIP(server)
