@@ -288,12 +288,22 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 			saved, err = send(it, p.update)
 		}
 		p.done()
+		shown := p.wasShown()
 		if err != nil {
 			return fmt.Errorf("%s: %w", it.name, err)
 		}
 		sentBytes += it.size
-		fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
-			humanBytes(it.size), time.Since(start).Round(time.Millisecond), rate(it.size, time.Since(start)))
+		// 文件名已经在进度行上头单独打印过一遍的话(shown), 这里不再重复念它, 只续
+		// 接一句结果——不然"[1/1] x.zip"和"[1/1] x.zip -> x.zip (...)"连着出现,
+		// 看着像打印了两遍同一个文件名。没渲染过进度(文件小, 走得比第一个
+		// progressTick 还快)的话, 文件名唯一露面的机会就是这一行, 照旧带上。
+		if shown {
+			fmt.Fprintf(os.Stderr, "  -> %s  (%s in %s, %s)\n", saved,
+				humanBytes(it.size), time.Since(start).Round(time.Millisecond), rate(it.size, time.Since(start)))
+		} else {
+			fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
+				humanBytes(it.size), time.Since(start).Round(time.Millisecond), rate(it.size, time.Since(start)))
+		}
 	}
 	fmt.Fprintf(os.Stderr, "done: %d file(s), %s%s\n", len(items)-skipped, humanBytes(sentBytes), skippedNote(skipped))
 	for i, sess := range quicStats {
@@ -429,8 +439,8 @@ func sendParallel(it fileItem, workers int,
 		return "", fmt.Errorf("generate transfer id: %w", err)
 	}
 	// 进度按 worker(也就是按连接)算, 不是按 chunk 算——一个 worker 干完一片接着领
-	// 下一片, conn1/conn2/... 这几栏该是"这条连接迄今为止总共传了多少", 不是"当前
-	// 这一片传了多少"(片与片之间切换不该让进度条看着往回跳)。
+	// 下一片, c1/c2/... 这几栏该是"这条连接迄今为止总共传了多少", 不是"当前这一片
+	// 传了多少"(片与片之间切换不该让进度条看着往回跳)。
 	cp := newChunkProgress(workers, p)
 	saved, err := runChunkWorkers(it.size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
 		return sendChunk(w, it, offset, length, tid, idx, onProgress)
@@ -489,7 +499,7 @@ func (c *chunkProgress) setPieceSize(i int, length int64) {
 	c.mu.Unlock()
 }
 
-// summary 渲染"connN: 已传 瞬时速率"这一串, 并把总速率也一并算出来返回, 按
+// summary 渲染"cN: 已传 瞬时速率"这一串, 并把总速率也一并算出来返回, 按
 // progress.render() 的节奏(progressTick)调用一次——窗口跟总速率的计算对齐, 不是
 // 从头到现在的累计平均, 理由与 progress.render() 一致: 排查"是不是某条连接被
 // 限速/拥塞退避"要看的是"现在多快", 不是平均值。
@@ -511,11 +521,18 @@ func (c *chunkProgress) summary() (line string, totalRate string) {
 		}
 		delta := sent - c.lastEach[i]
 		totalDelta += delta
-		// %-8s/%-10s: 固定最小宽度, 数值变短时用空格补齐——不然"0B/s"跟"23.7MB/s"
-		// 长度差一大截, 每次刷新后面的文字都要跟着左右挪, 看着比较闹心。piece(当前
-		// 这一片的大小)放最后, 不参与宽度对齐——它比字节数/速率稳定得多(同一个
-		// worker 好几次渲染之间通常还在传同一片), 不值得为它也留固定宽度。
-		fmt.Fprintf(&b, "conn%d: %-8s %-10s piece=%s", i+1, humanBytes(sent), rate(delta, elapsed), humanBytes(c.piece[i]))
+		// "c%d:" 而不是 "conn%d:"——每条连接都要占一遍这个标签, 4 条连接下来省的
+		// 宽度很可观, 标签本身没什么信息量, 认得出是第几条连接就够了。
+		//
+		// 两个 %-8s: 固定最小宽度, 数值变短时用空格补齐——不然"0B/s"跟"23.7MB/s"长度
+		// 差一大截, 每次刷新后面的文字都要跟着左右挪, 看着比较闹心。8 是常见速率
+		// (KB/s~几百MB/s)的字面宽度, 只比它们略宽一点点, 不像更早给到 10 那样在
+		// "0B/s"这类短值后面拖出一大截空白——GB/s 这种更长的值本来就不常见, 且
+		// %-8s 只规定最小宽度, 真出现了也不会被截断, 只是不再帮着对齐。当前这一片
+		// 的大小放最后, 用括号而不是 "piece=" 这样的文字标签, 理由同上; 不参与宽度
+		// 对齐, 是因为它比字节数/速率稳定得多(同一个 worker 好几次渲染之间通常还在
+		// 传同一片)。
+		fmt.Fprintf(&b, "c%d: %-8s %-8s (%s)", i+1, humanBytes(sent), rate(delta, elapsed), humanBytes(c.piece[i]))
 	}
 	copy(c.lastEach, c.each)
 	c.lastAt = now
@@ -530,6 +547,11 @@ func (c *chunkProgress) summary() (line string, totalRate string) {
 const progressTick = 1 * time.Second
 
 // progress 单个文件的进度条, 输出到 stderr。
+//
+// 两行: 文件名(prefix)单独占一行, 只在第一次真正渲染时打印一次, 之后不再刷新——
+// 名字本来就不会变, 没必要跟着进度行一起被 \r 反复重画; 总进度/速率(以及分块并行
+// 时每条连接的明细)在它下面那一行, 用 \r 原地刷新, 不牵动上面那行, 不需要 ANSI
+// 的"光标上移"这类要求终端支持 VT 的转义序列。
 //
 // update() 只负责记一个最新的 sent 值, 真正渲染在 newProgress 起的后台 goroutine
 // 里按 progressTick 定时进行, 二者用 mu 解耦——中继路径下 update 现在是从
@@ -609,9 +631,13 @@ func (p *progress) render() {
 	instRate := rate(sent-p.lastSent, now.Sub(p.last))
 	p.lastSent = sent
 	p.last = now
+	firstRender := !p.shown // 文件名那一行只在第一次真正渲染时打印, 见 progress 的说明。
 	p.shown = true
 	connLine := p.connLine
 	p.mu.Unlock()
+	if firstRender {
+		fmt.Fprintln(os.Stderr, p.prefix)
+	}
 	pct := 0.0
 	if p.total > 0 {
 		pct = float64(sent) * 100 / float64(p.total)
@@ -628,10 +654,10 @@ func (p *progress) render() {
 	}
 	// sent 右对齐到 sentW(即 total 那串的宽度): total 从头到尾不变, 这个宽度是
 	// 提前量好的, 不用像固定给个 8 那样留一截用不上的空白——sent 从不会比 total
-	// 长多少, 贴着"/"对齐比左对齐留一堆尾随空格好看。速率那两项(instRate 与
-	// connLine 里的)长度还是会变(0B/s ~ 23.7MB/s 这种), 固定给 %-9s 兜住。
-	fmt.Fprintf(os.Stderr, "\r%s  %*s/%s  %6.1f%%  %-9s%s   ",
-		p.prefix, p.sentW, humanBytes(sent), p.totalStr, pct, instRate, extra)
+	// 长多少, 贴着"/"对齐比左对齐留一堆尾随空格好看。总速率长度还是会变(0B/s ~
+	// 23.7MB/s 这种), 固定给 %-8s 兜住(理由与宽度取值同 chunkProgress.summary)。
+	fmt.Fprintf(os.Stderr, "\r  %*s/%s  %6.1f%%  %-8s%s   ",
+		p.sentW, humanBytes(sent), p.totalStr, pct, instRate, extra)
 }
 
 // done 收尾: 先停掉渲染 goroutine 并等它退出(避免和下面的擦行打印互相踩踏), 再把
@@ -654,11 +680,24 @@ func (p *progress) done() {
 		p.mu.Unlock()
 		if shown {
 			// 200: 单连接那行不到 100 就够了, 但分块并行时 connLine 会在后面加上
-			// "connN: 已传 速率" 这样的片段, 4 条连接能把整行拉到一百七八十字符,
-			// 擦得不够宽会在终端上留下没盖住的尾巴。
+			// "cN: 已传 速率" 这样的片段, 4 条连接能把整行拉到一百多字符, 擦得不够
+			// 宽会在终端上留下没盖住的尾巴。
 			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 200))
 		}
 	})
+}
+
+// wasShown 报告这次传输过程中有没有实际渲染过至少一次进度行(见 render 里
+// firstRender 的说明)。调用方(SendFiles/RecvFiles)拿它决定收尾那行要不要再重复一遍
+// 文件名: 渲染过, 文件名已经单独占一行打印过, 收尾不用再念一遍, 看着重复; 没渲染过
+// (文件小/传得比第一个 progressTick 还快), 文件名唯一露面的机会就是收尾这一行, 不能
+// 省。放在 done() 之后调用能确保渲染 goroutine 已经彻底停了、读到的是最终值, 但
+// shown 本身只会 false->true 单向翻转, 提前调用最多是那种"传输和下一个 tick 前后脚
+// 完成"的边界上偶尔多打印一遍文件名, 不会读到错误的历史值。
+func (p *progress) wasShown() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.shown
 }
 
 func rate(n int64, d time.Duration) string {

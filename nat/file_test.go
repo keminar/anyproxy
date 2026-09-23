@@ -1179,20 +1179,20 @@ func TestChunkProgressSummaryShowsPieceSize(t *testing.T) {
 	cp.update(1, 2000)
 
 	line, _ := cp.summary()
-	if !strings.Contains(line, "piece="+humanBytes(2*1024*1024)) {
+	if !strings.Contains(line, "("+humanBytes(2*1024*1024)+")") {
 		t.Fatalf("summary %q missing conn1's piece size", line)
 	}
-	if !strings.Contains(line, "piece="+humanBytes(6*1024*1024)) {
+	if !strings.Contains(line, "("+humanBytes(6*1024*1024)+")") {
 		t.Fatalf("summary %q missing conn2's piece size", line)
 	}
 
 	// 换了一片之后展示的应该是新的那个大小, 不是停留在上一片。
 	cp.setPieceSize(0, 3*1024*1024)
 	line, _ = cp.summary()
-	if !strings.Contains(line, "piece="+humanBytes(3*1024*1024)) {
+	if !strings.Contains(line, "("+humanBytes(3*1024*1024)+")") {
 		t.Fatalf("summary %q did not pick up the new piece size", line)
 	}
-	if strings.Contains(line, "piece="+humanBytes(2*1024*1024)) {
+	if strings.Contains(line, "("+humanBytes(2*1024*1024)+")") {
 		t.Fatalf("summary %q still shows the stale piece size", line)
 	}
 }

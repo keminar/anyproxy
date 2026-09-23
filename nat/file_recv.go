@@ -259,14 +259,22 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 			}
 		}
 		p.done()
+		shown := p.wasShown()
 		if err != nil {
 			// 与 -send 一致: 中途出错就停下并报错退出, 不跳过继续取剩下的 —— 半份
 			// 目录静默地"成功"了, 比明确失败坏得多。
 			return fmt.Errorf("%s: %w", e.Name, err)
 		}
 		gotBytes += e.Size
-		fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
-			humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
+		// 见 file_send.go 同一处的注释: 文件名已经在进度行上头单独打印过的话不再
+		// 重复念它, 只续接结果; 没渲染过进度的话照旧带上文件名。
+		if shown {
+			fmt.Fprintf(os.Stderr, "  -> %s  (%s in %s, %s)\n", saved,
+				humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
+		} else {
+			fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
+				humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
+		}
 	}
 	fmt.Fprintf(os.Stderr, "done: %d file(s), %s%s\n", len(entries)-skipped, humanBytes(gotBytes), skippedNote(skipped))
 	return nil
