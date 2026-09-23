@@ -5,11 +5,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1004,44 +1008,251 @@ func TestShortSum(t *testing.T) {
 
 // ---------- 单文件分块并行传输 ----------
 
-func TestPlanChunks(t *testing.T) {
-	// want<=1 或文件太小: 不切块, 退回单连接路径。
-	if got := planChunks(10*chunkMinSize, 1); got != nil {
-		t.Fatalf("want=1 should not split, got %v", got)
-	}
-	if got := planChunks(2*chunkMinSize-1, 4); got != nil {
-		t.Fatalf("a file just under 2*chunkMinSize should not split, got %v", got)
-	}
+func TestChunkCursorClaim(t *testing.T) {
+	size := int64(5*probeChunkSize) + 777
+	c := newChunkCursor(size)
 
-	// 正好两倍最小块: 切两块。
-	chunks := planChunks(2*chunkMinSize, 4)
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
-	}
-
-	// want 超过文件能切出的块数时按能切多少切多少, 不会切出小于 chunkMinSize 的块
-	// (最后一块拿余数除外)。
-	size := int64(5*chunkMinSize) + 777
-	chunks = planChunks(size, 8)
-	if len(chunks) != 5 {
-		t.Fatalf("expected 5 chunks (capped by chunkMinSize), got %d: %v", len(chunks), chunks)
-	}
-
-	// 分块必须首尾相接、覆盖整个文件, 不重叠、不漏字节, 最后一块拿余数。
 	var off int64
 	var total int64
-	for i, c := range chunks {
-		if c.offset != off {
-			t.Fatalf("chunk %d starts at %d, want %d", i, c.offset, off)
+	seenIdx := map[int]bool{}
+	for {
+		offset, length, idx, ok := c.claim(probeChunkSize)
+		if !ok {
+			break
 		}
-		if i < len(chunks)-1 && c.length < chunkMinSize {
-			t.Fatalf("chunk %d is smaller than chunkMinSize: %d", i, c.length)
+		if offset != off {
+			t.Fatalf("claim starts at %d, want %d", offset, off)
+		}
+		if seenIdx[idx] {
+			t.Fatalf("idx %d handed out twice", idx)
+		}
+		seenIdx[idx] = true
+		off += length
+		total += length
+	}
+	if total != size {
+		t.Fatalf("claimed %d bytes total, want %d", total, size)
+	}
+	// 耗尽之后继续认领应该一直是 ok=false, 不panic、不越界。
+	if _, _, _, ok := c.claim(probeChunkSize); ok {
+		t.Fatal("claim after exhaustion should return ok=false")
+	}
+
+	// 最后一片必须 clamp 到剩余字节数, 不能超发。
+	c2 := newChunkCursor(10)
+	_, length, _, ok := c2.claim(7)
+	if !ok || length != 7 {
+		t.Fatalf("first claim(7) on a 10-byte file = length %d ok %v, want 7 true", length, ok)
+	}
+	_, length, _, ok = c2.claim(7)
+	if !ok || length != 3 {
+		t.Fatalf("second claim(7) on a 10-byte file should clamp to the remaining 3, got length %d ok %v", length, ok)
+	}
+	if _, _, _, ok := c2.claim(7); ok {
+		t.Fatal("claiming a fully-claimed cursor should return ok=false")
+	}
+
+	// size==0 的文件不应该产生任何一次成功的认领。
+	if _, _, _, ok := newChunkCursor(0).claim(probeChunkSize); ok {
+		t.Fatal("claim on a zero-size file should return ok=false")
+	}
+}
+
+func TestChunkCursorClaimConcurrent(t *testing.T) {
+	const size = 97 * 1024 // 不对齐任何一档分片大小, 顺带盖住"最后一片拿余数"。
+	c := newChunkCursor(size)
+
+	type claim struct{ offset, length int64 }
+	results := make(chan claim, 64)
+	idxCh := make(chan int, 64)
+
+	var wg sync.WaitGroup
+	sizes := []int64{997, 1500, 2048, 4096} // 模拟不同 worker 选了不同的分片大小
+	for _, want := range sizes {
+		wg.Add(1)
+		go func(want int64) {
+			defer wg.Done()
+			for {
+				offset, length, idx, ok := c.claim(want)
+				if !ok {
+					return
+				}
+				results <- claim{offset, length}
+				idxCh <- idx
+			}
+		}(want)
+	}
+	wg.Wait()
+	close(results)
+	close(idxCh)
+
+	var claims []claim
+	for r := range results {
+		claims = append(claims, r)
+	}
+	sort.Slice(claims, func(i, j int) bool { return claims[i].offset < claims[j].offset })
+
+	var off, total int64
+	for i, cl := range claims {
+		if cl.offset != off {
+			t.Fatalf("claim %d starts at %d, want %d (gap or overlap)", i, cl.offset, off)
+		}
+		off += cl.length
+		total += cl.length
+	}
+	if total != size {
+		t.Fatalf("claimed %d bytes total, want %d", total, size)
+	}
+
+	seen := map[int]bool{}
+	for idx := range idxCh {
+		if seen[idx] {
+			t.Fatalf("idx %d handed out to more than one claim", idx)
+		}
+		seen[idx] = true
+	}
+}
+
+func TestChunkSizeForRate(t *testing.T) {
+	const KB, MB = 1 << 10, 1 << 20
+	cases := []struct {
+		rate float64
+		want int64
+	}{
+		{0, 2 * MB},
+		{50 * KB, 2 * MB},
+		{100 * KB, 3 * MB}, // 下边界落进更快那档
+		{150 * KB, 3 * MB},
+		{200 * KB, 6 * MB},
+		{300 * KB, 6 * MB},
+		{500 * KB, 15 * MB},
+		{800 * KB, 15 * MB},
+		{1 * MB, 30 * MB},
+		{10 * MB, 30 * MB},
+	}
+	for _, c := range cases {
+		if got := chunkSizeForRate(c.rate); got != c.want {
+			t.Errorf("chunkSizeForRate(%v) = %d, want %d", c.rate, got, c.want)
+		}
+	}
+}
+
+func TestWorkerChunkSize(t *testing.T) {
+	if got := workerChunkSize(3<<20, 0); got != chunkSizeMax {
+		t.Fatalf("elapsed<=0 should fall back to chunkSizeMax, got %d", got)
+	}
+	if got := workerChunkSize(3<<20, -time.Second); got != chunkSizeMax {
+		t.Fatalf("negative elapsed should fall back to chunkSizeMax, got %d", got)
+	}
+	// 3MiB 用了 1 秒钟, 吞吐 3MiB/s, 应该落进 >=1MB/s 那档(30MiB)。
+	if got := workerChunkSize(3<<20, time.Second); got != chunkSizeMax {
+		t.Fatalf("workerChunkSize(3MiB, 1s) = %d, want %d", got, chunkSizeMax)
+	}
+}
+
+func TestWantParallel(t *testing.T) {
+	if wantParallel(10*probeChunkSize, 1) {
+		t.Fatal("workers<=1 should never want parallel, regardless of size")
+	}
+	if wantParallel(2*probeChunkSize-1, 4) {
+		t.Fatal("a file just under 2*probeChunkSize should not want parallel")
+	}
+	if !wantParallel(2*probeChunkSize, 4) {
+		t.Fatal("a file exactly 2*probeChunkSize should want parallel (boundary is inclusive)")
+	}
+	if !wantParallel(10*probeChunkSize, 2) {
+		t.Fatal("a clearly large file with workers=2 should want parallel")
+	}
+}
+
+func TestRunChunkWorkersCoverage(t *testing.T) {
+	const size = 10 * probeChunkSize
+	const workers = 3
+
+	type claim struct{ offset, length int64 }
+	var mu sync.Mutex
+	var claims []claim
+	firstLength := make([]int64, workers)
+	for i := range firstLength {
+		firstLength[i] = -1
+	}
+
+	p := newProgress("test", size)
+	defer p.done()
+	cp := newChunkProgress(workers, p)
+
+	do := func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		mu.Lock()
+		claims = append(claims, claim{offset, length})
+		if firstLength[w] == -1 {
+			firstLength[w] = length
+		}
+		mu.Unlock()
+		onProgress(length)
+		return "", nil
+	}
+
+	if _, err := runChunkWorkers(size, workers, cp, do); err != nil {
+		t.Fatalf("runChunkWorkers: %v", err)
+	}
+
+	sort.Slice(claims, func(i, j int) bool { return claims[i].offset < claims[j].offset })
+	var off, total int64
+	for i, c := range claims {
+		if c.offset != off {
+			t.Fatalf("claim %d starts at %d, want %d (gap or overlap)", i, c.offset, off)
 		}
 		off += c.length
 		total += c.length
 	}
 	if total != size {
-		t.Fatalf("chunks cover %d bytes, want %d", total, size)
+		t.Fatalf("claimed %d bytes total, want %d", total, size)
+	}
+	for w, l := range firstLength {
+		want := int64(probeChunkSize)
+		if l == -1 {
+			continue // 这个 worker 没抢到任何活, 可能发生(见 wantParallel/claim 的边界)
+		}
+		if l > want {
+			t.Errorf("worker %d's first claim was %d bytes, want <= probeChunkSize(%d)", w, l, want)
+		}
+	}
+}
+
+func TestRunChunkWorkersErrorStopsOtherWorkers(t *testing.T) {
+	const size = 10 * probeChunkSize
+	const workers = 3
+
+	p := newProgress("test", size)
+	defer p.done()
+	cp := newChunkProgress(workers, p)
+
+	var claimed int64
+	do := func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		atomic.AddInt64(&claimed, length)
+		if offset == 0 {
+			// 认领游标严格按字节顺序发号, 第一个成功认领到的分片永远是 offset==0
+			// 这一片(不论被哪个 worker 抢到), 让它立刻失败, 不需要猜是哪个 worker。
+			return "", errors.New("simulated failure")
+		}
+		// do 是假操作, 瞬间就能把整份文件认领完——真实场景里"其它 worker 别再领
+		// 新的一片"的信号来得及被看到, 是因为真实的一片传输本身要花时间; 这里用
+		// 一点延迟模拟同样的时间窗口, 让失败信号有机会先传播到, 断言才有意义
+		// (否则文件可能在出错的那个 goroutine 设好 firstErr 之前就已经被认领光了)。
+		time.Sleep(5 * time.Millisecond)
+		onProgress(length)
+		return "", nil
+	}
+
+	_, err := runChunkWorkers(size, workers, cp, do)
+	if err == nil {
+		t.Fatal("expected an error to propagate from runChunkWorkers")
+	}
+	// 出错之后不应该把整份文件都认领完——虽然已经在飞的那几片会跑完, 但错误发生后
+	// 不会再有新的认领。跑完的总量必须明显小于文件全长(否则说明其它 worker 没有
+	// 及时停手)。
+	if got := atomic.LoadInt64(&claimed); got >= size {
+		t.Fatalf("claimed %d bytes out of %d after a failure, workers did not stop claiming new work", got, size)
 	}
 }
 
@@ -1051,8 +1262,8 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 	recvDir := t.TempDir()
 	srcDir := t.TempDir()
 
-	// 凑一个不对齐 chunkMinSize 的大小, 顺带盖住"最后一块拿余数"。
-	body := make([]byte, 5*chunkMinSize+777)
+	// 凑一个不对齐 probeChunkSize 的大小, 顺带盖住"最后一块拿余数"。
+	body := make([]byte, 5*probeChunkSize+777)
 	if _, err := rand.Read(body); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -1085,19 +1296,18 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	it := items[0]
-	chunks := planChunks(it.size, 3)
-	if len(chunks) < 2 {
-		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	if !wantParallel(it.size, 3) {
+		t.Fatalf("expected the test file (%d bytes) to be big enough for parallel chunking", it.size)
 	}
 
 	p := newProgress("test", it.size)
 	// 必须停掉它的渲染 goroutine: 漏掉的话它会一直往 stderr 刷进度行到进程结束,
 	// 把后面用例的输出和失败信息冲乱(见 progress.done 的说明)。
 	defer p.done()
-	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
-		return a.sendFileChunk(sess, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
+		return a.sendFileChunk(sess, it, offset, length, tid, chunkIdx, onProgress)
 	}
-	saved, err := sendParallel(it, chunks, 3, sendChunk, p)
+	saved, err := sendParallel(it, 3, sendChunk, p)
 	if err != nil {
 		t.Fatalf("chunked send: %v", err)
 	}
@@ -1139,7 +1349,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	recvDir := t.TempDir()
 	srcDir := t.TempDir()
 
-	body := make([]byte, 4*chunkMinSize)
+	body := make([]byte, 4*probeChunkSize)
 	if _, err := rand.Read(body); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -1172,7 +1382,19 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	it := items[0]
-	chunks := planChunks(it.size, 4)
+	cursor := newChunkCursor(it.size)
+	type chunk struct {
+		offset, length int64
+		idx            int
+	}
+	var chunks []chunk
+	for {
+		offset, length, idx, ok := cursor.claim(it.size / 4)
+		if !ok {
+			break
+		}
+		chunks = append(chunks, chunk{offset, length, idx})
+	}
 	if len(chunks) < 2 {
 		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
 	}
@@ -1186,7 +1408,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	var firstErr error
 	for i, ch := range chunks {
 		wg.Add(1)
-		go func(i int, ch chunkRange) {
+		go func(i int, ch chunk) {
 			defer wg.Done()
 			stream, err := a.openFileStream(sess)
 			if err != nil {
@@ -1201,7 +1423,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 			if i == 1 { // 只破坏中间那一块, 其余块本身都是完整正确的。
 				conn = &corruptOnceConn{fileConn: stream}
 			}
-			if _, err := sendFileOverRange(conn, it, ch.offset, ch.length, tid, i, len(chunks), nil); err != nil {
+			if _, err := sendFileOverRange(conn, it, ch.offset, ch.length, tid, ch.idx, nil); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -1222,5 +1444,70 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(dest + ".*" + filePartSuffix); len(matches) != 0 {
 		t.Fatalf("a failed chunked transfer must not leave the .part file behind: %v", matches)
+	}
+}
+
+// TestChunkAssemblyByteCompletion 专门证明分块拼接靠"收到的字节数是否等于整份文件
+// 大小"判断是否收全, 不依赖任何固定片数——三片大小(7/13/5 字节)互不相等、也不是
+// probeChunkSize 的整数倍, 旧的"块数倒计数"模型根本无从谈起, 这正是这次改动要验证
+// 的行为(见 nat/file.go 的 chunkAssembly)。用 sendFileOverRange(客户端)配
+// recvFileOver(服务端)在内存管道上跑, 不需要真实网络。
+func TestChunkAssemblyByteCompletion(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := []byte("abcdefghijklmnopqrstuvwxy") // 25 字节, 切成 7+13+5
+	srcPath := filepath.Join(srcDir, "small.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+	ranges := []struct{ offset, length int64 }{
+		{0, 7}, {7, 13}, {20, 5},
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for i, r := range ranges {
+		wg.Add(1)
+		go func(i int, offset, length int64) {
+			defer wg.Done()
+			aSide, cSide := net.Pipe()
+			go func() {
+				defer cSide.Close()
+				recvFileOver(cSide, recvDir, "a@example.com", "test", func(string, ...interface{}) {}, recvOpts{}, nil)
+			}()
+			if _, err := sendFileOverRange(aSide, it, offset, length, tid, i, nil); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(i, r.offset, r.length)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("chunked send: %v", firstErr)
+	}
+
+	got, err := os.ReadFile(filepath.Join(recvDir, "small.bin"))
+	if err != nil {
+		t.Fatalf("read received: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("received %q, want %q", got, body)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "small.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("the .part file was left behind: %v", matches)
 	}
 }

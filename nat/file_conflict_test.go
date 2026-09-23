@@ -661,7 +661,7 @@ func TestInterruptedReceiveKeepsPart(t *testing.T) {
 
 // 分块覆盖: 成功时替换已有文件; 有一块出错时已有文件必须原封不动。
 func TestChunkedOverwrite(t *testing.T) {
-	body := make([]byte, 4*chunkMinSize)
+	body := make([]byte, 4*probeChunkSize)
 	if _, err := rand.Read(body); err != nil {
 		t.Fatal(err)
 	}
@@ -694,13 +694,25 @@ func TestChunkedOverwrite(t *testing.T) {
 		items, _ := collectFiles([]string{srcPath})
 		it := items[0]
 		it.conflict = ConflictOverwrite
-		chunks := planChunks(it.size, 4)
+		cursor := newChunkCursor(it.size)
+		type chunk struct {
+			offset, length int64
+			idx            int
+		}
+		var chunks []chunk
+		for {
+			offset, length, idx, ok := cursor.claim(it.size / 4)
+			if !ok {
+				break
+			}
+			chunks = append(chunks, chunk{offset, length, idx})
+		}
 		tid, _ := newTransferID()
 		var wg sync.WaitGroup
 		var mu sync.Mutex
 		for i, ch := range chunks {
 			wg.Add(1)
-			go func(i int, ch chunkRange) {
+			go func(i int, ch chunk) {
 				defer wg.Done()
 				stream, oerr := a.openFileStream(sess)
 				var e error = oerr
@@ -709,7 +721,7 @@ func TestChunkedOverwrite(t *testing.T) {
 					if corrupt && i == 1 {
 						conn = &corruptOnceConn{fileConn: stream}
 					}
-					_, e = sendFileOverRange(conn, it, ch.offset, ch.length, tid, i, len(chunks), nil)
+					_, e = sendFileOverRange(conn, it, ch.offset, ch.length, tid, ch.idx, nil)
 				}
 				if e != nil {
 					mu.Lock()

@@ -7,8 +7,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/keminar/anyproxy/config"
@@ -64,8 +62,9 @@ func splitRecvSpec(recv string) (email, remotePath string, err error) {
 // to 是本地存放目录, 与 -send 的 -to 共用同一个命令行参数、按场景解释成不同的东西:
 // -send 时是"发给谁", -recv 时是"存哪儿"。留空则存到当前目录。
 //
-// parallel 与 SendFiles 同一个参数、同一个阈值判断(见 planChunks): 单个文件够大时
-// 按 e.Size(清单里已经有, 不用额外问一次)切块, 各开一条独立连接并行取。
+// parallel 与 SendFiles 同一个参数、同一个阈值判断(见 wantParallel): 单个文件够大时
+// 按 e.Size(清单里已经有, 不用额外问一次)分块, 各开一条独立连接并行取, 每条连接
+// 按自己实测的速度动态决定分片大小(见 chunkSizeForRate)。
 //
 // conflict 是本机已有同名文件时的处理方式(见 ParseConflict 与 file_conflict.go): 空串表示
 // 终端里逐个询问、否则自动改名。
@@ -244,8 +243,8 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, plan)
 				conn.Close()
 			}
-		} else if chunks := planChunks(e.Size, chunkTarget(workers)); chunks != nil {
-			saved, err = recvParallel(openPullChunk, workers, dir, e, from, remote, logf, chunks, act, p)
+		} else if wantParallel(e.Size, workers) {
+			saved, err = recvParallel(openPullChunk, workers, dir, e, from, remote, logf, act, p)
 		} else {
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
@@ -267,79 +266,33 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict s
 	return nil
 }
 
-// recvParallel 把一个文件切成比连接数更多、更细的 chunks, 派 workers 个 worker(每个
-// 绑定一条通道)从共享队列里抢着领活, 是 pullFile 的分块版编排, 与 sendParallel 同一
-// 个理由: 先取完自己那份的连接别闲着, 抢下一片接着干(见 sendParallel 的注释)。
-// openPull(w) 用 worker 编号 w 要一条通道——direct 路径下 w 挑打开的那几条独立连接
-// 之一(见 RecvFiles 的 openPullChunk), relay 路径忽略 w, 每次都是独立会话, 两条
-// 路径共用这同一份编排。失败语义与 sendParallel 对称: 任意一块出错就让整份文件报错,
-// 其它 worker 领下一片之前会先看到错误就地退出。
+// recvParallel 是 sendParallel 的取件方向对应版本: 同一份 runChunkWorkers(见
+// nat/file.go)编排认领/测速/按各自速度选分片大小, 这里只负责生成 transfer id、
+// 把"开一条通道再取一片"接进去。openPull(w) 用 worker 编号 w 要一条通道——direct
+// 路径下 w 挑打开的那几条独立连接之一(见 RecvFiles 的 openPullChunk), relay 路径
+// 忽略 w, 每次都是独立会话。失败语义与 sendParallel 对称: 任意一块出错就让整份
+// 文件报错, 其它 worker 认领下一片之前会先看到错误就地退出。
 func recvParallel(openPull func(worker int) (fileConn, error), workers int, dir string, e filePullEntry, from, remote string,
-	logf func(string, ...interface{}), chunks []chunkRange, act string, p *progress) (string, error) {
+	logf func(string, ...interface{}), act string, p *progress) (string, error) {
 	tid, err := newTransferID()
 	if err != nil {
 		return "", fmt.Errorf("generate transfer id: %w", err)
 	}
 	// 进度按 worker(连接)算, 不是按 chunk 算, 理由同 sendParallel。
 	cp := newChunkProgress(workers, p)
-
-	var next int64 = -1 // atomic: 每次 Add(1) 领下一片的下标
-	var mu sync.Mutex
-	var firstErr error
-	var saved string
-	failed := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return firstErr != nil
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func(w int) {
-			defer wg.Done()
-			var done int64 // 这个 worker 迄今已取到的累计字节数, 跨好几片累加
-			for {
-				if failed() {
-					return
-				}
-				idx := int(atomic.AddInt64(&next, 1))
-				if idx >= len(chunks) {
-					return
-				}
-				c := chunks[idx]
-				base := done
-				conn, err := openPull(w)
-				if err != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = err
-					}
-					mu.Unlock()
-					return
-				}
-				s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, idx, len(chunks), c.offset, c.length, act,
-					func(sent int64) { cp.update(w, base+sent) })
-				conn.Close()
-				done += c.length
-				mu.Lock()
-				if err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-				} else if s != "" {
-					saved = s
-				}
-				mu.Unlock()
-			}
-		}(w)
-	}
-	wg.Wait()
-	if firstErr != nil {
+	saved, err := runChunkWorkers(e.Size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		conn, err := openPull(w)
+		if err != nil {
+			return "", err
+		}
+		defer conn.Close()
+		return pullFileChunk(conn, dir, e, from, remote, logf, tid, idx, offset, length, act, onProgress)
+	})
+	if err != nil {
 		// 其它分块可能已经在接收端创建了 assembly；主动取消并清理，
 		// 否则一次性 -recv 进程退出前不会等到后台 reaper 执行。
 		abortChunkAssembly(tid)
-		return "", firstErr
+		return "", err
 	}
 	return saved, nil
 }

@@ -9,7 +9,6 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -104,10 +103,10 @@ func splitSendTo(to string) (email, subdir string, err error) {
 //     该 VPS 的场景。等价于配置里 direct[].via, 只是这里是一次性命令行、不需要写进配置
 //     文件。详见 docs/direct-relay-design.md。
 //
-// parallel 大于 1 且单个文件够大(见 chunkMinSize)时, 把这一个文件切成最多 parallel
-// 块、各开一条独立连接并行传——只切单个大文件, 不会让多个文件同时传输(那样反而可能
-// 拖长每一个文件的耗时, 见 planChunks 的阈值判断)。parallel<=1 或文件不够大时走原来
-// 的单连接路径, 行为与之前完全一样。
+// parallel 大于 1 且单个文件够大(见 wantParallel)时, 把这一个文件按各连接实测速度
+// 动态切块、各开一条独立连接并行传(见 chunkSizeForRate)——只切单个大文件, 不会让
+// 多个文件同时传输(那样反而可能拖长每一个文件的耗时)。parallel<=1 或文件不够大时
+// 走原来的单连接路径, 行为与之前完全一样。
 //
 // conflict 是收方已有同名文件时的处理方式(见 ParseConflict 与 file_conflict.go): 空串表示
 // 终端里逐个询问、否则让收方自动改名。
@@ -169,12 +168,13 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 	// send 按 via 分派到两种取得"可写文件通道"的方式, 拿到之后发送循环是共用的——
 	// sendFile(直连)/sendFileViaRelay(中继)内部都调用同一个 sendFileOver, 首部/
 	// 校验/落盘协议完全一样, 两条路径只是"字节怎么送到对面"不同。sendChunk 是它们
-	// 的分块版, 同样两条路径共用一份编排(sendFileParallel)。
+	// 的分块版, 同样两条路径共用一份编排(sendParallel/runChunkWorkers)。
 	var send func(it fileItem, onProgress func(int64)) (string, error)
-	// sendChunk 的 worker 是 sendParallel 里发起这次调用的那个 worker 编号(0 开始,
-	// 一个 worker 绑一条连接, 见 sendParallel 的注释), 不是 chunk 在 chunks 里的下标
-	// ——一个 worker 会陆续处理好几片, 每次调 sendChunk 的 worker 编号不变。
-	var sendChunk func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error)
+	// sendChunk 的 worker 是 runChunkWorkers 里发起这次调用的那个 worker 编号
+	// (0 开始, 一个 worker 绑一条连接), 不是分片的序号——一个 worker 会陆续认领
+	// 好几片(每片大小按这条连接自己的实测速度动态决定, 见 file.go 的
+	// chunkSizeForRate), 每次调 sendChunk 的 worker 编号不变。
+	var sendChunk func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error)
 	// workers 是 sendParallel 该开几个抢活的 worker——direct 下是实际打通的独立连接数
 	// (可能因为个别候选没打通而少于 parallel), relay 下没有"独立连接"这回事, 就是
 	// parallel 本身当并发上限。
@@ -224,8 +224,8 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		probe = func(it fileItem, noHash bool) (*probeResult, error) {
 			return sender.peer.probeFile(sessions[0], it, noHash, notify)
 		}
-		sendChunk = func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
-			return sender.peer.sendFileChunk(sessions[worker], it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+		sendChunk = func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
+			return sender.peer.sendFileChunk(sessions[worker], it, offset, length, tid, chunkIdx, onProgress)
 		}
 	case ViaRelay:
 		workers = parallel
@@ -235,10 +235,10 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 		probe = func(it fileItem, noHash bool) (*probeResult, error) {
 			return probeFileViaRelay(sender.client, toEmail, it, noHash, notify)
 		}
-		sendChunk = func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+		sendChunk = func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
 			// relay 没有"独立连接"这回事(都复用同一条 websocket, 见 file_relay.go 的
 			// sendFileChunkViaRelay), worker 编号在这条路径上只是并发上限, 不用来挑连接。
-			return sendFileChunkViaRelay(sender.client, toEmail, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+			return sendFileChunkViaRelay(sender.client, toEmail, it, offset, length, tid, chunkIdx, onProgress)
 		}
 	}
 
@@ -264,8 +264,8 @@ func SendFiles(cfg conf.WsClient, to string, paths []string, via string, paralle
 			// 续传只发一段尾巴, 不做分块并行; 进度从收方已有的字节数起算。
 			at := it.resumeAt
 			saved, err = send(it, func(n int64) { p.update(at + n) })
-		} else if chunks := planChunks(it.size, chunkTarget(workers)); chunks != nil {
-			saved, err = sendParallel(it, chunks, workers, sendChunk, p)
+		} else if wantParallel(it.size, workers) {
+			saved, err = sendParallel(it, workers, sendChunk, p)
 		} else {
 			saved, err = send(it, p.update)
 		}
@@ -388,21 +388,16 @@ func dialSender(cfg conf.WsClient, tag string) (*oneShotSender, error) {
 
 // ---------- 单文件分块并行发送 ----------
 
-// sendParallel 把一个文件切成比连接数更多、更细的 chunks, 派 workers 个 worker(每个
-// 绑定一条独立连接)从这一份共享队列里抢着领活, 是 send 闭包的分块版编排, direct/relay
-// 两条路径共用(区别只在传进来的 sendChunk 怎么开连接)。
-//
-// "抢活" 而不是把 chunks 按连接数死分成 1:1 的固定份额, 是为了让先干完自己那份的连接
-// 别闲着——各连接的实际速度不一定一样(链路质量、打洞选中的路径都可能有差异), 死分
-// 份额会出现快的那条早早传完在原地等, 慢的那条还在后面墨迹, 总耗时被最慢的那条拖累。
-// 领的活比连接数多几倍(见 planChunks 调用处的 piecesPerWorker), 快的连接自然会多领
-// 几片、慢的少领几片, 谁能干就让谁多干。
+// sendParallel 派 workers 个 worker(每个绑定一条独立连接)从共享的字节游标里抢着
+// 认领活, 是 send 闭包的分块版编排, direct/relay 两条路径共用(区别只在传进来的
+// sendChunk 怎么开连接)。认领/测速/按各自速度选分片大小这套编排全在 runChunkWorkers
+// (nat/file.go)里, 这里只负责生成 transfer id 和把 sendChunk 接进去。
 //
 // 与非分块路径同一个失败语义: 任意一块出错就让整份文件报错, 不重试、不跳过——但不必
-// 等其它 worker 也各自出错或领完手头的活: 一旦有 worker 报错, 其它 worker 领下一片
-// 之前会先看到这个错误就地退出, 不会再白白多传几片注定要被扔掉的数据。
-func sendParallel(it fileItem, chunks []chunkRange, workers int,
-	sendChunk func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error),
+// 等其它 worker 也各自出错或认领完手头的活: 一旦有 worker 报错, 其它 worker 认领下
+// 一片之前会先看到这个错误就地退出, 不会再白白多传几片注定要被扔掉的数据。
+func sendParallel(it fileItem, workers int,
+	sendChunk func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error),
 	p *progress) (string, error) {
 	tid, err := newTransferID()
 	if err != nil {
@@ -412,53 +407,9 @@ func sendParallel(it fileItem, chunks []chunkRange, workers int,
 	// 下一片, conn1/conn2/... 这几栏该是"这条连接迄今为止总共传了多少", 不是"当前
 	// 这一片传了多少"(片与片之间切换不该让进度条看着往回跳)。
 	cp := newChunkProgress(workers, p)
-
-	var next int64 = -1 // atomic: 每次 Add(1) 领下一片的下标
-	var mu sync.Mutex
-	var firstErr error
-	var saved string
-	failed := func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return firstErr != nil
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := 0; w < workers; w++ {
-		go func(w int) {
-			defer wg.Done()
-			var done int64 // 这个 worker 迄今已送达的累计字节数, 跨好几片累加
-			for {
-				if failed() {
-					return
-				}
-				idx := int(atomic.AddInt64(&next, 1))
-				if idx >= len(chunks) {
-					return
-				}
-				c := chunks[idx]
-				base := done
-				s, err := sendChunk(w, it, c.offset, c.length, tid, idx, len(chunks),
-					func(sent int64) { cp.update(w, base+sent) })
-				done += c.length
-				mu.Lock()
-				if err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-				} else if s != "" {
-					saved = s
-				}
-				mu.Unlock()
-			}
-		}(w)
-	}
-	wg.Wait()
-	if firstErr != nil {
-		return "", firstErr
-	}
-	return saved, nil
+	return runChunkWorkers(it.size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		return sendChunk(w, it, offset, length, tid, idx, onProgress)
+	})
 }
 
 // chunkProgress 把多个并行分块各自的进度回调聚合成一份整份文件的进度, 复用

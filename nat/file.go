@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/keminar/anyproxy/utils/conf"
@@ -72,18 +73,21 @@ type fileAuth struct {
 //
 // TransferID 为空是今天的"整份文件"语义, Size 就是文件总大小、Offset 恒为 0 ——
 // 单文件分块并行传输(见 file_send.go/file_recv.go 的 parallel 参数)才会填后面
-// 四个字段: 同一个 TransferID 标记"这些连接属于同一次传输", ChunkIndex/ChunkCount
-// 标记这是第几块/一共几块, Offset 是这一块在整份文件里的起始字节。Size 此时是**这一
-// 块**的字节数, 不是整份文件的大小——每条连接只关心自己要发/收多少字节, 不需要知道
-// 别的块传到哪了。
+// 三个字段: 同一个 TransferID 标记"这些连接属于同一次传输", ChunkIndex 标记这是
+// 第几块(只用来给接收端的去重 map 当 key 和日志标识, 不保证和字节顺序一致),
+// Offset 是这一块在整份文件里的起始字节。Size 此时是**这一块**的字节数, 不是整份
+// 文件的大小——每条连接只关心自己要发/收多少字节。TotalSize 才是整份文件的大小,
+// 接收端靠它判断分块并行传输是否已经全部收齐(见 chunkAssembly)——之所以不能靠
+// "总共几块"来判断, 是因为分块并行现在按各连接实测速度动态决定分片大小(见
+// chunkSizeForRate), 总共几块要传完才知道, 没法像以前那样在第一块发出前就定死。
 type fileHead struct {
 	Name       string `json:"name"` //相对路径, 一律用 / 分隔
 	Size       int64  `json:"size"`
 	Mode       uint32 `json:"mode"` //仅取权限位, Windows 收端会忽略
 	TransferID string `json:"tid,omitempty"`
 	ChunkIndex int    `json:"ci,omitempty"`
-	ChunkCount int    `json:"cc,omitempty"`
 	Offset     int64  `json:"off,omitempty"`
+	TotalSize  int64  `json:"ts,omitempty"` // 整份文件大小, 只在 TransferID 非空时有意义
 
 	// Conflict 同名文件已存在时发送方要求的处理: 空是默认(收方自动改名保存, 见 claimName),
 	// "overwrite" 覆盖已有文件(由使用者在协商时明确选择), "resume" 接着上次中断留下的 .part
@@ -349,17 +353,23 @@ const (
 )
 
 // chunkAssembly 一次分块传输在接收端的运行时状态, 按 TransferID 索引, 所有块共享。
+//
+// total/remaining 是字节数, 不是块数——分块并行现在按各连接实测速度动态决定分片
+// 大小, 总共几块要传完才知道, 没法像以前那样靠"块数倒计数"判断是否收全(见
+// fileHead.TotalSize 的注释), 只能靠"收到的字节数是否等于整份文件大小"判断。
 type chunkAssembly struct {
 	mu        sync.Mutex
 	f         *os.File
 	final     string // 最终落盘名, 第一块到达时就用 claimName 原子占好(占位文件已在磁盘上), 所有块共用
 	claimed   bool   // final 是 claimName 留下的空占位文件(失败时要删); 覆盖模式下 final 是已有文件, 绝不能删
 	part      string
-	total     int
-	remaining int
+	total     int64
+	remaining int64
+	count     int // 成功收到的块数, 只用来给完成日志打印, 不参与"是否收全"的判断
 	seen      map[int]bool
 	err       error // 目前为止任意一块出的错, 先到先得——后面的块不会覆盖它
 	touched   time.Time
+	done      bool // remaining<=0 这个收尾分支是否已经跑过, 见 recvFileChunk 的说明
 }
 
 // chunkAssemblies 接收端的分块传输注册表。key 是 TransferID。
@@ -439,8 +449,8 @@ func getOrCreateAssembly(tid string, head fileHead, dir string) (*chunkAssembly,
 	}
 	a := &chunkAssembly{
 		f: f, final: final, claimed: claimed, part: part,
-		total: head.ChunkCount, remaining: head.ChunkCount,
-		seen: make(map[int]bool, head.ChunkCount), touched: time.Now(),
+		total: head.TotalSize, remaining: head.TotalSize,
+		seen: make(map[int]bool), touched: time.Now(),
 	}
 	chunkAssemblies.m[tid] = a
 	return a, nil
@@ -469,17 +479,25 @@ func reapChunkAssemblies() {
 			a.f.Close()
 			os.Remove(a.part)
 			a.dropClaim() // claimName 原子占的位, 传输没完成也要一并收掉
-			log.Printf("nat file: transfer to %s idle, dropped (%d/%d chunks arrived)", a.final, a.total-a.remaining, a.total)
+			log.Printf("nat file: transfer to %s idle, dropped (%s/%s received)", a.final, humanBytes(a.total-a.remaining), humanBytes(a.total))
 		}
 	}
 }
 
-// recvFileChunk 落盘分块并行传输里的一块。remaining 归零(不论成败)的那一块负责
-// 收尾: 全部成功就把 .part 改名成最终文件名, 任意一块出过错就整份删掉——和
-// writeIncoming 的"校验不过就删除"是同一个原则, 只是判断依据从一条连接扩成了这次
-// 传输的所有块。
+// recvFileChunk 落盘分块并行传输里的一块。remaining(按字节数, 不论成败都会扣减,
+// 见下面的说明)归零的那一块负责收尾: 全部成功就把 .part 改名成最终文件名, 任意
+// 一块出过错就整份删掉——和 writeIncoming 的"校验不过就删除"是同一个原则, 只是
+// 判断依据从一条连接扩成了这次传输的所有块。
 func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...interface{}), head fileHead, reply func(fileReply)) {
-	if head.ChunkCount < 2 || head.ChunkIndex < 0 || head.ChunkIndex >= head.ChunkCount {
+	if head.TotalSize <= 0 {
+		// 分块传输的发送方(sendFileOverRange)一定会把 TotalSize 填成 it.size(>0)。
+		// 收到 0 只有一种解释: 对面还是改动前的旧版本, 发的首部里根本没有 TotalSize
+		// 这个字段(json 解出来就是零值)——单独给一句好懂的提示, 不要和下面真正
+		// "首部字段对不上"的情形共用一句谁也看不懂的 "malformed chunk header"。
+		reply(fileReply{Err: "malformed chunk header: missing total size, peer is likely running an older/incompatible anyproxy build (chunk protocol changed) — rebuild and restart both sides with the same version"})
+		return
+	}
+	if head.ChunkIndex < 0 || head.Size <= 0 || head.Size > head.TotalSize {
 		reply(fileReply{Err: "malformed chunk header"})
 		return
 	}
@@ -522,9 +540,19 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 	a.mu.Lock()
 	if chunkErr != nil && a.err == nil {
 		a.err = chunkErr
+	} else if chunkErr == nil {
+		a.count++
 	}
-	a.remaining--
-	finishing := a.remaining <= 0
+	// 不论成败都扣减: 出错的块也要"用掉"它声明的字节数, 不然这次传输会永远收不
+	// 齐、只能等 5 分钟空闲回收器兜底删除, 而不是像现在这样立刻报错收尾。
+	a.remaining -= head.Size
+	// remaining 归零本该只发生一次, 但字节计数比以前的块数倒计数更容易在有 bug
+	// 或对端异常(比如声明的 Size 和实际不符)时被越过零点不止一次触发——done
+	// 挡住第二次重复跑下面的 close/rename/delete。
+	finishing := a.remaining <= 0 && !a.done
+	if finishing {
+		a.done = true
+	}
 	finalErr := a.err
 	a.touched = time.Now()
 	a.mu.Unlock()
@@ -554,7 +582,7 @@ func recvFileChunk(conn fileConn, dir, remote string, logf func(string, ...inter
 			finalErr = fmt.Errorf("rename: %w (data kept at %s)", err, a.part)
 		} else {
 			rel, _ := filepath.Rel(dir, a.final)
-			logf("file from %s: saved %s (%d chunks)", remote, filepath.ToSlash(rel), a.total)
+			logf("file from %s: saved %s (%s in %d chunks)", remote, filepath.ToSlash(rel), humanBytes(a.total), a.count)
 		}
 	}
 
@@ -841,10 +869,6 @@ func collectFiles(paths []string) ([]fileItem, error) {
 // 占比会明显起来, 并行反而更慢。
 
 const (
-	// chunkMinSize 单块最小体积。小于两倍这个数的文件不切块——切出来的块比这还小,
-	// 并行的收益盖不住多开几条连接的开销。
-	chunkMinSize = 4 << 20 // 4MiB
-
 	// transferIDSize 分块传输 ID 的随机字节数, 只用来在接收端把同一次传输的多个块
 	// 对上号, 不是秘密, 不需要跟 relay 那套加密 salt 一样的强度。
 	transferIDSize = 8
@@ -853,16 +877,18 @@ const (
 	// 依据: 4 条独立连接对家用 NAT/防火墙毫无压力(远小于浏览器对单域名的默认并发),
 	// 丢包驱动的吞吐增益到这个量级基本打平, 再往上更容易撞见对称型 NAT 打洞失败率
 	// 上升、以及并发流互相挤占同一段带宽反而抬高整体丢包率这些副作用。这个数封的是
-	// **同时打开的连接数**, 不是切成几块——块数见 piecesPerWorker, 大文件切出来的块
-	// 会比这个数多, 分给这几条连接抢着传(见 sendParallel/recvParallel)。
+	// **同时打开的连接数**, 不是切成几块——每条连接会按自己的实测速度动态决定分片
+	// 大小(见 chunkSizeForRate), 跟连接数没有固定倍数关系。
 	maxParallelConns = 4
 
-	// piecesPerWorker 分块并行时, 目标片数是"实际连接数(worker 数)"的这么多倍——
-	// 片数比连接数多几倍, 先干完自己手头那片的连接才有多余的片可抢(见 sendParallel
-	// 的"抢活"说明), 不然还是老样子一个 worker 只有一片、谁都别想帮别人分担。片数
-	// 最终还是受 chunkMinSize 天然封顶(见 planChunks), 文件不够大时不会真凑出这么
-	// 多片。
-	piecesPerWorker = 4
+	// probeChunkSize 每个 worker(独立连接)的第一片, 固定大小, 只用来测这条连接
+	// 值不值得用大分片——这个耗时天然包含网络传输和接收端落盘+校验+回包的完整往返
+	// (见 sendFileOverRange 的说明), 正是"这条连接该用多大分片"要衡量的东西。
+	probeChunkSize = 3 << 20 // 3MiB
+
+	// chunkSizeMin/chunkSizeMax 是 chunkSizeForRate 查表的上下界。
+	chunkSizeMin = 2 << 20  // 2MiB
+	chunkSizeMax = 30 << 20 // 30MiB
 )
 
 // clampParallel 把 -parallel 夹到 [1, maxParallelConns] 区间。<=0 按 1(不并行)处理。
@@ -876,49 +902,149 @@ func clampParallel(parallel int) int {
 	return parallel
 }
 
-// chunkTarget 算给 planChunks 用的目标片数。workers<=1 时原样返回(变成 1),
-// planChunks 的 want<=1 本来就不切块——workers<=1 就是根本没请求并行, 不该因为这个
-// 分片改动平白多切一次、多算一遍哈希。只有真要并行(workers>1)时才把目标片数放大
-// 到 workers*piecesPerWorker, 好让干得快的连接有多余的片可抢。
-func chunkTarget(workers int) int {
-	if workers <= 1 {
-		return workers
+// chunkSizeForRate 按一个 worker 探测片的实测吞吐(bytesPerSec)查表, 一次性决定
+// 这个 worker 后续所有分片的固定大小——不是持续自适应, 测一次定终身: 一份文件
+// 传输通常是几分钟量级, 链路条件中途大幅波动到需要重新测的情况不常见, 没必要为此
+// 引入持续采样的复杂度。下边界半开(用 <而不是<=), 卡在整数边界上时落进更快那档。
+func chunkSizeForRate(bytesPerSec float64) int64 {
+	const KB, MB = 1 << 10, 1 << 20
+	switch {
+	case bytesPerSec < 100*KB:
+		return 2 * MB
+	case bytesPerSec < 200*KB:
+		return 3 * MB
+	case bytesPerSec < 500*KB:
+		return 6 * MB
+	case bytesPerSec < 1*MB:
+		return 15 * MB
+	default:
+		return 30 * MB
 	}
-	return workers * piecesPerWorker
 }
 
-// chunkRange 一个分块在文件里的位置。
-type chunkRange struct {
-	offset int64
-	length int64
+// workerChunkSize 把一个 worker 探测片的"发了多少字节、花了多久"换算成吞吐, 再查
+// chunkSizeForRate。elapsed<=0 在真实网络/中继上不会发生, 但防止万一(比如测试里
+// 塞进一个零耗时的假连接)除零, 按"越快越好"处理。
+func workerChunkSize(bytesSent int64, elapsed time.Duration) int64 {
+	if elapsed <= 0 {
+		return chunkSizeMax
+	}
+	return chunkSizeForRate(float64(bytesSent) / elapsed.Seconds())
 }
 
-// planChunks 把一个 size 字节的文件切成不超过 want 块, 每块至少 chunkMinSize
-// (最后一块除外, 它兜底拿余数, 可能比 chunkMinSize 大)。want<=1 或文件不够大时
-// 返回 nil, 调用方应退回不切块的单连接路径。
-func planChunks(size int64, want int) []chunkRange {
-	if want <= 1 || size < 2*chunkMinSize {
-		return nil
-	}
-	n := int64(want)
-	if max := size / chunkMinSize; n > max {
-		n = max
-	}
-	if n <= 1 {
-		return nil
-	}
-	base := size / n
-	out := make([]chunkRange, 0, n)
-	var off int64
-	for i := int64(0); i < n; i++ {
-		length := base
-		if i == n-1 {
-			length = size - off // 最后一块拿余数, 避免整除不尽时漏字节
+// wantParallel 决定一次传输要不要走分块并行路径。workers<=1 说明没请求并行(或者
+// 打洞只打通了一条连接); 文件小于两个探测片(2*probeChunkSize)时连一次像样的测速
+// 都做不到, 谈不上"自适应", 直接退回单连接路径更简单也更快。
+func wantParallel(size int64, workers int) bool {
+	return workers > 1 && size >= 2*probeChunkSize
+}
+
+// chunkCursor 是分块并行传输里"认领接下来 N 字节"的共享原子游标, 取代过去预先切
+// 好的 []chunkRange 数组——分片大小现在要等每个 worker 各自探测完才知道, 没法像
+// 以前那样提前一次性算出整个切分方案。
+type chunkCursor struct {
+	size int64 // 文件总大小, 构造后只读
+	next int64 // atomic: 下一个未认领的字节偏移
+	idx  int64 // atomic: 下一个分片序号
+}
+
+func newChunkCursor(size int64) *chunkCursor {
+	return &chunkCursor{size: size}
+}
+
+// claim 尝试认领 want 字节, 不够文件剩余部分时 clamp 到剩余量。ok=false 表示文件
+// 已经被认领完, 调用方(这个 worker)该收工了。
+//
+// 用 CAS 循环而不是互斥锁: 最多 maxParallelConns(4) 个 worker 竞争同一个 int64,
+// 重试成本比锁低, 也没有锁能提供而这里用不上的东西。
+//
+// idx 由独立的原子计数器发号, 不保证和字节偏移顺序一致(两个 goroutine 谁先抢到
+// offset 的 CAS、谁先抢到下一个 idx, 是两次独立的原子操作, 顺序可能不一样)——无
+// 所谓, idx 只用来给 chunkAssembly 的去重 map 当 key、以及日志里标识"是哪一片",
+// 不依赖它反映字节位置。
+func (c *chunkCursor) claim(want int64) (offset, length int64, idx int, ok bool) {
+	for {
+		cur := atomic.LoadInt64(&c.next)
+		if cur >= c.size {
+			return 0, 0, 0, false
 		}
-		out = append(out, chunkRange{offset: off, length: length})
-		off += length
+		length = want
+		if remain := c.size - cur; length > remain {
+			length = remain
+		}
+		if atomic.CompareAndSwapInt64(&c.next, cur, cur+length) {
+			return cur, length, int(atomic.AddInt64(&c.idx, 1) - 1), true
+		}
 	}
-	return out
+}
+
+// runChunkWorkers 是 sendParallel(file_send.go)/recvParallel(file_recv.go) 共用的
+// 分块并行编排引擎: 从 chunkCursor 认领字节、"探测片定后续大小"的状态机、
+// wg/错误传播这几件事只在这一份里写一次, 两个方向不会因为各自维护一份而慢慢跑偏
+// (这两个方向除了 do 具体怎么把一片字节送出去/取回来之外, 逻辑完全一样)。
+//
+// do 是方向相关的部分: worker 编号、这一片的 offset/length/idx、以及一个进度回调
+// (只关心"这个 worker 迄今发/收了多少字节", 不关心分片大小), 返回收方存成的名字
+// (非分块场景才有意义, 这里几个 worker 都可能返回同一个值)和错误。
+//
+// 失败语义与改动前一致: 任意一片出错就让其它 worker 不再认领新的一片(但已经在
+// 传的那一片会传完, 不中途打断), 不重试、不跳过。
+func runChunkWorkers(size int64, workers int, cp *chunkProgress,
+	do func(worker int, offset, length int64, idx int, onProgress func(int64)) (string, error)) (string, error) {
+	cursor := newChunkCursor(size)
+
+	var mu sync.Mutex
+	var firstErr error
+	var saved string
+	failed := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return firstErr != nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			var done int64 // 这个 worker 迄今已送达/取到的累计字节数, 跨好几片累加
+			want := int64(probeChunkSize)
+			first := true
+			for {
+				if failed() {
+					return
+				}
+				offset, length, idx, ok := cursor.claim(want)
+				if !ok {
+					return
+				}
+				base := done
+				start := time.Now()
+				s, err := do(w, offset, length, idx, func(sent int64) { cp.update(w, base+sent) })
+				if first {
+					// 只测第一片: 后面的片沿用这个大小, 不再重新测(见
+					// chunkSizeForRate 的说明)。
+					want = workerChunkSize(length, time.Since(start))
+					first = false
+				}
+				done += length
+				mu.Lock()
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+				} else if s != "" {
+					saved = s
+				}
+				mu.Unlock()
+			}
+		}(w)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return saved, nil
 }
 
 // newTransferID 生成一次分块传输的关联 ID, 十六进制编码后放进 fileHead/filePullReq。
@@ -955,14 +1081,14 @@ func (d *directPeer) probeFile(sess *directSession, it fileItem, noHash bool, no
 
 // sendFileChunk 是 sendFile 的分块版: 单独开一条流发文件里的 [offset, offset+length)
 // 这一段, 供单文件并行分块传输用(见 file_send.go 的 parallel 参数)。除了多传
-// offset/length/tid/chunkIdx/chunkCount, 与 sendFile 完全一样——每个分块各自开一条
-// 独立的 QUIC stream, 复用同一个 sess 不用重新打洞。
-func (d *directPeer) sendFileChunk(sess *directSession, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(sent int64)) (string, error) {
+// offset/length/tid/chunkIdx, 与 sendFile 完全一样——每个分块各自开一条独立的
+// QUIC stream, 复用同一个 sess 不用重新打洞。
+func (d *directPeer) sendFileChunk(sess *directSession, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(sent int64)) (string, error) {
 	stream, err := d.openFileStream(sess)
 	if err != nil {
 		return "", err
 	}
-	return sendFileOverRange(stream, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	return sendFileOverRange(stream, it, offset, length, tid, chunkIdx, onProgress)
 }
 
 // openFileStream 开一条文件传输流并写好身份声明, 是 sendFile/sendFileChunk 共用的
@@ -1008,9 +1134,9 @@ func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (stri
 	if it.conflict == ConflictResume {
 		// 续传: 只发收方还没有的后半段。摘要(尾部)也只覆盖这一段——前半段已经在协商时
 		// 比对过哈希, 收方续写失败时会把文件截回原长度(见 resumeIncoming)。
-		return sendFileOverRange(conn, it, it.resumeAt, it.size-it.resumeAt, "", 0, 1, onProgress)
+		return sendFileOverRange(conn, it, it.resumeAt, it.size-it.resumeAt, "", 0, onProgress)
 	}
-	return sendFileOverRange(conn, it, 0, it.size, "", 0, 1, onProgress)
+	return sendFileOverRange(conn, it, 0, it.size, "", 0, onProgress)
 }
 
 // sendFileOverRange 发送一个文件的核心逻辑, 不关心 conn 底下是 QUIC stream 还是中继
@@ -1019,10 +1145,11 @@ func sendFileOver(conn fileConn, it fileItem, onProgress func(sent int64)) (stri
 //
 // offset/length 圈定这次要发文件里的哪一段: 不分块传输时 offset=0、length=整份文件
 // 大小; 分块并行传输时(见 file_send.go 的 parallel 参数)每个分块各自打开一条独立
-// 连接, 用各自的 offset/length 调这个函数, tid/chunkIdx/chunkCount 让接收端知道这些
-// 连接属于同一次传输、该拼在文件的哪个位置。每条连接各自 os.Open 一份文件描述符再
-// Seek, 不共享同一个 *os.File——多个 goroutine 共用一个 fd 各自 Seek 会相互踩踏。
-func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(sent int64)) (string, error) {
+// 连接, 用各自的 offset/length 调这个函数, tid/chunkIdx 让接收端知道这些连接属于
+// 同一次传输、该拼在文件的哪个位置。TotalSize 直接从 it.size 取, 不需要调用方传——
+// 这个函数本来就知道整份文件多大。每条连接各自 os.Open 一份文件描述符再 Seek, 不
+// 共享同一个 *os.File——多个 goroutine 共用一个 fd 各自 Seek 会相互踩踏。
+func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(sent int64)) (string, error) {
 	defer conn.Close()
 
 	f, err := os.Open(it.path)
@@ -1038,7 +1165,7 @@ func sendFileOverRange(conn fileConn, it fileItem, offset, length int64, tid str
 
 	if err := writeFrame(conn, fileHead{
 		Name: it.name, Size: length, Mode: it.mode,
-		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset,
+		TransferID: tid, ChunkIndex: chunkIdx, Offset: offset, TotalSize: it.size,
 		Conflict: it.conflict, ResumePart: it.resumePart,
 	}); err != nil {
 		return "", fmt.Errorf("send head: %w", err)

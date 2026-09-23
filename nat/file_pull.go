@@ -57,12 +57,12 @@ type filePullReq struct {
 	// 取整个目录时两者才一致。C 不需要记住上一条流里的根目录是什么, 每条流都自足。
 	Name string `json:"name"`
 
-	// 以下四个字段只在单文件分块并行取件时才非零(见 file_recv.go 的 parallel 参数)。
-	// A 从清单(Size)已经知道文件大小, 由它规划切几块、每块的范围, C 只管照单发货,
-	// 不需要额外一次往返来问。语义与 fileHead 里的同名字段一致, 见那边的注释。
+	// 以下三个字段只在单文件分块并行取件时才非零(见 file_recv.go 的 parallel 参数)。
+	// A 按自己这边每条连接实测的速度决定这一块从哪切、切多大, C 只管照单发货,
+	// 不需要额外一次往返来问、也不需要知道总共会有几块。语义与 fileHead 里的同名
+	// 字段一致, 见那边的注释。
 	TransferID string `json:"tid,omitempty"`
 	ChunkIndex int    `json:"ci,omitempty"`
-	ChunkCount int    `json:"cc,omitempty"`
 	Offset     int64  `json:"off,omitempty"`
 	// Length 是这一块要发的字节数。放在请求帧里而不是让 C 自己按 Offset 推算到
 	// 文件末尾, 是因为"到文件末尾"只对最后一块成立——其余块的长度必须由 A 显式
@@ -194,7 +194,7 @@ func servePull(conn fileConn, cfg conf.ClientReceive, fromEmail, remote string, 
 		if req.TransferID != "" || req.Resume {
 			// 分块取件(见 file_recv.go 的 parallel 参数): A 已经规划好了范围, 这里
 			// 照单发货, 不重新判断切不切块——那是取件方的决定, C 只管配合。
-			saved, err = sendFileOverRange(conn, it, req.Offset, req.Length, req.TransferID, req.ChunkIndex, req.ChunkCount, nil)
+			saved, err = sendFileOverRange(conn, it, req.Offset, req.Length, req.TransferID, req.ChunkIndex, nil)
 		} else {
 			saved, err = sendFileOver(conn, it, nil)
 		}
@@ -345,10 +345,10 @@ func pullFileAct(conn fileConn, dir string, e filePullEntry, from, remote string
 // parallel 参数)。落盘走的还是 recvFileOver——它已经会按 TransferID 转给
 // recvFileChunk 做跨连接的拼接, 这里不用重复那套逻辑。
 func pullFileChunk(conn fileConn, dir string, e filePullEntry, from, remote string,
-	logf func(string, ...interface{}), tid string, chunkIdx, chunkCount int, offset, length int64, act string, onProgress func(int64)) (string, error) {
+	logf func(string, ...interface{}), tid string, chunkIdx int, offset, length int64, act string, onProgress func(int64)) (string, error) {
 	req := filePullReq{
 		Op: filePullGet, Path: e.Path, Name: e.Name,
-		TransferID: tid, ChunkIndex: chunkIdx, ChunkCount: chunkCount, Offset: offset, Length: length,
+		TransferID: tid, ChunkIndex: chunkIdx, Offset: offset, Length: length,
 	}
 	if err := writeFrame(conn, req); err != nil {
 		return "", fmt.Errorf("send get request: %w", err)

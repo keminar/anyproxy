@@ -244,7 +244,7 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 	a := fileRelayTestClient(t, connect, "a", testPassA, "a@example.com", testUUIDA, conf.ClientReceive{})
 
 	srcDir := t.TempDir()
-	body := make([]byte, 5*chunkMinSize+777) // 不对齐 chunkMinSize, 顺带盖住"最后一块拿余数"
+	body := make([]byte, 5*probeChunkSize+777) // 不对齐 probeChunkSize, 顺带盖住"最后一块拿余数"
 	if _, err := rand.Read(body); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -257,19 +257,18 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	it := items[0]
-	chunks := planChunks(it.size, 3)
-	if len(chunks) < 2 {
-		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	if !wantParallel(it.size, 3) {
+		t.Fatalf("expected the test file (%d bytes) to be big enough for parallel chunking", it.size)
 	}
 
 	p := newProgress("test", it.size)
 	// 必须停掉它的渲染 goroutine: 漏掉的话它会一直往 stderr 刷进度行到进程结束,
 	// 把后面用例的输出和失败信息冲乱(见 progress.done 的说明)。
 	defer p.done()
-	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
-		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
+		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, onProgress)
 	}
-	saved, err := sendParallel(it, chunks, 3, sendChunk, p)
+	saved, err := sendParallel(it, 3, sendChunk, p)
 	if err != nil {
 		t.Fatalf("chunked send via relay: %v", err)
 	}

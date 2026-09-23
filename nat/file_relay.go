@@ -590,7 +590,7 @@ func sendFileViaRelay(client *Client, toEmail string, it fileItem, onProgress fu
 // sendFileChunkViaRelay 是 sendFileViaRelay 的分块版, 供单文件并行分块传输用(见
 // file_send.go 的 parallel 参数)。每一块各自调一次 openRelayConn——协议本身早就
 // 支持"随时开一条新的加密会话"(每次都是独立的 salt/密钥), 不需要为分块单独改握手。
-func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
 	secured, sess, err := openRelayConn(client, toEmail, "")
 	if err != nil {
 		return "", err
@@ -599,7 +599,7 @@ func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, 
 	if onProgress != nil {
 		sess.pipe.setOnAcked(onProgress)
 	}
-	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, chunkCount, nil)
+	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, nil)
 }
 
 // probeFileViaRelay 经中继探测收方有没有同名文件(见 file_conflict.go), 每次探测一条新会话。
