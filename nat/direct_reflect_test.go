@@ -110,9 +110,13 @@ func TestDirectReflectorLogHasNoRawMagicByte(t *testing.T) {
 	serveDirectReflector(conn)
 	t.Cleanup(func() { conn.Close() })
 
-	var logBuf bytes.Buffer
+	// 用带锁的 buffer, 不能直接用 bytes.Buffer: 下面轮询 logBuf.String() 是在测试的
+	// 主 goroutine 里做的, 而 serveDirectReflector 的后台读循环会并发调用 log.Printf
+	// 写向同一个 buffer —— bytes.Buffer 本身不是并发安全的, 这是两个 goroutine 各自
+	// 该干的事, 不是前面那个"上一用例遗留 goroutine"的跨用例竞争, 得单独同步。
+	logBuf := &syncBuffer{}
 	oldOut := log.Writer()
-	log.SetOutput(&logBuf)
+	log.SetOutput(logBuf)
 	t.Cleanup(func() { log.SetOutput(oldOut) })
 
 	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
@@ -155,4 +159,24 @@ func TestDirectReflectorLogHasNoRawMagicByte(t *testing.T) {
 	if !strings.Contains(line, verbSeen+" "+nonce+" ") {
 		t.Fatalf("log line should still contain the readable %s payload, got: %q", verbSeen, line)
 	}
+}
+
+// syncBuffer 给 bytes.Buffer 包一层锁。log.SetOutput 的目标会被后台 goroutine(这里是
+// serveDirectReflector 的读循环)在调用 log.Printf 时并发写入, 同时测试的主 goroutine
+// 又要轮询读它的内容——裸 bytes.Buffer 两头都不安全, 包一层互斥锁即可。
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
