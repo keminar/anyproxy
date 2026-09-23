@@ -569,6 +569,11 @@ type progress struct {
 	last     time.Time
 	shown    bool
 
+	// lastLineLen 上一次实际输出的进度行(第二行, 不含开头的 \r)有多少字节, 供
+	// render()/done() 决定要补多少空格才能盖住上一次的残留——不能靠一个固定的大
+	// 常量硬凑, 见 render() 里的说明。
+	lastLineLen int
+
 	// connLine 非空时(分块并行传输, 见 newChunkProgress), render() 用它返回的总
 	// 速率替换自己独立采样的那一份(见 render() 里的说明), 并把它返回的"每条连接
 	// 各自的进度/速率"摘要追加到主进度后面。单连接传输不设, 输出跟改动前完全一样。
@@ -656,8 +661,23 @@ func (p *progress) render() {
 	// 提前量好的, 不用像固定给个 8 那样留一截用不上的空白——sent 从不会比 total
 	// 长多少, 贴着"/"对齐比左对齐留一堆尾随空格好看。总速率长度还是会变(0B/s ~
 	// 23.7MB/s 这种), 固定给 %-8s 兜住(理由与宽度取值同 chunkProgress.summary)。
-	fmt.Fprintf(os.Stderr, "\r  %*s/%s  %6.1f%%  %-8s%s   ",
+	body := fmt.Sprintf("  %*s/%s  %6.1f%%  %-8s%s",
 		p.sentW, humanBytes(sent), p.totalStr, pct, instRate, extra)
+	// 新一行比上一行短时(比如分块并行的某条连接的速率数字变短了、或者一次刷新
+	// 恰好没有 extra), 要补足空格盖住上一行的残留——不能像改动前那样靠一个固定的
+	// 大常量(200)硬凑: 内容本身没那么长的时候, 打印出这么多空格会在终端实际宽度
+	// 处触发自动换行, 而结尾的 \r 只能回到"换行后的那一行"行首, 于是上面多出几行
+	// 洗不掉的空白——复制粘贴出来就是"进度行前面一大截空格"这种花样(实测 -parallel
+	// 4 就能踩上)。这里只补到"迄今为止这个文件真正输出过的最大长度", 内容不会主动
+	// 撑出终端宽度都用不完的空白, done() 收尾擦行时也是按这同一个长度擦, 道理一样。
+	p.mu.Lock()
+	if len(body) < p.lastLineLen {
+		body += strings.Repeat(" ", p.lastLineLen-len(body))
+	} else {
+		p.lastLineLen = len(body)
+	}
+	p.mu.Unlock()
+	fmt.Fprint(os.Stderr, "\r"+body)
 }
 
 // done 收尾: 先停掉渲染 goroutine 并等它退出(避免和下面的擦行打印互相踩踏), 再把
@@ -677,12 +697,13 @@ func (p *progress) done() {
 		<-p.loopDone
 		p.mu.Lock()
 		shown := p.shown
+		lineLen := p.lastLineLen
 		p.mu.Unlock()
 		if shown {
-			// 200: 单连接那行不到 100 就够了, 但分块并行时 connLine 会在后面加上
-			// "cN: 已传 速率" 这样的片段, 4 条连接能把整行拉到一百多字符, 擦得不够
-			// 宽会在终端上留下没盖住的尾巴。
-			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 200))
+			// 按 lastLineLen(这个文件的进度行迄今真正输出过的最大长度)擦, 不再用
+			// 固定常量——理由见 render() 里的说明, 擦得比实际输出过的还宽只会白白
+			// 触发终端换行。
+			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", lineLen))
 		}
 	})
 }

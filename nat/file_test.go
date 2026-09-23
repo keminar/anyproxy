@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -973,6 +974,72 @@ func TestProgressReader(t *testing.T) {
 	}
 	if last != 1000 {
 		t.Fatalf("progress ended at %d, want 1000", last)
+	}
+}
+
+// TestProgressEraseWidthTracksActualContent 覆盖一个实测踩到的 bug: done() 收尾擦行
+// 曾经固定打印 200 个空格, 内容本身没那么长时, 这么一大串空格会在终端实际宽度处触发
+// 自动换行——结尾的 \r 只能回到"换行后的那一行"行首, 上面多出几行洗不掉的空白, 复制
+// 粘贴出来就是"进度行前面一大截空格、后面跟着结果文字"这种花样(-parallel 4 很容易
+// 撞上, 因为连接明细本身就比单连接长)。修复后擦行的宽度要跟着"这个文件迄今真正
+// 渲染过的最大行宽"走, 不能是一个和内容无关的大常量。
+func TestProgressEraseWidthTracksActualContent(t *testing.T) {
+	p := newProgress("[1/1] test.bin", 100)
+
+	p.update(10)
+	p.render()
+	p.mu.Lock()
+	firstLen := p.lastLineLen
+	p.mu.Unlock()
+	if firstLen == 0 {
+		t.Fatal("lastLineLen should be set after the first render")
+	}
+	if firstLen > 80 {
+		t.Fatalf("lastLineLen = %d after a plain single-connection render, suspiciously wide for this short content", firstLen)
+	}
+
+	// 挂一个分块并行常见的场景: 这一次渲染的连接明细比上一次明显更短(比如某几条
+	// 连接已经传完退出, 只剩一条还在传)。lastLineLen 应该保持在"迄今为止见过的
+	// 最大值", 好让 render()/done() 用它补足空格盖住上一行的残留, 而不是跟着新
+	// 内容一起缩短、留下一截没擦掉的尾巴。
+	p.setConnLine(func() (string, string) {
+		return "c1: 10B  1B/s  (5B)  c2: 20B  2B/s  (5B)  c3: 30B  3B/s  (5B)  c4: 40B  4B/s  (5B)", "10B/s"
+	})
+	p.update(20)
+	p.render()
+	p.mu.Lock()
+	widerLen := p.lastLineLen
+	p.mu.Unlock()
+	if widerLen <= firstLen {
+		t.Fatalf("expected the wider connLine render to grow lastLineLen past %d, got %d", firstLen, widerLen)
+	}
+
+	p.setConnLine(func() (string, string) { return "c1: 40B  4B/s  (5B)", "4B/s" })
+	p.update(40)
+	p.render()
+	p.mu.Lock()
+	secondLen := p.lastLineLen
+	p.mu.Unlock()
+	if secondLen != widerLen {
+		t.Fatalf("lastLineLen changed from %d to %d after a shorter render, want it to stay at the max ever rendered", widerLen, secondLen)
+	}
+
+	// done() 的擦行必须正好是 lastLineLen 个空格, 不多不少——既不能像改动前那样甩
+	// 出一个和内容无关的大常量, 也不能少到擦不干净。
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	p.done()
+	w.Close()
+	os.Stderr = orig
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	want := "\r" + strings.Repeat(" ", secondLen) + "\r"
+	if buf.String() != want {
+		t.Fatalf("done() erased with %q, want %q", buf.String(), want)
 	}
 }
 
