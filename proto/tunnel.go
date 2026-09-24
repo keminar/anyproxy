@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,6 +82,12 @@ type tunnel struct {
 	buf []byte
 
 	guardKey string // loopguard 目标键(host:port), handshake 通过后设置, 供 transfer 计数
+
+	// selfRedirectURL 非空时, copyBuffer 会拿服务端响应的第一个数据块顺手做一次自重定向
+	// 探测(见 http.go 的 checkSelfRedirect), 检查完不管有没有命中都会立即置空、只查一次。
+	// 复用的是 copyBuffer 本来就要读、要转发给客户端的那个数据块, 不是额外读取,
+	// 不引入新的网络读取或超时, 也不影响任何数据转发。
+	selfRedirectURL *url.URL
 }
 
 // newTunnel 实例
@@ -114,6 +121,12 @@ func (s *tunnel) copyBuffer(dst io.Writer, src *tcp.Reader, srcname string) (wri
 		}
 		nr, er := src.Read(buf)
 		if nr > 0 {
+			// 顺手用响应的第一个数据块探测一次"自重定向死循环"(见 http.go checkSelfRedirect),
+			// 不是额外读取, 检查一次后立即置空不再重复检查。
+			if srcname == "server" && s.selfRedirectURL != nil {
+				s.checkSelfRedirect(buf[0:nr])
+				s.selfRedirectURL = nil
+			}
 			// 如果为HTTP/1.1的Keep-alive情况下
 			if srcname == "request" && s.clientUnRead >= 0 {
 				// 之前已读完，说明要建新链接 或是 升级为长链接

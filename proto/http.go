@@ -196,8 +196,12 @@ func (that *httpStream) readRequest(from string) (canProxy bool, err error) {
 
 func firstLineHost(host string) string {
 	host = strings.ReplaceAll(host, ":", ".")
+	// 显式配置优先于自动探测的结果
 	if val, ok := conf.RouterConfig().FirstLine.Custom[host]; ok {
 		return val
+	}
+	if isFirstLineLearnedOff(host) {
+		return "off"
 	}
 	if conf.RouterConfig().FirstLine.Host == "off" {
 		return "off"
@@ -341,6 +345,11 @@ func (that *httpStream) response() error {
 		// 多读取的body部分
 		tunnel.Write(that.BodyBuf)
 
+		// 只有首行仍带 scheme+host(absolute-form)转发时才可能触发自重定向死循环,
+		// 才值得探测；已经是 off(origin-form)的域名没有这个问题，不必探测。
+		if strings.ToLower(that.URL.Scheme) == "http" && firstLineHost(that.URL.Host) != "off" {
+			tunnel.selfRedirectURL = that.URL
+		}
 		tunnel.transfer(that.clientUnRead)
 	}
 	return nil
@@ -377,4 +386,83 @@ func parseContentLength(cl string) (int64, error) {
 		return 0, fmt.Errorf("bad Content-Length %s", cl)
 	}
 	return n, nil
+}
+
+// checkSelfRedirect 检查服务端响应的第一个数据块是否是"首行 absolute-form 转发触发的自
+// 重定向死循环": 部分后端(如 Next.js dev server)收到 GET http://host/path 这种绝对形式
+// 首行时会对"path"做规范化判断, 判不匹配就发 3xx, 且 Location 和刚发的请求完全一样——
+// 直连或绑 hosts 访问不会有这个问题(客户端发的是 origin-form), 只有经本代理转发绝对形式
+// 首行时才会触发, 导致客户端反复经代理重发同一 URL, 短时间内堆大量连接。
+//
+// chunk 是 copyBuffer 里本来就要读、马上要转发给客户端的那块数据, 这里只是顺手看一眼,
+// 不是额外发起读取, 不影响转发内容/时序。数据块不够大(头部被截断)就直接放弃、不强行
+// 猜测——反正只是"能不能自动学到"的优化, 学不到还有 firstLine.custom 手动兜底。
+func (s *tunnel) checkSelfRedirect(chunk []byte) {
+	reqURL := s.selfRedirectURL
+	if !isRedirectStatus(parseStatusCode(chunk)) {
+		return
+	}
+	loc := findLocationHeader(chunk)
+	if loc == "" {
+		return
+	}
+	locURL, err := url.Parse(loc)
+	if err != nil {
+		return
+	}
+	resolved := reqURL.ResolveReference(locURL)
+	if sameSelfRedirectTarget(resolved, reqURL) {
+		learnFirstLineOff(s.req.ID, strings.ReplaceAll(reqURL.Host, ":", "."), reqURL.String())
+	}
+}
+
+// parseStatusCode 从响应首行探测字节里取状态码(如 "HTTP/1.1 308 ..." -> 308), 取不到返回0。
+func parseStatusCode(peek []byte) int {
+	i := bytes.IndexByte(peek, ' ')
+	if i < 0 || i+4 > len(peek) {
+		return 0
+	}
+	code, err := strconv.Atoi(string(peek[i+1 : i+4]))
+	if err != nil {
+		return 0
+	}
+	return code
+}
+
+func isRedirectStatus(code int) bool {
+	switch code {
+	case 301, 302, 303, 307, 308:
+		return true
+	}
+	return false
+}
+
+// findLocationHeader 在探测到的响应头字节里找 Location 首部的值(大小写不敏感)。
+// 探测字节可能因为长度上限被截断, 找不到完整头部时直接返回空, 不强行猜测。
+func findLocationHeader(peek []byte) string {
+	lines := bytes.Split(peek, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimRight(line, "\r")
+		if len(line) == 0 {
+			return "" // 头部提前结束(空行)还没找到，说明没有 Location
+		}
+		i := bytes.IndexByte(line, ':')
+		if i <= 0 {
+			continue
+		}
+		if strings.EqualFold(string(bytes.TrimSpace(line[:i])), "Location") {
+			return string(bytes.TrimSpace(line[i+1:]))
+		}
+	}
+	return ""
+}
+
+// sameSelfRedirectTarget 判断 3xx 的 Location 解析后是否和刚发出的请求完全相同
+// (scheme+host+path+query 全等), 这正是"绝对形式首行把后端绕晕"的死循环特征;
+// 普通的 http->https 升级、路径规范化等正常重定向目标不同，不会误判。
+func sameSelfRedirectTarget(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Host, b.Host) &&
+		a.EscapedPath() == b.EscapedPath() &&
+		a.RawQuery == b.RawQuery
 }
