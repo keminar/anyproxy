@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log"
@@ -358,7 +359,16 @@ func authByPass(conn *websocket.Conn, user AuthMessage, pass string) error {
 		return fmt.Errorf("clock skew %ds exceeds %ds", skew, authSkewLimit)
 	}
 	token, err := tools.Md5Str(fmt.Sprintf("%s|%s|%d", user.User, pass, user.Xtime))
-	if err != nil || user.Token != token {
+	// 常量时间比对: user.Token 是对端送来的, 用 != 比字符串会在第一个不同的字节上短路,
+	// 把"前几位对了"这个信息漏进响应时机里。同 relay_udp_server.go tryRegister 的理由,
+	// 那边已经这么写了, 这里当初漏掉。
+	//
+	// 这条路上的时序测量并不好做(有 ±authSkewLimit 的时间窗兜底、Md5Str 本身有抖动、
+	// 还隔着网络), 但防护是免费的, 没有理由把这个信息留在外面。
+	//
+	// err != nil 要单独判: 出错时 token 是空串, 直接拿去比对等于把"算失败"和"密码就是
+	// 空的"混为一谈。
+	if err != nil || subtle.ConstantTimeCompare([]byte(user.Token), []byte(token)) != 1 {
 		conn.WriteMessage(websocket.TextMessage, []byte("token err"))
 		return errors.New("token is error")
 	}

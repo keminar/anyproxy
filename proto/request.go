@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"net"
+	"time"
 
 	"github.com/keminar/anyproxy/utils/conf"
 
@@ -14,6 +15,21 @@ import (
 
 // AesToken 加密密钥默认值, 不再要求配置的 token 必须凑够16位, 见 getAesKey
 var AesToken = "anyproxyproxyany"
+
+// readRequestTimeout 读完整个请求头(首行 + 头部)的上限。
+//
+// 没有这个上限时, 一个完成了 TCP 握手却一个字节都不发的客户端, 会让 ReadRequest 里
+// 那句 Peek(1) 永远阻塞, 白占一个 goroutine 和一个 fd 直到 OS 的 TCP keepalive 生效
+// (默认 2 小时) —— 即 slowloris。同理"一次发一个字节、永不结束请求头"也是这条路。
+//
+// 只盖请求头阶段: 读完就清掉(见 ReadRequest 的 defer), 之后的数据转发是长连接, 本来
+// 就该允许长时间静默。
+//
+// 30s 取值: 比 sniffTimeoutHTTP(5s, 那是"等首包冒头"的探测)宽得多, 因为这里要等的是
+// 整个请求头读完, 慢速移动网络上确实会慢; 但又远短于 keepalive 的 2 小时。代理端口上
+// 的协议(HTTP/SOCKS5)一律是客户端先说话, 所以这个超时不会误伤"服务端先说话"的协议
+// —— 那类流量走的是 TUN 的 ForwardTCP, 不经过这里。
+const readRequestTimeout = 30 * time.Second
 
 // Request 请求类
 type Request struct {
@@ -68,6 +84,20 @@ func (that *Request) ReadRequest(from string) (canProxy bool, err error) {
 			return s.readRequest(from)
 		}
 	}
+	// 读请求头期间加超时, 读完(无论成败)立刻清掉: 后面的转发是长连接, 静默是正常的。
+	// 放在 tcpcopy 分支之后: 那条路直接返回、不读任何东西, 没有要保护的阻塞点。
+	if that.conn != nil {
+		_ = that.conn.SetReadDeadline(time.Now().Add(readRequestTimeout))
+		defer func() {
+			_ = that.conn.SetReadDeadline(time.Time{})
+			if err != nil {
+				// 超时会把错误挂在 reader 上, 不清掉会影响后续读取(同 socks5.go
+				// sniffProto 的处理)。
+				that.reader.ResetErr()
+			}
+		}()
+	}
+
 	_, err = that.reader.Peek(1)
 	if err != nil {
 		return false, err

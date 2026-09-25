@@ -117,6 +117,16 @@ func BuildResponse(query []byte, domain string, answerIP string) []byte {
 		}
 		qEnd += 4 // qtype(2) + qclass(2)
 	}
+	// question 段没走完就到报文末尾(截断的包, 或 qdcount 跟实际内容对不上): 内层循环是
+	// 靠 qEnd >= len(query) 退出的, 不是靠读到 0 长度标签, 此时 qEnd += 4 会越过缓冲区
+	// 末尾, 下面的 query[:qEnd] 直接 panic。BuildEmpty 有这道检查, 这里漏了。
+	//
+	// 这条路径在 TUN 的 DNS 拦截里(每个到 53 端口的 UDP 包都会过), 不在 grace/conn.go
+	// 那个 per-connection recover 的保护范围内 —— 一个畸形包能掀掉整个 TUN 处理循环,
+	// 不只是一条连接。
+	if qEnd > len(query) {
+		return nil
+	}
 
 	// 响应 = 原始header(修改flags) + 原始question + answer
 	resp := make([]byte, qEnd)
