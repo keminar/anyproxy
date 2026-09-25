@@ -346,7 +346,15 @@ func (d *directPeer) probeReflector(raddr *net.UDPAddr) (string, error) {
 			return r.endpoint, nil
 		case <-time.After(directProbeWait):
 			done()
-			lastErr = fmt.Errorf("no reply from reflector %s", raddr)
+			// 光说"没回包"排查不动: 得让用户知道去服务端反射器日志里找什么。三种可能
+			// 分别对应三种日志痕迹(见 StartDirectReflector), 说清楚才不用每次都靠人工
+			// 翻日志再猜。
+			lastErr = fmt.Errorf("no reply from reflector %s after %d tries; check the server's reflector log around this time — "+
+				"a \"whoami from <ip> answered\" line means the server did reply and the return path is what's broken (firewall/NAT dropping the reply on the way back); "+
+				"a \"dropped — <ip> is not allowed by websocket.server.allowIP\" line means add this host's egress IP/CIDR for this address family to the server's allowIP; "+
+				"neither line (note: successful replies are logged at most once per source every %s, so a quiet log doesn't rule this out) means the probe never reached the server — "+
+				"check outbound UDP locally and the server's firewall/security group for this address family",
+				raddr, directProbeTries, reflectorDeniedLogEvery)
 		}
 	}
 	if lastErr == nil {

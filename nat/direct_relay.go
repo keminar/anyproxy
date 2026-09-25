@@ -452,6 +452,27 @@ func (d *directPeer) registerRelayLeg(token, email string, cands []directCandida
 			return
 		}
 		rb.punchLeg(leg)
+		// punchLeg 的发包窗口只有 directPunchCount*directPunchGap(~900ms); 再给一点余量等
+		// pong 走完一趟往返。窗口到点这条腿仍没被听到, 就是这次中继里注定连不上——这里主动
+		// 说清楚可能的原因, 不然只能看着 A 那头几秒后"quic dial race ... no answer", 却查不出
+		// 是哪条腿、为什么: 最常见的是候选清一色是本中继够不着的地址族(比如中继没有 IPv6 出口,
+		// 这条腿却只报了 v6/仅局域网候选), 其次是候选本身没问题但那次打洞恰好丢包/对方短暂
+		// 掉线——同一条腿在别的会话里成功过就多半是后者。
+		select {
+		case <-time.After(directPunchCount*directPunchGap + time.Second):
+		case <-rb.done:
+			return
+		}
+		if leg.addr.Load() == nil {
+			rb.peer.logf("relay: leg %s never answered any of its candidates %v — this relay could not reach it "+
+				"(check: are any of them a public address this relay can actually route to? a private/LAN-only "+
+				"candidate is never reachable from a public relay; if this relay has no IPv6 route, a v6-only "+
+				"candidate list is equally unreachable — see this relay's own reflector-probe log for which "+
+				"address families it can use; otherwise this is likely transient packet loss on %s's side during "+
+				"candidate discovery, worth retrying); both legs must be reachable for the relay to work "+
+				"(docs/direct-relay-design.md §7)",
+				leg.email, leg.candAddrs, leg.email)
+		}
 	}()
 }
 
