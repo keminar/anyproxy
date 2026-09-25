@@ -265,7 +265,9 @@ func (b *directBroker) onRelayRequest(c *Client, msg *Message, req DirectRequest
 
 	// 第一步: 让 VPS 开中继 socket、探端点 E, 用 d_ready 回来(role=open)。
 	id := b.trackRelay(rs, relayRoleOpen)
-	body, err := encodeDirect(DirectRelayOpen{Token: req.Token})
+	// Email 取 c.Email(B 认证过的发起方身份), 不取 req 里的任何字段: VPS 要拿它当准入
+	// 依据(direct.relayEmail), 自报的身份当依据等于没有。
+	body, err := encodeDirect(DirectRelayOpen{Token: req.Token, Email: c.Email})
 	if err != nil {
 		b.take(id)
 		b.dropRelay(req.Token)

@@ -213,7 +213,7 @@ macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`
 | `websocket.client.direct.portmap` | `true` 时直连候选收集尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` | — |
 | `websocket.client.direct.punchFirst` | `true` 声明本机在受限 CGNAT 后、主动直连时须先发首包（让对端接受方推迟打洞）；家宽连公网/云主机不通时设 | — |
 | `websocket.client.direct.relay` | `true` 时本机(公网 VPS)允许作为 A↔C 盲转发中继；无需为每对配 `forward`/`direct`，目标由发起方 `direct.rules[].via` 指定 | — |
-| `websocket.client.direct.relayAllow` | 收紧 `direct.relay`：只放行这些来源 email 用本机中继；留空=不限制 | — |
+| `websocket.client.direct.relayEmail` | 收紧 `direct.relay`：只放行这些来源 email 用本机中继；留空=不限制。精确匹配、大小写敏感；需服务端 B 为同版本 | — |
 | `websocket.client.direct.relayPublic` | 可选公网中继地址数组；全部只写 IP 时每个 binding 使用随机端口并在全部 IP 上通告，全部写 `IP:port` 时使用固定端口；两种形态不能混写 | — |
 | `websocket.client.direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对本条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 | `-direct-plain-udp` |
 | `websocket.client.direct.lanAddrs` | 手工填本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速候选 | — |

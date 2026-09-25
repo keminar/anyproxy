@@ -317,7 +317,7 @@ websocket:
   client:
     direct:
       relay: true
-      # relayAllow: [office]          # optional: only allow specified source emails
+      # relayEmail: [office]          # optional: only allow specified source emails (needs B on the same version)
 
 # C (resident, CGNAT): same as usual direct.accept + forward, plus recognize A's uuid in receive.allow
 websocket:
@@ -649,7 +649,7 @@ Each account is **password or key, choose one** (if both are configured, key is 
 | `direct.portmap` | when `true`, direct candidate collection will attempt UPnP/PCP/NAT-PMP port mapping; default `false` not tried — low hit rate and waits for three protocol timeouts, see "Multiple paths raced simultaneously, winner is whoever connects" above |
 | `direct.punchFirst` | when `true`, declares this machine is behind restricted operator CGNAT and must send the first packet when actively initiating direct (let the peer receiver delay punching); default `false`. Set it when a home-broadband machine can't connect to a public/cloud host, see [direct-punch-order.md](direct-punch-order.md) |
 | `direct.relay` | when `true`, this machine (a public VPS) allows being a blind forwarding relay between A↔C; default `false`. **No per A-C config needed**, target C is specified by the initiator via `direct.rules[].via`, see "Blind forwarding relay via VPS" |
-| `direct.relayAllow` | optional, tightens `direct.relay`: only allow these source emails (initiator A) to use this machine as relay; empty = unrestricted. Email allowlist only, no uuid involved |
+| `direct.relayEmail` | optional, tightens `direct.relay`: only allow these source emails (initiator A) to use this machine as relay; empty = unrestricted. Email allowlist only, no uuid involved. Exact, case-sensitive match. The email is stamped by server B, so **B must be on the same version**: if this list is configured but the email arrives empty (an old B), this machine refuses the relay rather than allowing it. Not to be confused with `forward[].allowRelay`, a boolean controlling whether a given tag may be triggered through B |
 | `direct.relayPublic` | optional public relay address array. With bare IPs, each binding uses a random port advertised on every IP; with `IP:port` endpoints, fixed-port mode is used (for fixed DNAT, one pair per port). The two forms cannot be mixed; see "Blind forwarding relay via VPS" |
 | `direct.plainUdp` | overrides the command-line `-direct-plain-udp` default for this connection, tri-state: unset follows global value, explicit `true`/`false` only affects this one |
 | `direct.lanAddrs` | manually configure this machine's LAN/intranet IP array (no port), extra candidates participating in punching/QUIC dial racing, see "Multiple paths raced simultaneously, winner is whoever connects" above; no NIC auto-scan |

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -652,5 +653,99 @@ func TestRelayAuthRejectsWrongUUID(t *testing.T) {
 	}
 	if err := a.authenticateSession(sess, token, port, true, c.fingerprint); err == nil {
 		t.Fatal("relay auth must fail when A's uuid is not in C's receive.allow")
+	}
+}
+
+// newRelayOpenPeer 建一个配了 relayEmail 的 VPS, 并接上一条能收信令的 websocket 连接:
+// onRelayOpen 是靠 d.send() 回 d_ready 的, 没有连接就什么都断言不到。
+func newRelayOpenPeer(t *testing.T, relayEmail []string) (*directPeer, <-chan *Message) {
+	t.Helper()
+	// 放行的用例要真的把 socket 开起来才算数, 所以得有个反射器让 openRelay 探到端点 E
+	// (同 TestRelayPunchesLegAfterNudge)。
+	refAddr, stopRef := startTestReflector(t)
+	t.Cleanup(stopRef)
+	d := newDirectPeer("test-vps", conf.WsClient{Connect: refAddr, Direct: conf.DirectSettings{
+		Relay:      true,
+		RelayEmail: relayEmail,
+	}}, nil)
+	h := newTestBrokerHub(t)
+	c := newTestBrokerClient(t, h, "vps@example.com")
+	d.setClient(c)
+	return d, c.send
+}
+
+// relayOpen driver: 拼一条 B 会发来的 d_relay_open 并取回 VPS 的应答。
+func relayOpen(t *testing.T, d *directPeer, ch <-chan *Message, token, email string) DirectReady {
+	t.Helper()
+	body, err := encodeDirect(DirectRelayOpen{Token: token, Email: email})
+	if err != nil {
+		t.Fatalf("encode relay-open: %v", err)
+	}
+	d.onRelayOpen(&Message{ID: 1, Type: ConnTCP, Method: METHOD_DIRECT_RELAY_OPEN, Body: body})
+	return decodeDirectMsg[DirectReady](t, recvDirectMsg(t, ch, METHOD_DIRECT_READY))
+}
+
+// TestRelayOpenWithoutEmailListIsUnrestricted 没配 relayEmail 的 VPS 行为一点不变: 谁来都
+// 开。这是整个改动的兼容性底线——准入是 opt-in 的, 不配就不该多出任何一道关卡, 连"对端
+// 是不是新版本 B"都不该在意(所以空 email 这一格也必须过)。
+func TestRelayOpenWithoutEmailListIsUnrestricted(t *testing.T) {
+	for _, email := range []string{"anyone@example.com", ""} {
+		d, ch := newRelayOpenPeer(t, nil)
+		token := "relay-token-open-" + email
+		ready := relayOpen(t, d, ch, token, email)
+		if ready.Err != "" {
+			t.Fatalf("email %q: relay-open must succeed when relayEmail is unset, got %q", email, ready.Err)
+		}
+		if len(ready.Candidates) == 0 {
+			t.Fatalf("email %q: relay-open returned no endpoint", email)
+		}
+		d.closeRelay(token)
+	}
+}
+
+// TestRelayOpenHonoursEmailList 配了名单就只认名单: 名单内放行、名单外拒绝, 且拒绝要发生
+// 在开 socket **之前**(所以断言 relays 表里没留下这个 token 的绑定)。
+func TestRelayOpenHonoursEmailList(t *testing.T) {
+	const allowed, stranger = "office@example.com", "stranger@example.com"
+
+	d, ch := newRelayOpenPeer(t, []string{allowed})
+	if ready := relayOpen(t, d, ch, "relay-token-allowed", allowed); ready.Err != "" {
+		t.Fatalf("email in relayEmail must be allowed, got %q", ready.Err)
+	}
+	d.closeRelay("relay-token-allowed")
+
+	d2, ch2 := newRelayOpenPeer(t, []string{allowed})
+	ready := relayOpen(t, d2, ch2, "relay-token-stranger", stranger)
+	if ready.Err == "" {
+		t.Fatal("email not in relayEmail must be refused")
+	}
+	if len(ready.Candidates) != 0 {
+		t.Fatalf("a refused relay-open must not report an endpoint, got %v", ready.Candidates)
+	}
+	// 拒绝要省下那个专用 socket, 不然"拒绝"只剩下了嘴上功夫。
+	if d2.hasRelay("relay-token-stranger") {
+		t.Fatal("a refused relay-open must not leave a relay binding behind")
+	}
+	// 回给对端的话里不带本机名单细节(同 file_pull.go 的口径)。
+	if strings.Contains(ready.Err, allowed) {
+		t.Fatalf("refusal must not leak the configured allowlist, got %q", ready.Err)
+	}
+}
+
+// TestRelayOpenRefusesEmptyEmailWhenListed 配了名单却收到空 email(对面还是不带这个字段的
+// 老版本 B)时必须拒绝。放行等于让名单对老版本 B 静默失效, 而"名单看着生效、其实没拦住"
+// 正是这个字段重做前的老毛病, 不能换个形式再来一遍。
+func TestRelayOpenRefusesEmptyEmailWhenListed(t *testing.T) {
+	d, ch := newRelayOpenPeer(t, []string{"office@example.com"})
+	ready := relayOpen(t, d, ch, "relay-token-empty", "")
+	if ready.Err == "" {
+		t.Fatal("empty email must be refused when relayEmail is configured")
+	}
+	if d.hasRelay("relay-token-empty") {
+		t.Fatal("a refused relay-open must not leave a relay binding behind")
+	}
+	// 这条错误是要给运维看的: 它得说清该去升级 B, 否则现象只是"中继莫名其妙不通"。
+	if !strings.Contains(ready.Err, "upgrade server B") {
+		t.Fatalf("refusal should tell the operator to upgrade B, got %q", ready.Err)
 	}
 }

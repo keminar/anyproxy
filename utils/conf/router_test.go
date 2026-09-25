@@ -417,3 +417,54 @@ func TestWsClientWantsPersistentConnect(t *testing.T) {
 		})
 	}
 }
+
+// TestWsClientDirectRelayEmail 确认 relayEmail 能解析成列表, 且 RelayEmailAllowed 的语义
+// 是"留空=不限制、配了=精确匹配"。
+//
+// 留空那格是重点: 这个字段的前身(relayAllow)声明了却从没被读过, 于是配了名单的人以为
+// 收紧了、实际全放开。现在反过来要保证的是另一头——**没配**的人不该因为这次落地而突然
+// 被拦, 否则就是把一个静默失效换成了一个静默阻断。
+func TestWsClientDirectRelayEmail(t *testing.T) {
+	const y = `client:
+  connect: a:1
+  direct:
+    relay: true
+    relayEmail:
+      - office@example.com
+      - lab@example.com
+`
+	var w struct {
+		Client WsClient `yaml:"client"`
+	}
+	if err := yaml.Unmarshal([]byte(y), &w); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	d := w.Client.Direct
+	if len(d.RelayEmail) != 2 || d.RelayEmail[0] != "office@example.com" || d.RelayEmail[1] != "lab@example.com" {
+		t.Fatalf("relayEmail parsed as %v", d.RelayEmail)
+	}
+	if !d.RelayEmailAllowed("office@example.com") {
+		t.Error("a listed email must be allowed")
+	}
+	if d.RelayEmailAllowed("stranger@example.com") {
+		t.Error("an unlisted email must be refused")
+	}
+	// 大小写敏感, 与 ClientReceive.LookupSender 对 allow[].email 的口径一致: 配置里写的
+	// 是什么就是什么, 不擅自折叠。
+	if d.RelayEmailAllowed("Office@example.com") {
+		t.Error("matching must be case-sensitive")
+	}
+	// 空 email 不在名单里就是不在, 不能当成通配。它的特殊处置(拒绝并提示升级 B)在
+	// nat/direct_relay.go, 不在这一层。
+	if d.RelayEmailAllowed("") {
+		t.Error("an empty email must not match a non-empty list")
+	}
+
+	// 没配 relayEmail: 一律放行, 包括空 email——老部署行为不变。
+	var none DirectSettings
+	for _, e := range []string{"anyone@example.com", ""} {
+		if !none.RelayEmailAllowed(e) {
+			t.Errorf("email %q must be allowed when relayEmail is unset", e)
+		}
+	}
+}

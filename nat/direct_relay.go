@@ -128,6 +128,26 @@ func (d *directPeer) onRelayOpen(msg *Message) {
 		reply(DirectReady{Err: "directRelay is not enabled on this relay"})
 		return
 	}
+	// 准入检查放在 openRelay 之前: 一旦开下去就占了一个专用 UDP socket 和一轮端点探测,
+	// 拒绝一个本就不该进来的请求不该先付这份代价。
+	//
+	// 配了名单却拿不到身份 = 不放行。空 Email 只有一种来源: 对面的 B 还是不带这个字段的
+	// 老版本(见 DirectRelayOpen.Email)。此时"放过去只打条日志"等于让名单对老版本 B 静默
+	// 失效——而"名单看着生效、实际没拦住"正是这个字段改名重做前的老毛病, 不能换个形式
+	// 再来一遍。没配 relayEmail 的部署走不到这两个分支, 行为完全不变。
+	if len(d.cfg.Direct.RelayEmail) > 0 && open.Email == "" {
+		d.logf("relay: refused relay-open for token %s: relayEmail is configured but the server sent no requester email (old server?)", shortToken(open.Token))
+		reply(DirectReady{Err: "relayEmail is configured on this relay but the signaling server did not provide the requester email; upgrade server B"})
+		return
+	}
+	if !d.cfg.Direct.RelayEmailAllowed(open.Email) {
+		// 日志里记完整 email: 运维要照着它决定加不加名单。回给对端的话不带 email, 与
+		// file_pull.go 回错时不外传本机细节是同一个口径——对面自己是谁它清楚, 本机的
+		// 名单配成什么样没有理由告诉它。
+		d.logf("relay: refused relay-open for token %s from %s: not in relayEmail", shortToken(open.Token), open.Email)
+		reply(DirectReady{Err: "this relay does not accept relay requests from your email"})
+		return
+	}
 	rb, err := d.openRelay(open.Token)
 	if err != nil {
 		d.logf("relay: open for token %s failed: %v", shortToken(open.Token), err)

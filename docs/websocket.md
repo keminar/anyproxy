@@ -323,7 +323,7 @@ websocket:
   client:
     direct:
       relay: true
-      # relayAllow: [office]          # 可选: 只放行指定来源 email
+      # relayEmail: [office]          # 可选: 只放行指定来源 email(需 B 同版本)
 
 # C(居民, CGNAT): 照常 direct.accept + forward, 另在 receive.allow 里认 A 的 uuid
 websocket:
@@ -662,7 +662,7 @@ websocket:
 | `direct.portmap` | `true` 时直连候选收集才会去尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` 不试——命中率低又要等三个协议的超时，见上「多条路同时打，谁通用谁」 |
 | `direct.punchFirst` | `true` 声明本机在受限运营商 CGNAT 后、主动发起直连时必须先发第一个包（让对端接受方推迟打洞）；默认 `false`。家宽机器连公网/云主机连不上时设它，见 [direct-punch-order.md](direct-punch-order.md) |
 | `direct.relay` | `true` 时本机(一台公网 VPS)允许作为 A↔C 之间的盲转发中继；默认 `false`。**无需为每对 A-C 配任何东西**，目标 C 由发起方用 `direct.rules[].via` 指定，见「经 VPS 盲转发中继」 |
-| `direct.relayAllow` | 可选，收紧 `direct.relay`：只放行这些来源 email(发起方 A)用本机中继；留空=不限制。仅 email 准入名单，不涉及 uuid |
+| `direct.relayEmail` | 可选，收紧 `direct.relay`：只放行这些来源 email(发起方 A)用本机中继；留空=不限制。仅 email 准入名单，不涉及 uuid。精确匹配、大小写敏感。email 由服务端 B 盖章送来，**需要 B 为同版本**：配了本名单却收到空 email（老版本 B）时本机拒绝中继而非放行。注意与 `forward[].allowRelay` 不是一回事，那个是控制某条 tag 能否经 B 中转触发的布尔开关 |
 | `direct.relayPublic` | 可选公网中继地址数组。全部只写 IP 时，每个 binding 使用随机端口并在全部 IP 上通告；全部写 `IP:port` 时使用固定端口（适合固定 DNAT，一个端口一对并发）。两种形态不能混写，见「经 VPS 盲转发中继」 |
 | `direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对这一条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 |
 | `direct.lanAddrs` | 手工配置本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速的候选，见上「多条路同时打，谁通用谁」；不做网卡自动扫描 |

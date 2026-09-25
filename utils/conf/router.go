@@ -279,8 +279,8 @@ func protoValid(p string) bool {
 
 // DirectSettings QUIC 直连(A<->C 不经服务端转发数据)相关的全部配置, 挂在
 // websocket.client.direct 一个块下。把原来十来个平铺的 directXxx 字段(directAccept、
-// directEncrypt、directPortmap、directPunchFirst、directRelay、directRelayAllow、
-// directRelayPublic、directLanAddrs、directPlainUdp)和入口规则数组(原来平铺的
+// directEncrypt、directPortmap、directPunchFirst、directRelay、directRelayAllow(今
+// relayEmail)、directRelayPublic、directLanAddrs、directPlainUdp)和入口规则数组(原来平铺的
 // direct: [...])合到一起, 字段名去掉 direct 前缀(前缀已经在外层 direct: 这个 key 上
 // 体现了, 块内重复没有意义)。
 //
@@ -346,15 +346,26 @@ type DirectSettings struct {
 	// 目标 C 由 A 在请求里用 rules[].via 指定。数据不经服务端 B。详见 docs/direct-relay-design.md。
 	//
 	// 默认 false: 不开就完全不参与中继(收到中继请求直接回错)。开了即对 B 内所有已鉴权订阅方
-	// 开放中继; 用 RelayAllow 可收紧到指定来源 email。
+	// 开放中继; 用 RelayEmail 可收紧到指定来源 email。
 	Relay bool `yaml:"relay"`
 
-	// RelayAllow 收紧 Relay: 只有这里列出的来源 email(即发起中继的 A 的、经 B
+	// RelayEmail 收紧 Relay: 只有这里列出的来源 email(即发起中继的 A 的、经 B
 	// 认证过的 email)才能用本机中继。留空(且 Relay 为 true)= 不限制, B 内任何已鉴权
 	// 订阅方都能用。仅 email 白名单, 不涉及 uuid——中继本身不做身份鉴权(那在 A<->C 的 e2e
 	// QUIC 层, 见 docs/direct-relay-design.md), 这里只是"谁能占用本机中继资源"的准入。
-	// (原 directRelayAllow)
-	RelayAllow []string `yaml:"relayAllow"`
+	//
+	// 按字符串精确匹配, **大小写敏感**, 与 ClientReceive.LookupSender 对 allow[].email
+	// 的口径一致。
+	//
+	// 注意与 ClientForward.AllowRelay 不是一回事: 那个是"某条 forward tag 允不允许经 B
+	// 中转触发"的布尔开关, 两者名字接近但作用域和类型都不同。
+	//
+	// 生效前提: 发起方的 email 由服务端 B 盖章后经 DirectRelayOpen 送到本机(见
+	// nat/direct_msg.go 的 DirectRelayOpen.Email), 老版本 B 不带这个字段。配了本名单
+	// 却收到空 email 时本机会**拒绝**中继而不是放行——准入名单不能因为对端版本旧就
+	// 静默失效(见 nat/direct_relay.go onRelayOpen)。
+	// (原 relayAllow, 只声明未落地)
+	RelayEmail []string `yaml:"relayEmail"`
 
 	// RelayPublic 显式指定本机(中继 VPS)的公网中继地址, 支持两种互斥形态:
 	//   - 只写 IP(如 "203.0.113.10" / "2001:db8::1"): 每个 binding 仍使用随机端口，并把
@@ -401,6 +412,27 @@ type DirectSettings struct {
 	// 路径都会撞上, 不该为了绕开一条路径上的问题而牺牲其它路径本来正常的批量收发
 	// 优化。
 	PlainUDP *bool `yaml:"plainUdp"`
+}
+
+// RelayEmailAllowed 该来源 email 是否获准使用本机中继(见 RelayEmail)。名单留空 =
+// 不限制, 与"没配这个字段的老部署行为不变"是同一件事。
+//
+// 精确匹配、大小写敏感, 与 ClientReceive.LookupSender 的口径一致: email 在这里是一
+// 个配置里照抄的标识符, 不做规范化——擅自折叠大小写会让"名单里写的"和"日志里打的"
+// 对不上, 排查时更费劲。
+//
+// 只回答"在不在名单里"。空 email 的处置(配了名单却拿不到身份)由调用方决定, 见
+// nat/direct_relay.go 的 onRelayOpen——那里按 fail-closed 拒绝。
+func (d DirectSettings) RelayEmailAllowed(email string) bool {
+	if len(d.RelayEmail) == 0 {
+		return true
+	}
+	for _, e := range d.RelayEmail {
+		if e == email {
+			return true
+		}
+	}
+	return false
 }
 
 // ClientReceive 订阅方与别人交换文件的目录。不配 Dir 就收发一律拒绝。

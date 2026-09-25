@@ -310,8 +310,10 @@ websocket:
       #                  # 专用 UDP socket、探到自己的公网端点、让 A/C 都朝它打洞, 之后在两个来源地址间盲
       #                  # 转发不透明 UDP 包。QUIC/TLS 端到端在 A<->C, 本机看不到明文。关键: 本机**不需要**为
       #                  # 每对 A-C 配 forward/rules/receive.allow, 只要这一个开关; 目标 C 由 A 用 via 指定
-      # relayAllow:      # 可选, 收紧 relay: 只允许这些来源 email(发起中继的 A, 经 B 认证)用本机中继。
+      # relayEmail:      # 可选, 收紧 relay: 只允许这些来源 email(发起中继的 A, 经 B 认证)用本机中继。
       #   - office@example.com # 留空(且 relay=true)=不限制。仅 email 准入名单, 不涉及 uuid(鉴权在 A<->C 的 e2e 层)
+      #                  # 精确匹配、大小写敏感。注意与 forward[].allowRelay 不是一回事(那个是布尔开关)
+      #                  # 需服务端 B 为同版本(email 由 B 盖章送来): 配了本名单却收到空 email 时本机拒绝中继
       # relayPublic:     # 可选。只写 IP 时每个 binding 使用随机端口，并把该端口与全部 IP 组合成候选：
       #   - "192.0.2.10"       # 适合按目标选择不同公网源 IP 的多出口 VPS，不占固定端口槽位
       #   - "198.51.100.10"    # IPv6 同样只写裸地址。若写 IP:port，则切换成下面的固定端口模式：
@@ -359,7 +361,7 @@ websocket:
     sendRecvOnly: false
   # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
   # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/direct(含
-  # accept/rules/encrypt/portmap/punchFirst/relay/relayAllow/relayPublic/lanAddrs/plainUdp)/
+  # accept/rules/encrypt/portmap/punchFirst/relay/relayEmail/relayPublic/lanAddrs/plainUdp)/
   # receive/sendRecvOnly; uuid 不可配, 自动生成)
   # clients:
   #   - connect:

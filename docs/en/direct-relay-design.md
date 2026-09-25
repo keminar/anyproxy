@@ -110,7 +110,7 @@ websocket:
     direct:
       accept: true       # still required: so residents can punch-connect up
       relay: true         # new: allow acting as relay; by default open to all authenticated subscribers in B
-      # relayAllow:       # optional: restrict which source emails may use this machine's relay (empty = fully open)
+      # relayEmail:       # optional: restrict which source emails may use this machine's relay (empty = fully open, needs B on the same version)
 ```
 
 **C's configuration** (essentially unchanged; the `forward` whitelist is still the gate):
@@ -298,8 +298,8 @@ Because the VPS is opaque forwarding and makes no TCP/UDP distinction, the data 
 ## 9. Decisions already made
 
 - **Authentication direction**: one-way — **C verifies A with uuid challenge-response**; A verifies C with **certificate fingerprint** (not uuid). Both ends are authenticated, and the VPS cannot impersonate either.
-- **C-side list**: **reuse the existing `receive.allow`** (email+uuid), do not open a new `relayAllow` (change its comment from "file-transfer only" to "file transfer + relay authentication").
-- **`direct.relay` default**: once enabled, open to "all authenticated subscribers within B"; `direct.relayAllow` optionally tightens.
+- **C-side list**: **reuse the existing `receive.allow`** (email+uuid), do not open a separate C-side list for relaying (change its comment from "file-transfer only" to "file transfer + relay authentication"). This is distinct from the VPS-side `relayEmail` below: the former governs "who may reach C", the latter "who may consume this VPS's relay resources".
+- **`direct.relay` default**: once enabled, open to "all authenticated subscribers within B"; `direct.relayEmail` optionally tightens it to specific source emails. The initiator's email is stamped by B from its own authenticated connection and delivered via `DirectRelayOpen.Email` (not self-reported by A); the VPS checks the list **before** opening the relay socket. If the list is configured but the email arrives empty (an old B that does not send the field), the VPS refuses the relay — an allowlist must not silently lapse just because the peer is on an older version.
 - **Relay target granularity**: one target C per A↔VPS connection.
 - **Naming**: A side `via`, VPS side `direct.relay`.
 - **No separate broker token needed**: uuid challenge-response alone carries it (see §4); optionally kept as a cheap early-reject door.
@@ -325,7 +325,7 @@ Because the VPS is opaque forwarding and makes no TCP/UDP distinction, the data 
 - Ordering: the VPS only sends to a leg after that leg's nudge (no fallback timer, see §6), so
   `direct.punchFirst` is not involved; that
   switch only applies to plain direct connections per [direct-punch-order.md](direct-punch-order.md).
-- Config: [utils/conf/router.go](../utils/conf/router.go) (`ClientDirect.Via`, `DirectSettings.Relay`, optional `DirectSettings.RelayAllow`, `DirectSettings.RelayPublic`, all under `WsClient.Direct`).
+- Config: [utils/conf/router.go](../utils/conf/router.go) (`ClientDirect.Via`, `DirectSettings.Relay`, optional `DirectSettings.RelayEmail`, `DirectSettings.RelayPublic`, all under `WsClient.Direct`).
 
 ## Appendix: Discarded design (VPS two-leg bridge)
 

@@ -157,6 +157,18 @@ type DirectPunch struct {
 // 两腿打洞并盲转发。详见 docs/direct-relay-design.md。
 type DirectRelayOpen struct {
 	Token string `json:"token"` //本次中继会话标识, 与 A 的 DirectRequest.Token 一致
+
+	// Email 发起这次中继的 A 的身份, 供 VPS 侧按 direct.relayEmail 名单决定放不放行
+	// (见 utils/conf/router.go 的 RelayEmailAllowed)。
+	//
+	// 由 B 填**它自己认证过的** c.Email(见 direct_broker.go onRelayRequest), 不是 A 在
+	// DirectRequest 里自报的任何字段——自报的东西当准入依据等于没有。与 DirectPunch.Email、
+	// FileRelayOpen.FromEmail 是同一个"B 盖章"的模式。
+	//
+	// omitempty 且允许为空: 老版本 B 不认识这个字段, 转发时不会填。VPS 侧配了 relayEmail
+	// 却收到空值时会拒绝(fail-closed), 而不是当成"没限制"放过去——见 direct_relay.go
+	// onRelayOpen。没配 relayEmail 的 VPS 不受影响。
+	Email string `json:"email,omitempty"`
 }
 
 // DirectPunching A(发起方)开打后发出的 nudge: A -> B -> C, 通知 C"我已开始打洞, 你

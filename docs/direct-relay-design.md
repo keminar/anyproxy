@@ -129,7 +129,7 @@ websocket:
     direct:
       accept: true       # 仍要: 这样居民能 punch 连上来
       relay: true         # 新增: 允许作为中继; 默认对 B 内所有已鉴权订阅方开放
-      # relayAllow:       # 可选: 限制哪些源 email 可用本机中继(不填=全放开)
+      # relayEmail:       # 可选: 限制哪些源 email 可用本机中继(不填=全放开, 需 B 同版本)
 ```
 
 **C 的配置**(基本不变;`forward` 白名单仍是关口):
@@ -316,9 +316,13 @@ VPS 在收到 nudge 后要朝这条腿主动发包,而此刻它手里只有 B �
 
 - **鉴权方向**:单向——**C 用 uuid 挑战-应答验 A**;A 用**证书指纹**验 C(非 uuid)。两头都被
   认证,VPS 冒充不了任何一方。
-- **C 侧名单**:**复用现有 `receive.allow`**(email+uuid),不新开 `relayAllow`(把它的注释从
-  "仅文件传输用"改成"文件传输 + 中继鉴权用")。
-- **direct.relay 默认**:开了即对"B 内所有已鉴权订阅方"开放;`direct.relayAllow` 可选收紧。
+- **C 侧名单**:**复用现有 `receive.allow`**(email+uuid),不为中继另开一份 C 侧名单(把它的
+  注释从"仅文件传输用"改成"文件传输 + 中继鉴权用")。这跟下面 VPS 侧的 `relayEmail` 是两回
+  事:前者管"谁能连到 C",后者管"谁能占用这台 VPS 的中继资源"。
+- **direct.relay 默认**:开了即对"B 内所有已鉴权订阅方"开放;`direct.relayEmail` 可选收紧到
+  指定来源 email。发起方 email 由 B 用它已认证的连接盖章、经 `DirectRelayOpen.Email` 送到
+  VPS(不是 A 自报),VPS 在开中继 socket **之前**查名单。配了名单却收到空 email(老版本 B 不
+  带这个字段)时 VPS 拒绝中继——准入名单不能因为对端版本旧就静默失效。
 - **中继目标粒度**:每条 A↔VPS 连接一个目标 C。
 - **命名**:A 侧 `via`、VPS 侧 `direct.relay`。
 - **不需要单独 broker token**:uuid 挑战-应答独扛(见 §4);可选保留当廉价早拒门。
@@ -371,7 +375,7 @@ VPS 在收到 nudge 后要朝这条腿主动发包,而此刻它手里只有 B �
 - 顺序:VPS 由该腿的 nudge 触发才主动发包(无兜底定时器,见 §6),不涉及 `direct.punchFirst`;该开关只在普通直连场景下按
   [direct-punch-order.md](direct-punch-order.md) 生效。
 - 配置:[utils/conf/router.go](../utils/conf/router.go)(`ClientDirect.Via`、`DirectSettings.Relay`、
-  可选 `DirectSettings.RelayAllow`、`DirectSettings.RelayPublic`, 均挂在 `WsClient.Direct` 下)。
+  可选 `DirectSettings.RelayEmail`、`DirectSettings.RelayPublic`, 均挂在 `WsClient.Direct` 下)。
 
 ## 附:废弃方案(VPS 两腿桥接)
 

@@ -213,7 +213,7 @@ Config is split by role into `server` (server side) / `client` (client side) blo
 | `websocket.client.direct.portmap` | When `true`, direct candidate collection tries UPnP/PCP/NAT-PMP port mapping; default `false` | — |
 | `websocket.client.direct.punchFirst` | `true` declares this machine is behind restrictive CGNAT and, when actively connecting directly, must send the first packet first (letting the peer acceptor delay its punch); set when home broadband connecting to public cloud host fails | — |
 | `websocket.client.direct.relay` | When `true`, this machine (public VPS) allows acting as the A↔C blind-forward relay; no need to configure `forward`/`direct` per pair, the target is specified by the initiator's `direct.rules[].via` | — |
-| `websocket.client.direct.relayAllow` | Tightens `direct.relay`: only allows these source emails to use this machine's relay; empty = unrestricted | — |
+| `websocket.client.direct.relayEmail` | Tightens `direct.relay`: only allows these source emails to use this machine's relay; empty = unrestricted. Exact, case-sensitive match; requires server B on the same version | — |
 | `websocket.client.direct.relayPublic` | Optional public relay address array. If every entry is a bare IP, each binding uses a random port advertised on all IPs; if every entry is `IP:port`, fixed-port mode is used. The two forms cannot be mixed | — |
 | `websocket.client.direct.plainUdp` | Overrides the command-line `-direct-plain-udp` default for this connection, three-state: not set follows global value, explicit `true`/`false` affects only this one | `-direct-plain-udp` |
 | `websocket.client.direct.lanAddrs` | Manually fill this machine's LAN/intranet IP array (no port), extra candidates for hole-punch/QUIC-dial racing | — |
