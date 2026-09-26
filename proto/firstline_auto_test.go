@@ -50,8 +50,8 @@ func TestFindLocationHeader(t *testing.T) {
 	}{
 		{
 			"typical redirect",
-			"HTTP/1.1 308 Permanent Redirect\r\nlocation: http://dev.dog.com:5000/\r\nRefresh: 0;url=http://dev.dog.com:5000/\r\n\r\n",
-			"http://dev.dog.com:5000/",
+			"HTTP/1.1 308 Permanent Redirect\r\nlocation: http://dev.example.com:5000/\r\nRefresh: 0;url=http://dev.example.com:5000/\r\n\r\n",
+			"http://dev.example.com:5000/",
 		},
 		{
 			"case insensitive key with extra spaces",
@@ -79,7 +79,7 @@ func TestFindLocationHeader(t *testing.T) {
 }
 
 func TestSameSelfRedirectTarget(t *testing.T) {
-	base, err := url.Parse("http://dev.dog.com:5000/")
+	base, err := url.Parse("http://dev.example.com:5000/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,11 +88,11 @@ func TestSameSelfRedirectTarget(t *testing.T) {
 		loc  string
 		want bool
 	}{
-		{"identical url is a self-redirect", "http://dev.dog.com:5000/", true},
-		{"different path is not", "http://dev.dog.com:5000/login", false},
-		{"scheme upgrade to https is not", "https://dev.dog.com:5000/", false},
-		{"different host is not", "http://other.dog.com:5000/", false},
-		{"different query is not", "http://dev.dog.com:5000/?x=1", false},
+		{"identical url is a self-redirect", "http://dev.example.com:5000/", true},
+		{"different path is not", "http://dev.example.com:5000/login", false},
+		{"scheme upgrade to https is not", "https://dev.example.com:5000/", false},
+		{"different host is not", "http://other.example.com:5000/", false},
+		{"different query is not", "http://dev.example.com:5000/?x=1", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -109,7 +109,7 @@ func TestSameSelfRedirectTarget(t *testing.T) {
 }
 
 // checkSelfRedirect 是接在 copyBuffer 里的钩子, 传入的是服务端响应"第一个数据块"的原始字节
-// (即用户 curl -I dev.dog.com:5000 时后端真实吐出来的那种 308+Location 响应)。
+// (即用户 curl -I dev.example.com:5000 时后端真实吐出来的那种 308+Location 响应)。
 // 命中时必须学到 off, 且 key 要按 firstLineHost 的规则把 host 里的冒号换成点, 否则学到的
 // 记录和 firstLineHost 查询时用的 key 对不上，等于白学。
 func TestCheckSelfRedirectLearnsFromResponseChunk(t *testing.T) {
@@ -117,7 +117,7 @@ func TestCheckSelfRedirectLearnsFromResponseChunk(t *testing.T) {
 	firstLineLearned = map[string]bool{}
 	t.Cleanup(func() { firstLineLearned = oldLearned })
 
-	reqURL, err := url.Parse("http://dev.dog.com:5000/")
+	reqURL, err := url.Parse("http://dev.example.com:5000/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,13 +126,13 @@ func TestCheckSelfRedirectLearnsFromResponseChunk(t *testing.T) {
 		selfRedirectURL: reqURL,
 	}
 	chunk := []byte("HTTP/1.1 308 Permanent Redirect\r\n" +
-		"location: http://dev.dog.com:5000/\r\n" +
-		"Refresh: 0;url=http://dev.dog.com:5000/\r\n\r\n")
+		"location: http://dev.example.com:5000/\r\n" +
+		"Refresh: 0;url=http://dev.example.com:5000/\r\n\r\n")
 
 	s.checkSelfRedirect(chunk)
 
-	if !isFirstLineLearnedOff("dev.dog.com.5000") {
-		t.Fatal("checkSelfRedirect did not learn dev.dog.com.5000 as off after a matching self-redirect")
+	if !isFirstLineLearnedOff("dev.example.com.5000") {
+		t.Fatal("checkSelfRedirect did not learn dev.example.com.5000 as off after a matching self-redirect")
 	}
 }
 
@@ -142,7 +142,7 @@ func TestCheckSelfRedirectIgnoresNonMatches(t *testing.T) {
 	firstLineLearned = map[string]bool{}
 	t.Cleanup(func() { firstLineLearned = oldLearned })
 
-	reqURL, _ := url.Parse("http://dev.dog.com:5000/")
+	reqURL, _ := url.Parse("http://dev.example.com:5000/")
 	cases := map[string][]byte{
 		"plain 200":               []byte("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n"),
 		"redirect to other path":  []byte("HTTP/1.1 302 Found\r\nLocation: /login\r\n\r\n"),
@@ -152,8 +152,8 @@ func TestCheckSelfRedirectIgnoresNonMatches(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := &tunnel{req: &Request{ID: 1}, selfRedirectURL: reqURL}
 			s.checkSelfRedirect(chunk)
-			if isFirstLineLearnedOff("dev.dog.com.5000") {
-				t.Fatalf("case %q should not have learned dev.dog.com.5000 as off", name)
+			if isFirstLineLearnedOff("dev.example.com.5000") {
+				t.Fatalf("case %q should not have learned dev.example.com.5000 as off", name)
 			}
 		})
 	}
