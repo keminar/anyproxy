@@ -356,12 +356,14 @@ func TestDomainIndex(t *testing.T) {
 		t.Error("空索引不应命中任何域名")
 	}
 
-	idx := buildDomainIndex(map[string]struct{}{
-		"baidu.com":    {},
-		"baidu.com.cn": {}, // 与 baidu.com 互为前缀, 但应各自独立
-		"qq.com":       {},
-		"a.com":        {},
-	})
+	var b domainBuilder
+	for _, d := range []string{"baidu.com", "baidu.com.cn", "qq.com", "a.com", "a.com"} { // 末尾故意重复一次
+		b.add(d)
+	}
+	idx := b.finish()
+	if len(idx.entries) != 4 {
+		t.Fatalf("finish() 应去重, got %d 条", len(idx.entries))
+	}
 	for _, d := range []string{"baidu.com", "baidu.com.cn", "qq.com", "a.com"} {
 		if !idx.contains(d) {
 			t.Errorf("contains(%q)=false, want true", d)
@@ -373,10 +375,10 @@ func TestDomainIndex(t *testing.T) {
 		}
 	}
 
-	merged := mergeIndex(idx, map[string]struct{}{
-		"qq.com":  {}, // 已存在, 应去重不影响结果
-		"163.com": {}, // 新增
-	})
+	var add domainBuilder
+	add.add("qq.com")  // 已存在, 应去重不影响结果
+	add.add("163.com") // 新增
+	merged := mergeIndex(idx, add)
 	if len(merged.entries) != 5 {
 		t.Fatalf("合并去重后应有 5 条, got %d", len(merged.entries))
 	}
