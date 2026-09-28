@@ -1,0 +1,52 @@
+# 安装：
+#   sudo cp scripts/anyproxy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now anyproxy
+# 更新此文件后需重新执行 daemon-reload 才会生效。
+
+[Unit]
+Description=anyproxy - intelligent traffic forwarding and proxy engine
+Documentation=https://github.com/keminar/anyproxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 必须是 notify，不能改回 simple：平滑重启会 fork 出全新 PID 的子进程接管服务、
+# 老进程 drain 完连接才退出，程序在交接时会用 sd_notify 把 MAINPID 迁移给新进程
+# （systemd >= 233 支持）。改回 simple 后 systemd 只认最初的 PID，老进程一退出就会
+# 判定服务已停止，按 KillMode=control-group 把刚接管的新进程一起杀掉（reload 后进程
+# 直接消失，`systemctl status` 变 inactive）。
+Type=notify
+NotifyAccess=main
+
+# 部署目录：需含编译好的 anyproxy 二进制，及同级 conf/、logs/ 目录
+# （新机器先手动跑一次 `./anyproxy -genconf` 生成默认配置和日志目录）
+WorkingDirectory=/opt/anyproxy
+ExecStart=/opt/anyproxy/anyproxy -c /opt/anyproxy/conf/router.yaml
+
+# 平滑重启：发 SIGHUP，程序 fork 新进程接管监听 fd，老进程 drain 连接后退出，
+# 交接时把 MAINPID 迁移给新进程（见上面 Type=notify 的说明），所以这里的 $MAINPID
+# 在多次 reload 后依然指向当前存活的进程
+# （listen: off 的纯 websocket 场景走「先起新进程、老进程再退出」，见 docs/deployment.md）
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=3
+
+# 文件句柄，见 docs/deployment.md#性能调优（与 loopGuard.minActive 相关）
+LimitNOFILE=65535
+
+# 不要在 ExecStart 里加 -daemon：那是给不用 systemd 时的手动后台 fork 用的，
+# 会导致父进程立即退出、systemd 认为服务已停止。
+
+# 默认以 root 运行。如走 iptables 透明代理 + 专用不可登录账号（见 scripts/setup.sh），
+# 取消下面两行注释，并确保该账号对 WorkingDirectory 下 conf/、logs/ 有读写权限：
+#User=anyproxy
+#Group=anyproxy
+
+# mode: tun 需要操作虚拟网卡和路由表，非 root 运行时取消以下两行注释：
+#AmbientCapabilities=CAP_NET_ADMIN
+#CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

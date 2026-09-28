@@ -72,9 +72,14 @@ var (
 	hookableSignals []os.Signal
 )
 
+// socketOrderEnv 通过环境变量(而非命令行 flag)在 fork() 重启时把 fd 继承顺序传给子进程:
+// 它纯粹是进程重启的内部记账, 不是用户需要在命令行上感知/传递的东西, 放进 argv 只会和
+// -l 撞出一份看着重复的地址列表(见 fork() 里的用法)。
+const socketOrderEnv = "ANYPROXY_SOCKETORDER"
+
 func init() {
 	flag.BoolVar(&isChild, "graceful", false, "listen on open fd (after forking)")
-	flag.StringVar(&socketOrder, "socketorder", "", "previous initialization order - used when more than one listener was started")
+	socketOrder = os.Getenv(socketOrderEnv)
 
 	regLock = &sync.Mutex{}
 	runningServers = make(map[string]*Server)

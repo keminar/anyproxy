@@ -402,6 +402,7 @@ func main() {
 			// ListenAndServe() 里那段握手, 需要自己补上, 否则旧进程会一直占着端口不退出。
 			notifyOldProcessExit()
 		}
+		grace.NotifyReady()
 		waitForShutdown(tunCancel, &tunWG)
 		return
 	}
@@ -466,10 +467,15 @@ func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
 		switch <-sig {
 		case syscall.SIGHUP:
 			log.Println(os.Getpid(), "Received SIGHUP (listen off): starting new process to take over, exiting current process")
-			if err := restartSelf(); err != nil {
+			grace.NotifyReloading()
+			pid, err := restartSelf()
+			if err != nil {
 				log.Println("restart err:", err, "(keeping current process running)")
 				continue // 起新进程失败就不退旧进程, 避免服务中断
 			}
+			// 这条路径不等子进程握手确认(见 restartSelf 上的注释), 拿到 pid 就直接
+			// 迁移 MAINPID: 否则老进程退出后 systemd 会误判服务停止, 清理掉新进程。
+			grace.NotifyMainPID(pid)
 			cancel()
 			wg.Wait()
 			return
@@ -481,10 +487,10 @@ func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
 	}
 }
 
-// restartSelf 用相同参数启动一个新进程(去掉 grace 内部的 -graceful 标志)。
+// restartSelf 用相同参数启动一个新进程(去掉 grace 内部的 -graceful 标志), 返回其 pid。
 // 与 grace.fork 不同, 这里不继承任何监听 fd(listen off 无主监听); 依赖 websocket
-// 服务的绑定重试来接管旧进程释放的端口。
-func restartSelf() error {
+// 服务的绑定重试来接管旧进程释放的端口, 也不等子进程握手确认, 起成功就算数。
+func restartSelf() (int, error) {
 	var args []string
 	for _, a := range os.Args[1:] {
 		if a == "-graceful" {
@@ -496,7 +502,11 @@ func restartSelf() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	go cmd.Wait()
+	return cmd.Process.Pid, nil
 }
 
 // notifyOldProcessExit 在「端口 -> listen off」的 SIGHUP 重启里补上 grace.Server

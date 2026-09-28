@@ -24,6 +24,15 @@ var ErrReloadClose = errors.New("reload graceful")
 // TermTimeout 平滑重启主进程保持秒数
 var TermTimeout = 10
 
+var (
+	// forkedChildPID 记录 fork() 起出的子进程 pid, 供老进程收到子进程握手 SIGTERM 时
+	// 通过 NotifyMainPID 把 systemd 的追踪目标迁移过去。regLock 保护读写。
+	forkedChildPID int
+	// notifyMainPIDOnce 保证一个进程即使跑了多个 grace.Server(多 listen 地址各有一个
+	// handleSignals goroutine 收到同一个 SIGTERM), NotifyMainPID 也只真正发送一次。
+	notifyMainPIDOnce sync.Once
+)
+
 // Server embedded http.Server
 type Server struct {
 	Addr         string
@@ -214,6 +223,7 @@ func (srv *Server) ListenAndServe() (err error) {
 	}
 
 	log.Println(fmt.Sprintf("Listening for connections on %v, pid=%d", srv.ln.Addr(), os.Getpid()))
+	NotifyReady()
 
 	return srv.Serve()
 }
@@ -310,6 +320,14 @@ func (srv *Server) handleSignals() {
 			srv.shutdown(0)
 		case syscall.SIGTERM:
 			log.Println(pid, "Received SIGTERM.")
+			// 平滑重启交接完成的信号(见 ListenAndServe 里子进程发来的 SIGTERM):
+			// 老进程退出前把 MAINPID 迁移给子进程, 否则 systemd 会在老进程退出后
+			// 误判服务已停止, 把刚接管的新进程一起清理掉。
+			if childPID, forked := currentForkedChild(); forked {
+				notifyMainPIDOnce.Do(func() {
+					NotifyMainPID(childPID)
+				})
+			}
 			srv.shutdown(TermTimeout)
 		default:
 			log.Printf("Received %v: nothing i care about...\n", sig)
@@ -377,6 +395,7 @@ func (srv *Server) fork() (err error) {
 		return
 	}
 	runningServersForked = true
+	NotifyReloading()
 
 	var files = make([]*os.File, len(runningServers))
 	var orderArgs = make([]string, len(runningServers))
@@ -398,13 +417,14 @@ func (srv *Server) fork() (err error) {
 		}
 	}
 	args = append(args, "-graceful")
-	if len(runningServers) > 1 {
-		args = append(args, fmt.Sprintf(`-socketorder=%s`, strings.Join(orderArgs, ",")))
-		log.Println(args)
-	}
+	log.Println(args)
 	cmd := exec.Command(path, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if len(runningServers) > 1 {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", socketOrderEnv, strings.Join(orderArgs, ",")))
+	}
 	cmd.ExtraFiles = files
 	err = cmd.Start()
 	if err != nil {
@@ -415,9 +435,17 @@ func (srv *Server) fork() (err error) {
 		err = fmt.Errorf("Restart: Failed to launch, error: %v", err)
 		return
 	}
+	forkedChildPID = cmd.Process.Pid
 	go cmd.Wait()
 
 	return
+}
+
+// currentForkedChild 返回本进程 fork() 出的子进程 pid, 及是否确实发起过 fork。
+func currentForkedChild() (int, bool) {
+	regLock.Lock()
+	defer regLock.Unlock()
+	return forkedChildPID, runningServersForked
 }
 
 // RegisterSignalHook registers a function to be run PreSignal or PostSignal for a given signal.
