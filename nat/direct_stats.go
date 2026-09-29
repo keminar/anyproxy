@@ -9,6 +9,8 @@ import (
 	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/qlog"
 	"github.com/quic-go/quic-go/qlogwriter"
+
+	"github.com/keminar/anyproxy/config"
 )
 
 // 直连 QUIC 连接的收发统计。
@@ -83,8 +85,11 @@ func (r *directStatsRecorder) RecordEvent(e qlogwriter.Event) {
 		if ev.BytesInFlight != 0 {
 			r.stats.inFlt = ev.BytesInFlight
 		}
+		// 这行是每秒一条的趋势打点, 不是连接生命周期里的一次性事件, 不该跟着
+		// quiet=false 的长连接无条件刷屏——只在开了 -debug 时才打(见文件头注释)。
 		var due bool
-		if r.stats.logf != nil && time.Since(r.stats.lastLog) >= statsLogInterval {
+		if r.stats.logf != nil && config.DebugLevel >= config.LevelDebug &&
+			time.Since(r.stats.lastLog) >= statsLogInterval {
 			r.stats.lastLog = time.Now()
 			due = true
 		}
