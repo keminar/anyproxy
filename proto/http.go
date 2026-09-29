@@ -63,7 +63,7 @@ func (that *httpStream) validHead() bool {
 	that.Method = strings.ToUpper(string(tmpBuf[:s1]))
 
 	isHTTP := false
-	allMethods := []string{"CONNECT", "OPTIONS", "DELETE", "TRACE", "POST", "HEAD", "GET", "PUT"}
+	allMethods := []string{"CONNECT", "OPTIONS", "DELETE", "TRACE", "POST", "HEAD", "GET", "PUT", "PATCH"}
 	for _, one := range allMethods {
 		if one == that.Method {
 			isHTTP = true
