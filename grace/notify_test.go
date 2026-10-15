@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -12,6 +13,9 @@ import (
 // 返回收到的每条消息。
 func newFakeNotifySocket(t *testing.T) (addr string, recv <-chan string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("windows AF_UNIX does not support datagram (unixgram) sockets")
+	}
 	addr = filepath.Join(t.TempDir(), "notify.sock")
 	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: addr, Net: "unixgram"})
 	if err != nil {
