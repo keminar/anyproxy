@@ -1130,8 +1130,9 @@ func TestChunkCursorClaimConcurrent(t *testing.T) {
 	c := newChunkCursor(size)
 
 	type claim struct{ offset, length int64 }
-	results := make(chan claim, 64)
-	idxCh := make(chan int, 64)
+	var mu sync.Mutex
+	var results []claim
+	idxSeen := map[int]bool{}
 
 	var wg sync.WaitGroup
 	sizes := []int64{997, 1500, 2048, 4096} // 模拟不同 worker 选了不同的分片大小
@@ -1144,23 +1145,19 @@ func TestChunkCursorClaimConcurrent(t *testing.T) {
 				if !ok {
 					return
 				}
-				results <- claim{offset, length}
-				idxCh <- idx
+				mu.Lock()
+				results = append(results, claim{offset, length})
+				idxSeen[idx] = true
+				mu.Unlock()
 			}
 		}(want)
 	}
 	wg.Wait()
-	close(results)
-	close(idxCh)
 
-	var claims []claim
-	for r := range results {
-		claims = append(claims, r)
-	}
-	sort.Slice(claims, func(i, j int) bool { return claims[i].offset < claims[j].offset })
+	sort.Slice(results, func(i, j int) bool { return results[i].offset < results[j].offset })
 
 	var off, total int64
-	for i, cl := range claims {
+	for i, cl := range results {
 		if cl.offset != off {
 			t.Fatalf("claim %d starts at %d, want %d (gap or overlap)", i, cl.offset, off)
 		}
@@ -1171,12 +1168,9 @@ func TestChunkCursorClaimConcurrent(t *testing.T) {
 		t.Fatalf("claimed %d bytes total, want %d", total, size)
 	}
 
-	seen := map[int]bool{}
-	for idx := range idxCh {
-		if seen[idx] {
-			t.Fatalf("idx %d handed out to more than one claim", idx)
-		}
-		seen[idx] = true
+	// idx 唯一性已在收集时用 map 记录, 数量必须等于 claim 总数。
+	if len(idxSeen) != len(results) {
+		t.Fatalf("got %d distinct idx for %d claims (idx handed out to more than one claim)", len(idxSeen), len(results))
 	}
 }
 
