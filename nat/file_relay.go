@@ -483,8 +483,11 @@ func onFileRelayOpen(c *Client, msg *Message) {
 		reply(fmt.Sprintf("bad salt: %v", err))
 		return
 	}
-	reply("")
-
+	// 必须先建好 session 并登记进 fileRelayPipes, 再回 ready。反过来做(A 收到
+	// ready 立刻开写, 而这里还没 Store)会留下一个竞态窗口: 数据经 B 转发到本端读
+	// pump 时 fileRelayPipes.Load 还没命中, 这条消息就被当成"不属于任何会话"漏掉,
+	// 甚至可能挂到旧会话残留的同 id pipe 上, 表现是解密失败
+	// (aead: decrypt/auth failed)。并行分块时 3 个会话同时开, 窗口更容易撞上。
 	s := newFileRelaySession(c, msg.ID)
 	secured, err := newAEADConn(s.pipe, receiverKey, senderKey)
 	if err != nil {
@@ -492,6 +495,8 @@ func onFileRelayOpen(c *Client, msg *Message) {
 		s.close(fmt.Sprintf("server-side decryption setup failed: %v", err))
 		return
 	}
+	reply("")
+
 	remote := fmt.Sprintf("relay:%s", req.FromEmail)
 	if req.Op == fileRelayOpPull {
 		servePull(secured, cfg, req.FromEmail, remote, logf)
