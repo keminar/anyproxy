@@ -10,10 +10,10 @@
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l`。设为 `off`（或 `none`/`-`）**关闭代理监听**，仅跑 websocket/tun 等后台服务（纯内网穿透场景，不需要本机代理端口）。关闭后 websocket 的「HTTP 头订阅」路径失效（它依赖本机代理），「裸 TCP 转发」不受影响 |
+| `listen` | string | `:3000` | 监听地址端口，优先级低于 `-l`。可用逗号分隔写多个完整地址（每个都要带端口，如 `192.168.1.5:3000,10.0.0.5:3000`），同时绑定多个内网网段的具体 IP，不必监听 `0.0.0.0`、也不受限于只能绑一个 IP。设为 `off`（或 `none`/`-`）**关闭代理监听**，仅跑 websocket/tun 等后台服务（纯内网穿透场景，不需要本机代理端口）。关闭后 websocket 的「HTTP 头订阅」路径失效（它依赖本机代理），「裸 TCP 转发」不受影响 |
 | `network` | string | `tcp` | 监听协议：`tcp`(v4+v6) / `tcp4` / `tcp6` |
 | `watcher` | bool | false | 是否监听配置文件变化并热加载 `default`/`hosts` |
-| `token` | string | — | 与 tunneld 通信的加密密钥，**必须 16 位长度** |
+| `token` | string | — | 与 tunneld 通信的加密密钥，长度不限，两端一致即可（内部会自动归一化成 16 位 AES key） |
 | `allowIP` | []string | 空=不限制 | 允许访问的客户端 IP，支持 CIDR |
 | `mode` | string | `proxy` | 运行模式（互斥）：`proxy` / `tunnel` / `tun` / `bypass`（仅 Linux）/ `tcpcopy`，优先级低于 `-mode`。websocket 内网穿透不是 mode 取值，独立开关、与任一 mode 共存 |
 
@@ -198,26 +198,26 @@ macOS/Windows 已移除 bypass 模式：macOS 入站回包用 `tun.inboundPorts`
 | `websocket.server.listen` | 服务端监听地址端口 |
 | `websocket.server.users` | 鉴权账号数组，每条 `{user, pass, disable}`，校验接入的订阅端；`disable: true` 可临时停用某个账号 |
 | `websocket.server.allowIP` | 可接入的客户端 IP 白名单（CIDR/单 IP），为空不限制；按真实 TCP 来源判定，loopback 始终放行 |
-| `websocket.server.forward` | 服务端裸TCP转发入口列表，元素为 `{listen, email}` |
+| `websocket.server.forward` | 服务端裸TCP转发入口列表，元素为 `{listen, email, tag}`；`tag` 与订阅端 `client.forward[].tag` 配对，决定连接落到对方哪条转发规则 |
 | `websocket.client.connect` | 客户端连接的地址端口 |
 | `websocket.client.host` | connect 的域名 |
 | `websocket.client.proxy` | 订阅端**经上游 HTTP/SOCKS5 代理**回连服务端 B，格式 `scheme://host:port`：`socks5://`（走 SOCKS5）/ `http://`、`https://`（走 HTTP CONNECT）；其它 scheme 直接报错、不静默退化为直连。用于 `connect` 是内网/回环地址、本机不能直连的场景——先连这台可达代理，由它转到 `connect`。不配则直连（原行为）。与 `connect`/`forward` 一样**只在启动/每次重连时取一次，不参与热加载** |
 | `websocket.client.user` / `.pass` | 客户端认证用户名 / 密码（发给服务端） |
 | `websocket.client.email` | 用于定位用户，不鉴权 |
 | `websocket.client.subscribe` | 订阅头部信息列表，元素为 `{key, val}` |
-| `websocket.client.forward` | 订阅端裸TCP转发目标列表，元素为 `{port, target}` |
+| `websocket.client.forward` | 订阅端裸TCP转发目标列表，元素为 `{tag, target}`；`tag` 需与服务端 `server.forward[].tag` 一致才配对，未匹配到的一律拒绝 |
 | `websocket.client.uuid` | 本订阅端身份凭证，仅文件传输收发双方使用；**不在配置里写**，启动时自动生成并持久化到同名隐藏文件 `.router.uuid`，重启不变 | — |
 | `websocket.client.direct.accept` | `true` 时起 QUIC 监听并把端点通告服务端，允许其它订阅方直连自己（路径 C） | — |
-| `websocket.client.direct.rules` | 本机 QUIC 直连入口规则数组，每条 `{listen, email, forwardPort, via}`；`listen` 可带 `tcp://`(默认)/`udp://`/`both://` 前缀 | — |
+| `websocket.client.direct.rules` | 本机 QUIC 直连入口规则数组，每条 `{listen, forward: {email, tag}, via}`；`listen` 可带 `tcp://`(默认)/`udp://`/`both://` 前缀；`forward.tag`(原 `forwardPort`, 现为字符串)选对方 `forward[]` 里的哪条规则，不是端口号 | — |
 | `websocket.client.direct.encrypt` | `true` 时打洞控制包额外 AES-256-GCM 加密，防运营商按明文特征丢包；默认 `false`，对 `direct.rules[]` 与 `-send`/`-recv` 同时生效 | — |
 | `websocket.client.direct.portmap` | `true` 时直连候选收集尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` | — |
 | `websocket.client.direct.punchFirst` | `true` 声明本机在受限 CGNAT 后、主动直连时须先发首包（让对端接受方推迟打洞）；家宽连公网/云主机不通时设 | — |
 | `websocket.client.direct.relay` | `true` 时本机(公网 VPS)允许作为 A↔C 盲转发中继；无需为每对配 `forward`/`direct`，目标由发起方 `direct.rules[].via` 指定 | — |
-| `websocket.client.direct.relayAllow` | 收紧 `direct.relay`：只放行这些来源 email 用本机中继；留空=不限制 | — |
+| `websocket.client.direct.relayEmail` | 收紧 `direct.relay`：只放行这些来源 email 用本机中继；留空=不限制。精确匹配、大小写敏感；需服务端 B 为同版本 | — |
 | `websocket.client.direct.relayPublic` | 可选公网中继地址数组；全部只写 IP 时每个 binding 使用随机端口并在全部 IP 上通告，全部写 `IP:port` 时使用固定端口；两种形态不能混写 | — |
 | `websocket.client.direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对本条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 | `-direct-plain-udp` |
 | `websocket.client.direct.lanAddrs` | 手工填本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速候选 | — |
-| `websocket.client.receive` | 接收文件传输配置 `{dir, allow[], readonly}`；`allow` 每条 `{email, uuid}`，`readonly: true` 只出不进 | — |
+| `websocket.client.receive` | 接收文件传输配置 `{dir, allow[], readonly}`；`allow` 每条 `{email, uuid, wol, dir}`，`readonly: true` 只出不进，`wol: true` 才允许这个 email 用 `-wol` 让本机代为广播（默认 `false`），`dir` 非空则覆盖该 email 上传时的落地目录（默认落到共享 `dir`） | — |
 | `websocket.client.sendRecvOnly` | `true` 时强制这条配置只给 `-send`/`-recv` 取凭证，常驻进程不为它发起连接 | — |
 
 > `websocket.client` 的直连/中继/文件传输字段（上表 `direct*` / `receive` / `sendRecvOnly`）完整语义、鉴权与示例见 [websocket.md](websocket.md#文件传输-send--recv--receive)；`-genkey` 生成 `key` 亦见该页。

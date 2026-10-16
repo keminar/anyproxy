@@ -38,6 +38,14 @@ kill -HUP <pid>
 
 > `listen: off`（纯 websocket 穿透，无主监听 fd 可交接）下 `SIGHUP` 也支持，但走的是「**先起新进程、老进程再退出**」：websocket 服务自带绑定重试，老进程退出释放端口后新进程接管，订阅端会自动重连（会有极短暂的连接中断，不是零感知交接）。
 
+> **用 systemd 管理时**：平滑重启会 fork 出一个全新 PID 的子进程接管服务，老进程
+> drain 完连接才退出——这意味着 `systemctl reload` 前后 `MAINPID` 会变。unit 必须用
+> `scripts/anyproxy.service` 里的 `Type=notify`（配 `NotifyAccess=main`），程序在交接
+> 时会通过 `sd_notify` 把新 PID 告诉 systemd。如果 unit 被改成 `Type=simple`，
+> systemd 只认最初的 PID，老进程一退出就判定服务已停止，按默认
+> `KillMode=control-group` 把刚接管的新进程一起杀掉——现象是 `reload` 后进程直接
+> 消失、`systemctl status` 变成 `inactive (dead)`。
+
 ## 进程停止与清理
 
 - **普通模式**：`SIGINT`(Ctrl+C) / `SIGTERM` 关闭监听、drain 连接后退出。

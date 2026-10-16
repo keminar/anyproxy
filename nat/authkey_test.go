@@ -181,3 +181,28 @@ func TestAuthKeyIgnoresClockSkew(t *testing.T) {
 		t.Fatalf("password auth accepted a %ds-stale timestamp: %v", authSkewLimit+60, err)
 	}
 }
+
+// TestAuthPassRejectsEmptyToken 对端送一个空 token 必须被拒。
+//
+// 值得单列一条: 常量时间比对之后, "比对失败"和"Md5Str 出错"两条路都落到同一个分支,
+// 而 Md5Str 出错时本地算出的 token 是空串 —— 要是把 err 混进比对里(比如只写
+// ConstantTimeCompare 不单独判 err), 一个空 token 就会跟空 token 比成相等, 把"算
+// 失败"变成"鉴权通过"。这里从线上真发一个空 token 把这条路钉住。
+func TestAuthPassRejectsEmptyToken(t *testing.T) {
+	err := authHandshakeRaw(t, conf.ServerUser{User: "u", Pass: "pw"}, func(c *websocket.Conn) error {
+		if err := c.WriteJSON(AuthMessage{User: "u", Token: "", Xtime: time.Now().Unix(), Email: "e@example.com"}); err != nil {
+			return err
+		}
+		_, msg, err := c.ReadMessage()
+		if err != nil {
+			return err
+		}
+		if string(msg) != "ok" {
+			return fmt.Errorf("server said %q", msg)
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("an empty token was accepted")
+	}
+}

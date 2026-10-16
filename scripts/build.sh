@@ -63,7 +63,7 @@ fi
 # mips=大端, mipsle=小端(按设备选)。
 if [ "$1" == "all" ] || [ "$1" == "mips" ] ;then
     echo "  for mips (softfloat)"
-    CGO_ENABLED=0 GOOS=linux GOARCH=mips   GOMIPS=softfloat ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-mips   .
+    CGO_ENABLED=0 GOOS=linux GOARCH=mips   GOMIPS=softfloat ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-mips-${VER}   .
     echo "  for mipsle (softfloat)"
-    CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-mipsle .
+    CGO_ENABLED=0 GOOS=linux GOARCH=mipsle GOMIPS=softfloat ${GOBUILD} -trimpath -ldflags "$LDFLAGS" -o dist/${BIN}-mipsle-${VER} .
 fi

@@ -72,8 +72,8 @@ any client ──TCP──▶ server :2222 (bare TCP listener)
      subscriber ──dial hard-coded target 127.0.0.1:22──▶ intranet sshd
 ```
 
-- Server: each `websocket.server.forward[].listen` starts a bare TCP listener (when `listen` carries a `udp://`/`both://` prefix, a UDP relay on the same port is also started) (`StartForward`/`listenForward` in `nat/forward.go`); each incoming connection is bridged to a subscriber by that rule's `email` (`GetClientByEmail`).
-- Subscriber: `websocket.client.forward[].port → target` builds a mapping (`buildForward` in `nat/forward.go`, one copy per server connection). When a connection arrives on the entry port `Port`, it dials the corresponding `target`; **if `Port` is not in the local mapping it is rejected** (`dialForCreate` in `nat/forward.go`) — an inherent whitelist. The rejection reason is returned to the server via `METHOD_CLOSE` (`Bridge.CloseReason`), folded into the server's own `nat forward closed ... reason=peer close: ...` summary line — no need to cross machines to dig through the subscriber's local logs.
+- Server: each `websocket.server.forward[].listen` starts a bare TCP listener (when `listen` carries a `udp://`/`both://` prefix, a UDP relay on the same port is also started) (`StartForward`/`listenForward` in `nat/forward.go`); each incoming connection is bridged to a subscriber by that rule's `email` (`GetClientByEmail`), and that rule's `tag` is passed along to the subscriber together with it.
+- Subscriber: `websocket.client.forward[].tag → target` builds a mapping (`buildForward` in `nat/forward.go`, one copy per server connection). When a connection arrives carrying the server's `tag`, it dials the corresponding `target`; **if the `tag` is not in the local mapping it is rejected** (`dialForCreate` in `nat/forward.go`) — an inherent whitelist. The rejection reason is returned to the server via `METHOD_CLOSE` (`Bridge.CloseReason`), folded into the server's own `nat forward closed ... reason=peer close: ...` summary line — no need to cross machines to dig through the subscriber's local logs. `listen` is now purely about which physical port the server binds — the subscriber doesn't need to change anything to match it; the two sides pair by `tag` string equality, no longer by coincidentally-equal port numbers.
 - Fits: exposing any internal TCP service such as a web server or database (e.g. remote SSH, intranet web).
 
 #### The second channel of Path B: UDP relay (`listen: "udp://..."` or `"both://..."`)
@@ -91,9 +91,10 @@ websocket:
     forward:
       - listen: "both://:3389"   # protocol prefix: tcp://(default, optional)/ udp:// / both://
         email: c@example.com
+        tag: rdp
 ```
 
-The subscriber needs no change: the landing target still consults the same `client.forward[port] → target` whitelist, and unmapped ports are rejected the same way.
+The subscriber needs no change: the landing target still consults the same `client.forward[tag] → target` whitelist, and unmapped tags are rejected the same way.
 
 **Why a separate channel instead of stuffing UDP into the websocket**: websocket runs over TCP; stuffing datagrams into it means re-wrapping every packet with retransmission and ordering — drop one packet and every already-arrived frame behind it must queue waiting for it. That is precisely what the RDP UDP channel deliberately avoids, and doing it would only be laggier than pure TCP. Here all three segments are UDP end to end, so a dropped packet is just a dropped packet, not amplified into a stall.
 
@@ -120,7 +121,7 @@ any client ──TCP──▶ A (subscriber) :13389 (local entry listener)
                       server B (signaling only)
                         │ ②
                         ▼
-     A ══QUIC direct (v4/v6/port mapping, best of)══▶ C (subscriber) ──dial client.forward[port]──▶ intranet RDP
+     A ══QUIC direct (v4/v6/port mapping, best of)══▶ C (subscriber) ──dial client.forward[tag]──▶ intranet RDP
 ```
 
 The code is in [nat/direct.go](../nat/direct.go), [direct_entry.go](../nat/direct_entry.go) (A side), [direct_accept.go](../nat/direct_accept.go) (C side), [direct_broker.go](../nat/direct_broker.go) (server signaling), [direct_reflect.go](../nat/direct_reflect.go) (UDP reflector).
@@ -143,8 +144,8 @@ websocket:
     email: home
     direct:
       accept: true                   # allow others to connect to me directly (listener starts on demand, no port occupied normally)
-    forward:                         # reuse the same whitelist: unmapped ports are rejected
-      - port: 3389
+    forward:                         # reuse the same whitelist: unmapped tags are rejected
+      - tag: rdp
         target: 192.168.1.10:3389
 
 # A (the initiator, the entry is on its own machine)
@@ -157,8 +158,9 @@ websocket:
     direct:
       rules:
         - listen: "both://:13389"    # local entry, mstsc connects here; protocol prefix tcp://(default, optional)/udp:///both://
-          email: home                # connect directly to the subscriber with this email
-          forwardPort: 3389          # which rule in the other side's forward[] (whitelist index), not the intranet target port; rejected if the other side didn't configure this index
+          forward:
+            email: home              # connect directly to the subscriber with this email
+            tag: rdp                 # which rule in the other side's forward[] (whitelist index), not the intranet target port; rejected if the other side didn't configure this tag
 ```
 
 ### Multiple paths raced simultaneously, winner is whoever connects
@@ -239,8 +241,9 @@ websocket:
       encrypt: true   # pure toggle, no uuid/receive.allow needed; applies to rules[] and -send/-recv simultaneously; both ends must match
       rules:
         - listen: "both://:13389"
-          email: home
-          forwardPort: 3389
+          forward:
+            email: home
+            tag: rdp
 ```
 
 ### Blind forwarding relay via VPS (`via` / `direct.relay`)
@@ -258,7 +261,7 @@ The key is that this VPS **needs no per A-C configuration** (no `forward`/`direc
 - **Both legs are "resident→cloud" punching**: A and C both punch first, the VPS waits for their respective nudges before punching back (reusing the `direct.punchFirst` ordering mechanism). If either leg fails to punch, the whole relay fails, with no further fallback.
 - **Authentication is end-to-end between A↔C, bypassing the untrusted VPS**: A uses C's certificate fingerprint to fix-verify the peer is the real C; C does a one-time **uuid challenge-response** on the first stream of the e2e QUIC (sends a random nonce, A replies `HMAC(uuid, nonce ‖ C's certificate fingerprint)`), verified against A's uuid in its own `receive.allow` — **the uuid never goes on the network**, bound to C's fingerprint to prevent VPS-layer replay. So C must configure A's uuid in `receive.allow` (reusing the same list as file transfer).
 - **`direct.encrypt` is unrelated to the relay**: the relay's security does not depend on it; it only anti-DPIs the two legs' punch packets.
-- **Session reuse includes the full entry/route identity**: A keys reusable QUIC sessions by `listen + target email + forwardPort + via`; different local entries, direct versus relayed paths, and different relay VPSes cannot accidentally reuse one another's session. Isolating `listen` also prevents two UDP rules for the same target port from overwriting each other's return entry.
+- **Session reuse includes the full entry/route identity**: A keys reusable QUIC sessions by `listen + target email + forward.tag + via`; different local entries, direct versus relayed paths, and different relay VPSes cannot accidentally reuse one another's session. Isolating `listen` also prevents two UDP rules for the same target port from overwriting each other's return entry.
 
 **Requirement on the VPS: a stable, inbound-reachable public endpoint.** The VPS normally derives E from the reflector probing its own egress mapping, which is fine under **1:1 public IP or endpoint-independent (EIM/cone) NAT** (a normal cloud host 10.x→fixed 49.x is this case). But if the VPS sits behind a **NAT gateway with per-flow random egress IP/port (symmetric)**, the reflector-probed egress ≠ the inbound mapping corresponding to A/C's packets, and the relay fails (same reason as symmetric NAT being unpunchable). In that case, configure a **fixed DNAT inbound rule** on this VPS (public `IP:port` → the VPS's same UDP port), and explicitly fill that public endpoint with `direct.relayPublic`: it skips the reflector and binds the relay socket to that port, with inbound always open regardless of egress randomness. One port can only carry one concurrent relay pair; for more concurrency, configure more ports (each with its DNAT/security group). Of course, the easiest is still giving the relay VPS a real 1:1 public IP.
 
@@ -304,8 +307,9 @@ websocket:
       punchFirst: true
       rules:
         - listen: "both://:13389"     # mstsc connects here
-          email: home                 # final target C
-          forwardPort: 3389
+          forward:
+            email: home                # final target C
+            tag: rdp
           via: relay-vps              # relay through this VPS
 
 # VPS (public): one switch, no per-pair config needed
@@ -313,7 +317,7 @@ websocket:
   client:
     direct:
       relay: true
-      # relayAllow: [office]          # optional: only allow specified source emails
+      # relayEmail: [office]          # optional: only allow specified source emails (needs B on the same version)
 
 # C (resident, CGNAT): same as usual direct.accept + forward, plus recognize A's uuid in receive.allow
 websocket:
@@ -322,7 +326,7 @@ websocket:
       punchFirst: true
       accept: true
     forward:
-      - {port: 3389, target: 192.168.1.10:3389}
+      - {tag: rdp, target: 192.168.1.10:3389}
     receive:
       allow:
         - {email: office, uuid: <A's uuid>}
@@ -436,8 +440,14 @@ Some design choices:
 - **SHA-256 verification, with the digest placed after the data** (not in the header). Placing it after lets the sender compute while reading — putting it in the header would require reading the whole file first to compute the digest, a wasteful re-read for large files. If the receiver's digest doesn't match, it deletes the file and reports an error: keeping a file with wrong content but a correct name is worse than not receiving it.
 - **Write `.part` first, then rename**. An interruption leaves something obviously incomplete, rather than a file that looks normal but is half content.
 - **The `.part` name carries a random token, not a simple `target.part`**. The pitfall hit: when the sender exits abnormally (e.g. Ctrl+C mid-transfer), the goroutine handling that stream on the receiver keeps occupying the `.part` for a while before noticing the connection truly died — the data phase deliberately sets no read timeout (a large file on a slow link legitimately takes long), relying on QUIC's own idle timeout as the fallback, meaning cleanup of the old connection and a new retransmission may overlap in time. If both old and new used `target.part`, the new one's rename after finishing would collide with the file still held by the old goroutine, reporting "being used by another process" on Windows, and more subtly on POSIX — no error, but both sides writing the same inode may silently corrupt content. Each transfer using its own token to exclusively occupy one `.part` filename fundamentally prevents this collision.
-- **Do not overwrite same-name files**, auto-rename to `x (1).zip`. Overwriting silently destroys the receiver's existing data, a cost far greater than an extra numbered name; the actual saved name is reported back to the sender. The rename step is "atomically claim the name with `O_CREATE|O_EXCL`" rather than "first probe existence, then a separate Rename" — split into two steps across two independent processes it is not atomic: when two terminals send same-name files concurrently, both may see "nonexistent" at the probe moment and both pick the same name to Rename. `os.Rename` overwrites an existing target directly (Go on Windows uses `MOVEFILE_REPLACE_EXISTING` to deliberately smooth over the POSIX `rename()` difference, same behavior on both sides), and the later one silently eats the one the earlier just landed and already replied "Saved" — this is not Windows-specific, it happens on Linux/macOS too.
-- **The filename is decided by the peer, so guard against escaping**: reject absolute paths, `..`, backslashes, and drive letters, then confirm the result actually lands inside the receive directory. Do both — check the raw name first, then normalize; reversed order and `path.Clean` would swallow `..` directly, and the check would never trigger.
+- **Do not overwrite same-name files**, auto-rename with a numbered name: `x 1.zip`, `x 2.zip` (a space and the number appended to the file name body, extension unchanged). Overwriting silently destroys the receiver's existing data, a cost far greater than an extra numbered name; the actual saved name is reported back to the sender. The rename step is "atomically claim the name with `O_CREATE|O_EXCL`" rather than "first probe existence, then a separate Rename" — split into two steps across two independent processes it is not atomic: when two terminals send same-name files concurrently, both may see "nonexistent" at the probe moment and both pick the same name to Rename. `os.Rename` overwrites an existing target directly (Go on Windows uses `MOVEFILE_REPLACE_EXISTING` to deliberately smooth over the POSIX `rename()` difference, same behavior on both sides), and the later one silently eats the one the earlier just landed and already replied "Saved" — this is not Windows-specific, it happens on Linux/macOS too.
+- **Same-name files and resuming can be negotiated by comparing contents first, then the user chooses (`-conflict`)**. Two independent situations:
+  - **The target name already holds a complete file**: SHA-256 is compared, but the offered options are the same whether the content is **identical** or **different**: rename and resend / overwrite / skip — whether to overwrite is the user's explicit choice regardless of content match (senders in `receive.allow` can already write this directory, so there is no separate switch; the non-interactive `-conflict overwrite` already overwrites unconditionally without comparing content). "Rename and resend" means the **incoming** file is saved under a new name and the existing file is left untouched — the prompt spells this out as `[r]ename incoming and transfer` precisely so it isn't misread as renaming the existing file. **The target name never accepts a resume**: a transfer always writes a `.part` first and only renames it to the target after it is complete and verified, so whatever sits on the target name is a complete file.
+  - **A previous interrupted transfer left a `.part` temp file** (`x.zip.<16 hex>.part`): if it is exactly the start of the new file (verified by hash) the transfer continues from that point, then the finished file is renamed to the target (if the target name is taken it is renamed as usual, never overwritten). **When a transfer is interrupted, what already arrived is kept in the `.part`** (only deleted if zero bytes arrived); the `.part` of a chunked `-parallel` transfer carries a `.chunks` marker, may have holes, and is never resumed. `.part` files are not cleaned up automatically; delete them by hand when no longer needed.
+  - At a prompt, Enter = skip; an uppercase letter (`R`/`O`/`C`/`S`) applies the choice to all later conflicts. `-conflict` values: `ask` (default on a terminal, prompts per file), `rename` (auto-rename; the default when stdin is not a terminal, i.e. the old behavior: no probing, no resuming), `overwrite`, `skip`, `resume` (continue a `.part` if there is one; skip if the target holds an identical complete file; rename if it holds different content).
+  - Works for both `-send` and `-recv`: for `-send` the check is on the **peer** (one extra probe round trip; the receiver reports the target name and any resumable `.part`, and only hashes when the file is not larger than the incoming one), for `-recv` it is **local** (the pull `hash` op asks the peer for the hash of the first N bytes).
+  - Overwrite receives into a `.part` first and only replaces the existing file after the checksum passes; on error the existing file is untouched. Before taking over a `.part`, the receiver checks that the name is really that target's own `.part`, that no other transfer is writing it, and that its size matches what was negotiated; a bad tail checksum truncates it back. Resuming sends only the tail and is not split by `-parallel`.
+  - The probe is a new frame that old receivers do not understand: with no answer within 10s the sender falls back to "receiver auto-renames" and says so once.
 - **The fetch direction adds one more symlink check**. Receiving creates new files, so symlinks don't arise; fetching is different — a symlink inside the shared directory pointing at `/etc/shadow` cannot be stopped by the string checks above (the spliced path is indeed inside the directory), so after resolving the symlink, confirm again that it is still inside the directory. A shared directory reached via a symlink (macOS `/tmp` → `/private/tmp`) is a normal config; both sides resolve then compare, no false positives.
 - **Both `-send` / `-recv` are independent processes**, not requiring a running anyproxy locally. Sending/receiving files is an action with clear start and end, and an independent process's exit code expresses success or failure. It temporarily opens one more websocket, not affecting the resident one — the direct signaling is returned on "the connection that initiated the request", not looked up by email.
 - **If the resident config exists only to give `-send`/`-recv` credentials, no extra config is needed**: when the anyproxy resident process starts, it judges for each `websocket.client(s)` whether it's worth initiating a resident connection — if `subscribe`/`forward`/`direct.rules`/`direct.accept`/`receive.dir` are all empty, it auto-skips (this config remains intact, the resident process just won't connect to it; running `-send`/`-recv` still uses this config's credentials normally). This is because the server uses the same judgment: an empty `subscribe` that is neither a forward target / direct party / receiver gets continuously rejected and disconnected by `serveWs` (log spams `ignore, subscribe is empty`), and the resident process connecting to it is just keeping it company. To force skipping (even if some of these are configured), explicitly add `sendRecvOnly: true`.
@@ -454,7 +464,7 @@ Troubleshooting: with `-debug 2`, quic-go prints `connection doesn't allow setti
 
 #### Single large file chunked parallel transfer: `-parallel N`
 
-By default each file occupies only one connection (one QUIC stream on `direct`, one relay session on `relay`), which is enough when a single connection's throughput already fills the link, but insufficient when limited by the single-stream congestion window climb or the relay flow-control window — the "single connection" ceiling. `-parallel N` (default 1) splits a **single** large file into at most `N` chunks by byte range, each opening an independent connection for parallel transfer. Both paths (`-via direct`/`-via relay`) and both directions (`-send`/`-recv`) are supported:
+By default each file occupies only one connection (one independently NAT-punched QUIC connection on `direct`/VPS blind-relay, one relay session on `relay`), which is enough when a single connection's throughput already fills the link, but insufficient when limited by the single-stream congestion window climb or the relay flow-control window — the "single connection" ceiling. `-parallel N` (default 1, hard-capped at 4 — anything higher is clamped down to 4) splits a **single** large file into chunks and opens up to `N` connections in parallel. Both paths (`-via direct`/VPS, `-via relay`) and both directions (`-send`/`-recv`) are supported:
 
 ```bash
 anyproxy -send bigfile.zip -to home@example.com -parallel 4
@@ -463,14 +473,17 @@ anyproxy -recv home@example.com:backup/bigfile.zip -to /data/in -parallel 4
 
 - **Only splits a single file, no multi-file concurrency**. Batch `-send`/`-recv` of multiple files still transfers one after another — the purpose of chunked parallelism is to let a single large file use the bandwidth faster, not to let multiple files compete for the same bandwidth (that would actually lengthen each file's time).
 - **Files too small are not split**: files below 8MiB always take the single-connection path, the `-parallel` value is ignored, since the chunking handshake/header overhead isn't worth it on small files.
-- **Failure semantics identical to no-chunk**: if any chunk fails (network error, verification failure) the whole file errors out and the `.part` file is cleaned up, leaving no half-done file with only some chunks right, and no auto-retry.
+- **The connection count is still capped at 4 and doesn't grow with file size; the chunk count can be higher** (up to 4x the connection count, still bounded by the 4MiB minimum chunk size — a file that isn't big enough won't actually reach that many). More chunks than connections is intentional — see work-stealing below.
+- **Work-stealing: whichever connection finishes its current chunk first grabs the next one, instead of sitting idle.** It used to split the chunks into a fixed 1:1 share per connection — a faster connection would finish its share and then just wait, while a slower one dragged on, so total time was capped by the slowest connection. Now all connections pull from one shared work queue, and the chunk count is deliberately set higher than the connection count so a fast connection can keep grabbing more chunks and absorb the capacity a slow one isn't using. The progress line's `conn1: ... conn2: ...` now shows "how much this connection has transferred in total so far" — accumulated across however many chunks it has picked up, not the progress of a single chunk.
+- **Failure semantics identical to no-chunk, but tolerant of partial connection failure**: on `-via direct`/VPS, as long as at least 1 of the `N` independent connections punches through, the transfer proceeds on whichever ones succeeded (a few candidate paths not working is normal and shouldn't fail the whole transfer). Once connections are up, any chunk transfer failure (network error, verification failure) still errors out the whole file and cleans up the `.part` file — no half-done file, no auto-retry — and once one chunk fails, the other connections stop grabbing new chunks and wind down promptly instead of doing pointless further work.
 - **On `-via relay`, each chunk negotiates its own encryption session** (independent random salt, independently derived AES-256-GCM key); the protocol has long supported "open a new encryption session anytime", so no handshake change is needed for chunking.
 
-##### `-parallel` does not always speed up: understand the bottleneck first
+##### Whether `-parallel` actually opens multiple connections differs by path
 
-**Chunking uses the same underlying connection** — on `direct`, the N chunks are N streams on the same QUIC connection; on `relay`, they are N relay sessions on the same websocket (same TCP connection). QUIC/TCP congestion control is computed per **connection**, not per stream/session, meaning these N concurrent paths share the same congestion window and look like **the same five-tuple** (same pair of source/dest IP+port) to network devices. If the bottleneck is operator per-flow rate limiting, or the link itself is congested with packet loss, `-parallel` in this same-connection-multiplexed implementation most likely won't help — the operator still sees "one flow", and won't allocate more bandwidth just because the app opened a few more streams.
+- **`-via direct`/`-via a VPS's email` (blind-relayed punch): genuinely independent QUIC connections.** Each chunk runs its own punch handshake and QUIC handshake, ending up with a fully independent connection that maintains its own congestion window — that's the whole point: on a link with random packet loss, a single QUIC flow's congestion window can get stuck repeatedly pinned low (a real measured case: cwnd stuck around 5~14KB with ~5% loss, throughput ≈ cwnd/RTT), while several independent connections each maintain their own window and the aggregate throughput can recover close to linearly — the same principle multi-threaded download managers rely on. The local UDP socket is still shared (no extra local ports needed), but the QUIC connections themselves, and the bindings on the VPS blind-relay side, are each independent.
+- **`-via relay` (through server B): still the same underlying connection.** The N chunks are N relay sessions on the same websocket (same TCP connection); QUIC/TCP congestion control is computed per **connection**, so these N concurrent paths share the same congestion window and look like the same five-tuple to network devices. If the bottleneck is operator per-flow rate limiting or link congestion, `-parallel` on the `relay` path most likely won't help; it truly helps when a single relay session's own flow-control window fills before the network bandwidth does, or when the bottleneck is actually CPU (hashing, encryption/decryption). To get genuinely independent multiple connections, switch to `-via direct` or `-via a VPS's email`.
 
-The scenarios where `-parallel` truly helps are when a single stream/relay session's own flow-control window (not congestion window) fills before the network bandwidth — e.g. a single stream's window is too small on a high-latency long-distance link, or the bottleneck is actually CPU (hashing, encryption/decryption) rather than network. These two cases benefit from multiple concurrent paths; if the bottleneck is poor operator cross-network interconnection quality or per-flow/per-account rate limiting, opening more won't help.
+##### Use `iperf3` to diagnose the bottleneck first, especially for `-via relay`
 
 **Use `iperf3` to diagnose before relying on feeling** (assuming A transfers slowly, C is the receiving machine, and the two can reach each other):
 
@@ -498,9 +511,11 @@ Reading the results:
 
 | Phenomenon | Conclusion |
 |---|---|
-| Single stream slow, multi-stream (`-P 4`) `[SUM]` much higher than single | per-flow rate limiting / single-stream window can't fill, `-parallel` is worth using |
-| Single stream slow, multi-stream `[SUM]` about the same, high packet loss | link itself congested (common with poor operator cross-network interconnection quality), `-parallel` has limited benefit |
-| TCP results ok, UDP noticeably worse | operator may have separately limited UDP; even reshaping into multiple independent QUIC connections may not help, consider switching to `-via relay` (TCP websocket) to bypass |
+| Single stream slow, multi-stream (`-P 4`) `[SUM]` much higher than single | per-flow rate limiting / single-stream window can't fill, `-parallel` is worth using (especially under `-via direct`/VPS, since those connections really are independent) |
+| Single stream slow, multi-stream `[SUM]` about the same, high packet loss | link itself congested (common with poor operator cross-network interconnection quality); independent flows each still eat their own share of the loss so this can't be fully bypassed, `-parallel` has limited benefit but is usually still somewhat better than a single stream (see the QUIC cwnd/loss stats under `-check`) |
+| TCP results ok, UDP noticeably worse | operator may have separately limited UDP; `-via direct`/VPS rides QUIC/UDP, so multiple independent connections may not help either — consider switching to `-via relay` (TCP websocket) to bypass |
+
+With `-via direct`/VPS, adding `-debug 2` during transfer shows each connection's own `quic cwnd=... inflight=... sent=...pkt lost=...pkt`, plus a summary line at the end (no `-debug` needed for that one) — this is more direct than iperf3 since it reflects the actual connection this transfer is using, not an inference from a separate speed test.
 
 ### TCP and UDP: two protocols carried differently on QUIC
 
@@ -627,14 +642,14 @@ Each account is **password or key, choose one** (if both are configured, key is 
 | `email` | this subscriber's identity, used for server/peer location (HTTP path assistance, TCP path matches `server.forward.email` by it, file transfer `-to`/`receive.allow` look up by it). Non-empty, itself not part of authentication nor a security boundary |
 | `uuid` | the identity credential of this config, only used between the two sides of file transfer (`-send`), completely invisible to B. **Cannot be configured in the config file**: auto-generated at startup and persisted to a hidden file with the same directory and name as the config file (`router.yaml` → `.router.uuid`), unchanged on restart; `-c` pointing at different config files gives independent ones, not shared. Printed in the startup log after generation, copy to the peer and fill into its `receive.allow[].uuid`. See "File transfer" |
 | `subscribe` | array of HTTP header subscription rules, each `{key, val}`; used by Path A |
-| `forward` | array of bare TCP forward target rules (Path B), each `{port, target}`, see below |
+| `forward` | array of bare TCP forward target rules (Path B), each `{tag, target}`, see below |
 | `direct.accept` | when `true`, starts a QUIC listener and advertises the endpoint to the server, allowing other subscribers to connect to itself directly (Path C, see below); listener starts on demand, releases on idle, occupies no port normally |
-| `direct.rules` | array of local QUIC direct entry rules (Path C), each `{listen, email, forwardPort, via}`, `listen` may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, see below |
+| `direct.rules` | array of local QUIC direct entry rules (Path C), each `{listen, forward: {email, tag}, via}`, `listen` may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, see below |
 | `direct.encrypt` | when `true`, the punch control packets (PUNCH/PONG) sent by this machine as punch initiator get extra encryption, guarding against operator devices dropping packets by cleartext signature; default `false`, pure opt-in. Per-client one-time toggle, applies to `direct.rules[]` and `-send`/`-recv` simultaneously, see "Punch control packet encryption" |
 | `direct.portmap` | when `true`, direct candidate collection will attempt UPnP/PCP/NAT-PMP port mapping; default `false` not tried — low hit rate and waits for three protocol timeouts, see "Multiple paths raced simultaneously, winner is whoever connects" above |
 | `direct.punchFirst` | when `true`, declares this machine is behind restricted operator CGNAT and must send the first packet when actively initiating direct (let the peer receiver delay punching); default `false`. Set it when a home-broadband machine can't connect to a public/cloud host, see [direct-punch-order.md](direct-punch-order.md) |
 | `direct.relay` | when `true`, this machine (a public VPS) allows being a blind forwarding relay between A↔C; default `false`. **No per A-C config needed**, target C is specified by the initiator via `direct.rules[].via`, see "Blind forwarding relay via VPS" |
-| `direct.relayAllow` | optional, tightens `direct.relay`: only allow these source emails (initiator A) to use this machine as relay; empty = unrestricted. Email allowlist only, no uuid involved |
+| `direct.relayEmail` | optional, tightens `direct.relay`: only allow these source emails (initiator A) to use this machine as relay; empty = unrestricted. Email allowlist only, no uuid involved. Exact, case-sensitive match. The email is stamped by server B, so **B must be on the same version**: if this list is configured but the email arrives empty (an old B), this machine refuses the relay rather than allowing it. Not to be confused with `forward[].allowRelay`, a boolean controlling whether a given tag may be triggered through B |
 | `direct.relayPublic` | optional public relay address array. With bare IPs, each binding uses a random port advertised on every IP; with `IP:port` endpoints, fixed-port mode is used (for fixed DNAT, one pair per port). The two forms cannot be mixed; see "Blind forwarding relay via VPS" |
 | `direct.plainUdp` | overrides the command-line `-direct-plain-udp` default for this connection, tri-state: unset follows global value, explicit `true`/`false` only affects this one |
 | `direct.lanAddrs` | manually configure this machine's LAN/intranet IP array (no port), extra candidates participating in punching/QUIC dial racing, see "Multiple paths raced simultaneously, winner is whoever connects" above; no NIC auto-scan |
@@ -700,14 +715,14 @@ websocket:
         - key: X-Env
           val: home
       forward:
-        - port: 2222
+        - tag: ssh
           target: 127.0.0.1:22
     - connect: 198.51.100.10:3002
       user: anotheruser
       pass: anotherpass
       email: office
       forward:
-        - port: 2222          # entry port number may repeat with the previous one, no conflict (each connection has its own forward table)
+        - tag: rdp             # tag only needs to be unique within this server connection; reusing the name from the previous one is fine (each connection has its own forward table)
           target: 192.168.1.10:3389
 ```
 
@@ -721,18 +736,19 @@ Each element is a complete independent `WsClient` (same struct as a single `webs
 
 | Field | Role | Description |
 |------|------|-------------|
-| `listen` | server | entry listening address, e.g. `:2222`; may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, e.g. `both://:2222`. TCP is forwarded over websocket, UDP opens a separate UDP relay, the two going their own ways (see Path B's second channel) |
+| `listen` | server | entry listening address, e.g. `:2222`; may carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, e.g. `both://:2222`. TCP is forwarded over websocket, UDP opens a separate UDP relay, the two going their own ways (see Path B's second channel). Which port it binds is purely a physical-layer matter now, no longer needing to equal any field on the subscriber side |
 | `email` | server | forward this entry port's connections to the subscriber with this `email` |
-| `port` | subscriber | corresponds to the server's entry port number (e.g. `2222`), TCP and UDP share the same table |
-| `target` | subscriber | the real intranet target to dial when a connection/datagram arrives on that port, e.g. `127.0.0.1:22` |
+| `tag` | server | tells the subscriber, along with each connection/datagram, which rule this is; only accepted if it string-equals the subscriber's `client.forward[].tag`, independent of the port number bound by `listen` |
+| `tag` | subscriber | matches when it string-equals this server rule's `forward[].tag`; TCP and UDP share the same table |
+| `target` | subscriber | the real intranet target to dial when a connection/datagram arrives with that tag, e.g. `127.0.0.1:22` |
 
 `client.direct.rules` each (`ClientDirect`, Path C's local direct entry, configured on the **initiator** A):
 
 | Field | Description |
 |------|-------------|
 | `listen` | local entry listening address, e.g. `:13389`; `:13389` binds `[::]` dual-stack, IPv4 clients also connect. May carry protocol prefix `tcp://`(default, optional)/`udp://`/`both://`, e.g. `both://:13389` — the two protocols take different carriers on QUIC (stream / datagram), see "TCP and UDP" below; `both://` is common for RDP |
-| `email` | connect directly to the subscriber with this email (i.e. C, must match another subscriber under this `server` connection) |
-| `forwardPort` | tells C which rule in its own `client.forward[port]` to use; **not** the intranet target port to dial, nor the `listen` port above. Deliberately designed as a whitelist index: without it, A could make C forward to any intranet target C has configured just by `email`; with it, C only accepts ports listed in its own `forward`, and unmapped ones are rejected |
+| `forward.email` | connect directly to the subscriber with this email (i.e. C, must match another subscriber under this `server` connection) |
+| `forward.tag` | tells C which rule in its own `client.forward[]` to use, matched by `tag`; **not** the intranet target port to dial, nor the `listen` port above — it was never a port number at all, just a string selector (this field used to be called `forwardPort`, typed `uint16`, easily mistaken for a port; it has since been renamed to `tag`, typed `string`). Deliberately designed as a whitelist index: without it, A could make C forward to any intranet target C has configured just by `email`; with it, C only accepts tags listed in its own `forward`, and unlisted ones are rejected |
 | `via` | optional. Fill a public VPS's email (that VPS needs `direct.relay` on), then blindly forward to `email` (final target C) through it, rather than direct; empty = direct. Fits A, C both behind restricted CGNAT unable to punch to each other but each able to reach the VPS, see "Blind forwarding relay via VPS" |
 
 `client.receive` (`ClientReceive`, receives files sent via direct, configured on the **receiver** C, requires `direct.accept` too):
@@ -760,6 +776,20 @@ After that the subscriber sends `subscribe` (may be empty). If `subscribe` is em
 
 On failure it disconnects and reconnects with backoff (the subscriber has its own reconnect loop).
 
+## Encryption and confidentiality overview
+
+Authentication answers "who is this", not "is the content encrypted in transit" — the two are separate in anyproxy, and different content on the same deployment follows different encryption policies depending on which path it takes:
+
+| Content | Encrypted? | Notes |
+|---|---|---|
+| The signaling connection itself (login, `direct` candidate exchange, forward negotiation — everything covered in "Authentication and handshake" above) | Plaintext by default | The anyproxy process only speaks `ws` and has no built-in TLS; turning it into `wss` requires putting a TLS gateway (nginx/caddy, etc.) in front to terminate the certificate — `websocket.client.host` is the Host header field meant for this scenario (see "Configuration fields") |
+| `-send`/`-recv` file-transfer content (see "Two forwarding paths") | End-to-end encrypted, independent of whether the signaling connection has TLS | `-via direct`: native QUIC TLS 1.3 + self-signed certificate fingerprint pinning, data never passes through the server; `-via relay`: an AES-256-GCM key derived at the application layer from the `uuid` in `receive.allow`, the server only relays ciphertext and never sees the plaintext |
+| TCP forwarding content under `server.forward` (path A, path B) | Plaintext by default | Data rides directly on the same `ws` signaling connection, so confidentiality is the same as the first row — without a TLS gateway, forwarded intranet traffic (e.g. SSH) is plaintext as it passes through the server |
+| The `both://` parallel UDP channel of `server.forward` (`nat/relay_udp.go`) | Not encrypted | Server↔subscriber carries a bare header plus bare data, with no extra encryption layer — confidentiality relies entirely on the forwarded protocol itself (e.g. RDP's own DTLS); forwarding some other plaintext UDP protocol means it travels fully exposed |
+| Punching control packets (PUNCH/PONG/WHOAMI/SEEN) | Plaintext by default, AES-256-GCM when `direct.encrypt: true` | See "Encrypting punch control packets" |
+
+Bottom line: **file transfer (`-send`/`-recv`) is end-to-end encrypted regardless of whether it goes via `direct` or `relay` — the server never sees the content.** But login/authentication signaling and plain TCP/UDP port forwarding (`server.forward`) both have confidentiality that depends entirely on whether an extra TLS layer sits in front of `websocket.server.listen`. If a production deployment cares about intermediate nodes not seeing this traffic, put a TLS gateway in front of that port — don't assume anyproxy already handles it.
+
 ## Command-line equivalents
 
 | Parameter | Config item |
@@ -776,7 +806,7 @@ On failure it disconnects and reconnects with backoff (the subscriber has its ow
 - **`email` mismatch** → on bare TCP forward the server log shows `no forward ... no subscriber for email ...`. The server's `server.forward.email` must equal some subscriber's `client.email`.
 - **Clock skew > 300s** → auth failure, the subscriber receives `xtime err: your clock differs from the server by Ns ...` (with the actual skew). Keep both ends' time synced, or **switch to key-pair authentication** (above), which doesn't look at the clock.
 - **Blocked by the server's `allowIP`** → subscriber log `ws connect err: ... (server replied 403 Forbidden ...)`. Note IPv6 addresses rotate (RFC 4941 temporary addresses), so the whitelist should use prefix ranges rather than single addresses.
-- **Subscriber only trusts the whitelist**: it only dials the hard-coded `target` in its own `forward`, and unmapped `port`s are rejected outright — even if someone randomly connects to the server entry port they can't get into the intranet. **`forward[].port` holds the server's `forward.listen` entry port number** (e.g. `:2224` means fill `2224`), not the real intranet service port (e.g. RDP's `3389`) — confusing the two is the most common misconfig. The reason for this rejection is returned to the server via `METHOD_CLOSE`, reflected in the server's `nat forward closed ... reason=peer close: no forward target for entry port N` line, so no need to dig through the subscriber's local logs; old anyproxy versions lacked this return, and the server only saw the symptom (`up=19 down=0 dur=0s reason=...connection reset by peer`, the client sent the handshake packet but received nothing, disconnecting soon after).
+- **Subscriber only trusts the whitelist**: it only dials the hard-coded `target` in its own `forward`, and unmapped `tag`s are rejected outright — even if someone randomly connects to the server entry port they can't get into the intranet. **`forward[].tag` must string-equal the server's corresponding `forward[].tag`** (e.g. both written as `ssh`), unrelated to any port number — whether the server's `listen` binds `:2224` or some other port has no numeric relationship to the string filled in here on the subscriber side, and changing `listen` doesn't require changing the subscriber config to match; mistaking the tag for a port number (e.g. copying the digits from `listen`) is the most common misconfig. The reason for this rejection is returned to the server via `METHOD_CLOSE`, reflected in the server's `nat forward closed ... reason=peer close: no forward target for entry tag "xxx"` line, so no need to dig through the subscriber's local logs; old anyproxy versions lacked this return, and the server only saw the symptom (`up=19 down=0 dur=0s reason=...connection reset by peer`, the client sent the handshake packet but received nothing, disconnecting soon after).
 - **UDP relay's first packet is one beat slow**: the upstream is built only on receiving the first datagram, so the first packet waits one B→C→B round trip. RDP retries on its own, no need to worry; a self-written UDP app that doesn't retry should take note.
 - **UDP relay only starts when `listen` carries `udp://`/`both://` prefix**: without the prefix it defaults to `tcp://`, and just configuring `client.forward` is not enough — the entry rule's `listen` must also carry the protocol prefix.
 - **Path A doesn't support `CONNECT`**: the HTTP header subscription path only handles non-`CONNECT` HTTP requests.

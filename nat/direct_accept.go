@@ -144,9 +144,9 @@ func (d *directPeer) onPunch(msg *Message) {
 	// 中继连接经不可信 VPS 盲转发, 光有 token 不够: 登记时标为 relay 并记下 B 认证过的发起方
 	// email, 进数据面前还要在 e2e QUIC 流里做一次 uuid 挑战-应答(见 direct_relay_auth.go)。
 	if p.Relay {
-		d.tokens.putRelay(p.Token, p.Port, p.Email)
+		d.tokens.putRelay(p.Token, p.Tag, p.Email)
 	} else {
-		d.tokens.put(p.Token, p.Port)
+		d.tokens.put(p.Token, p.Tag)
 	}
 	// 朝对端的**所有**候选各连发几个打洞包, 不等回执: C 这侧不需要知道哪条更快(择优是
 	// A 做的), 只需要把每条路上的返回通道开出来。等回执会白白拖住 ready, 让 A 多等近一秒。
@@ -177,7 +177,7 @@ func (d *directPeer) onPunch(msg *Message) {
 	default:
 		d.punchOnly(p.Token, peerCands)
 	}
-	d.logf("my candidates %v, punching toward %v for port %d, encrypt=%v, peerPunchFirst=%v, relay=%v", myCands, peerCands, p.Port, p.Encrypt, p.PunchFirst, p.Relay)
+	d.logf("my candidates %v, punching toward %v for tag %q, encrypt=%v, peerPunchFirst=%v, relay=%v", myCands, peerCands, p.Tag, p.Encrypt, p.PunchFirst, p.Relay)
 	reply(DirectReady{Candidates: myCands, Endpoint: firstAddr(myCands), Fingerprint: d.fingerprint})
 }
 
@@ -354,11 +354,13 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 		dc.servePullStream(stream, remote.String())
 		return
 	}
-	// 复用 websocket 转发那套白名单: 未在 client.forward 里映射的端口一律拒绝,
+	// 复用 websocket 转发那套白名单: 未在 client.forward 里映射的 tag 一律拒绝,
 	// 对端只能到达本机明确开放的目标。
-	target, ok := d.forward[head.Port]
+	target, ok := d.forward[head.Tag]
 	if !ok {
-		d.logf("stream from %s: no forward target for port %d, rejected", remote, head.Port)
+		reason := fmt.Sprintf("no forward target for tag %q", head.Tag)
+		d.logf("stream from %s: %s, rejected", remote, reason)
+		rejectDataStream(stream, head, reason)
 		return
 	}
 
@@ -366,7 +368,9 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 	start := time.Now()
 	targetConn, err := bypassDial("tcp", target, 5*time.Second)
 	if err != nil {
-		d.logf("stream from %s: dial %s failed: %v", remote, target, err)
+		reason := fmt.Sprintf("dial %s failed: %v", target, err)
+		d.logf("stream from %s: %s", remote, reason)
+		rejectDataStream(stream, head, reason)
 		return
 	}
 	defer targetConn.Close()
@@ -376,12 +380,26 @@ func (dc *directConn) serveStream(stream *quic.Stream) {
 			return
 		}
 	}
-	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept %s -> %s (port %d)", remote, target, head.Port))
+	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept %s -> %s (tag %q)", remote, target, head.Tag))
 
 	up, down := directCopy(stream, targetConn)
 	dur := time.Since(start)
 	log.Println(trace.ID(id), fmt.Sprintf("nat direct accept closed %s up=%d(%s) down=%d(%s) dur=%s",
 		remote, up, rate(up, dur), down, rate(down, dur), dur.Round(time.Second)))
+}
+
+// rejectDataStream 告诉 A 这条数据流为什么被拒绝: 配置问题(tag 没映射、落地目标拨不通)
+// 不是连接坏了, 用专门的 directRejectACK 加原因帧, 让 A 不会把它当成 session 损坏去重建
+// (见 direct_entry.go 的 openDataStream/openStream)。老版本对端(head.Ready 为 false, 没有
+// ready ACK 能力)不等这个字节, 写不写它都无所谓, 关流时一并丢弃。
+func rejectDataStream(stream *quic.Stream, head directStreamHead, reason string) {
+	if !head.Ready {
+		return
+	}
+	if _, err := stream.Write([]byte{directRejectACK}); err != nil {
+		return
+	}
+	_ = writeFrame(stream, directStreamReject{Reason: reason})
 }
 
 // directQUICConfig 两侧共用的 QUIC 参数。

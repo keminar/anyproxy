@@ -78,8 +78,8 @@ websocket:
      订阅端 ──dial 写死的 target 127.0.0.1:22──▶ 内网 sshd
 ```
 
-- 服务端：`websocket.server.forward[].listen` 每条起一个裸 TCP 监听（`listen` 带 `udp://`/`both://` 前缀时同端口再起一个 UDP 中继）（`nat/forward.go` 的 `StartForward`/`listenForward`），每个进来的连接按该规则的 `email` 找订阅端（`GetClientByEmail`）桥接。
-- 订阅端：`websocket.client.forward[].port → target` 建映射（`nat/forward.go` 的 `buildForward`，每台 server 连接各自一份）。收到服务端「入口端口 Port」来的连接时，dial 对应 `target`；**Port 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。拒绝原因会经 `METHOD_CLOSE` 带回服务端（`Bridge.CloseReason`），折进服务端自己的 `nat forward closed ... reason=peer close: ...` 汇总行——不用再跨机器去翻订阅端的本地日志。
+- 服务端：`websocket.server.forward[].listen` 每条起一个裸 TCP 监听（`listen` 带 `udp://`/`both://` 前缀时同端口再起一个 UDP 中继）（`nat/forward.go` 的 `StartForward`/`listenForward`），每个进来的连接按该规则的 `email` 找订阅端（`GetClientByEmail`）桥接，并把该规则的 `tag` 一并带给订阅端。
+- 订阅端：`websocket.client.forward[].tag → target` 建映射（`nat/forward.go` 的 `buildForward`，每台 server 连接各自一份）。收到服务端带来的 `tag` 时，dial 对应 `target`；**tag 未在本地映射则拒绝**（`nat/forward.go` 的 `dialForCreate`）——天然白名单。拒绝原因会经 `METHOD_CLOSE` 带回服务端（`Bridge.CloseReason`），折进服务端自己的 `nat forward closed ... reason=peer close: ...` 汇总行——不用再跨机器去翻订阅端的本地日志。`listen` 这时纯粹是服务端绑哪个物理端口的事，和订阅端要不要跟着改无关——两边靠 `tag` 字符串相等配对，不再靠端口数值凑巧相等。
 - 适合：暴露内网 Web/DB 等任意 TCP 服务（如远程 SSH、内网 Web）。
 
 #### 路径 B 的第二条通道：UDP 中继（`listen: "udp://..."` 或 `"both://..."`）
@@ -97,9 +97,10 @@ websocket:
     forward:
       - listen: "both://:3389"   # 协议前缀: tcp://(默认, 可不写) / udp:// / both://
         email: c@example.com
+        tag: rdp
 ```
 
-订阅端不用改：落地目标仍查同一张 `client.forward[port] → target` 白名单，未映射的端口一样拒绝。
+订阅端不用改：落地目标仍查同一张 `client.forward[tag] → target` 白名单，未映射的 tag 一样拒绝。
 
 **为什么必须另开一条，而不是把 UDP 塞进 websocket**：websocket 跑在 TCP 上，把数据报塞进去等于给每个包重新套上重传和保序——丢一个包，后面已经到达的帧全得排队等它。这正是 RDP 的 UDP 通道特意要绕开的东西，那样做只会比纯 TCP 更卡。这里三段全程都是 UDP，丢包就是丢包，不会被放大成停顿。
 
@@ -126,7 +127,7 @@ websocket:
                      服务端 B (只转信令)
                         │ ②
                         ▼
-     A ══QUIC 直连(v4/v6/端口映射, 择优)══▶ C(订阅端) ──dial client.forward[port]──▶ 内网 RDP
+     A ══QUIC 直连(v4/v6/端口映射, 择优)══▶ C(订阅端) ──dial client.forward[tag]──▶ 内网 RDP
 ```
 
 代码在 [nat/direct.go](../nat/direct.go)、[direct_entry.go](../nat/direct_entry.go)（A 侧）、[direct_accept.go](../nat/direct_accept.go)（C 侧）、[direct_broker.go](../nat/direct_broker.go)（服务端信令）、[direct_reflect.go](../nat/direct_reflect.go)（UDP 反射器）。
@@ -149,8 +150,8 @@ websocket:
     email: home
     direct:
       accept: true                   # 允许别人直连自己(监听按需起, 平时不占端口)
-    forward:                         # 复用同一张白名单: 未映射的 port 一律拒绝
-      - port: 3389
+    forward:                         # 复用同一张白名单: 未映射的 tag 一律拒绝
+      - tag: rdp
         target: 192.168.1.10:3389
 
 # A（发起的一方，入口在自己机器上）
@@ -163,8 +164,9 @@ websocket:
     direct:
       rules:
         - listen: "both://:13389"    # 本机入口, mstsc 连这里; 协议前缀 tcp://(默认,可不写)/udp://both://
-          email: home                # 直连到这个 email 的订阅端
-          forwardPort: 3389          # 选对方 forward[] 里的哪条规则(白名单选号), 不是内网目标端口, 对方没配这个号就拒绝
+          forward:
+            email: home              # 直连到这个 email 的订阅端
+            tag: rdp                 # 选对方 forward[] 里的哪条规则(白名单选号), 不是内网目标端口, 对方没配这个 tag 就拒绝
 ```
 
 ### 多条路同时打，谁通用谁
@@ -245,8 +247,9 @@ websocket:
       encrypt: true   # 纯开关, 无需 uuid/receive.allow; 对 rules[] 与 -send/-recv 同时生效; 两端要一致
       rules:
         - listen: "both://:13389"
-          email: home
-          forwardPort: 3389
+          forward:
+            email: home
+            tag: rdp
 ```
 
 ### 经 VPS 盲转发中继（`via` / `direct.relay`）
@@ -264,7 +267,7 @@ A、C 都在受限 CGNAT 后、彼此直连怎么都打不通，但两台各自�
 - **两条腿都是"居民→云"打洞**：A、C 都先打、VPS 停着等各自的 nudge 再打回去（复用 `direct.punchFirst` 那套顺序机制）。任一腿打不通，整条中继失败、不再兜底。
 - **鉴权在 A↔C 端到端、绕开不可信的 VPS**：A 用 C 的证书指纹固定校验对面是真 C；C 在 e2e QUIC 首条流上对 A 做一次 **uuid 挑战-应答**（发随机 nonce，A 回 `HMAC(uuid, nonce ‖ C的证书指纹)`），按自己的 `receive.allow` 里 A 的 uuid 验——**uuid 全程不上网**，绑 C 指纹防 VPS 层重放。所以 C 侧要在 `receive.allow` 里配 A 的 uuid（与文件传输复用同一份名单）。
 - **`direct.encrypt` 与中继无关**：中继的安全不依赖它，它只是给两条腿的打洞包防 DPI。
-- **会话复用包含完整入口/路由身份**：A 按 `listen + 目标 email + forwardPort + via` 复用 QUIC；不同本地入口、同一目标经不同 VPS、或直连与经 VPS 中继，彼此不会误用对方的 session。`listen` 的隔离也避免两条同目标 UDP 规则的回程入口互相覆盖。
+- **会话复用包含完整入口/路由身份**：A 按 `listen + 目标 email + forward.tag + via` 复用 QUIC；不同本地入口、同一目标经不同 VPS、或直连与经 VPS 中继，彼此不会误用对方的 session。`listen` 的隔离也避免两条同目标 UDP 规则的回程入口互相覆盖。
 
 **对 VPS 的要求：稳定、可入站的公网端点。** VPS 默认靠反射器探自己的出口映射来得到 E，这在 **1:1 公网 IP 或端点无关(EIM/锥形)NAT** 下没问题（普通云主机 10.x→固定 49.x 就是这种）。但如果 VPS 挂在**出口 IP/端口逐流随机（对称型）的 NAT 网关**后，反射器探到的出口 ≠ A/C 发包时对应的入向映射，中继会失败（和对称 NAT 打不了洞同理）。这时应给这台 VPS 配一条**固定 DNAT 入站规则**（公网 `IP:端口` → VPS 同一 UDP 端口），并用 `direct.relayPublic` 把那个公网端点显式填进来：它会跳过反射器、把中继 socket 绑到该端口，入站恒开、与出口随不随机无关。一个端口只能承载一对并发中继，要更多并发就多配几个端口（各配好 DNAT/安全组）。当然，最省事的还是给中继 VPS 一个真正的 1:1 公网 IP。
 
@@ -310,8 +313,9 @@ websocket:
       punchFirst: true
       rules:
         - listen: "both://:13389"     # mstsc 连这里
-          email: home                 # 最终目标 C
-          forwardPort: 3389
+          forward:
+            email: home                # 最终目标 C
+            tag: rdp
           via: relay-vps              # 经这台 VPS 中继
 
 # VPS(公网): 一个开关, 无需任何 per-pair 配置
@@ -319,7 +323,7 @@ websocket:
   client:
     direct:
       relay: true
-      # relayAllow: [office]          # 可选: 只放行指定来源 email
+      # relayEmail: [office]          # 可选: 只放行指定来源 email(需 B 同版本)
 
 # C(居民, CGNAT): 照常 direct.accept + forward, 另在 receive.allow 里认 A 的 uuid
 websocket:
@@ -328,7 +332,7 @@ websocket:
       punchFirst: true
       accept: true
     forward:
-      - {port: 3389, target: 192.168.1.10:3389}
+      - {tag: rdp, target: 192.168.1.10:3389}
     receive:
       allow:
         - {email: office, uuid: <A 的 uuid>}
@@ -398,7 +402,7 @@ anyproxy -recv home@example.com:backup       -to /data/in    # 取整个目录�
 
 冒号后面的路径**相对于对方的 `receive.dir`**（不是对方的文件系统根），且必须写出来——不给路径不会默认"整个目录"，一句话把对方的共享目录全端过来不该是手滑的后果。`-to` 是本机的存放目录，不给就是当前目录。
 
-跑起来是这样：A 先要一份清单（一个文件就一条，目录则递归展开），打印总数和总大小，然后逐个取回，每个文件一行进度。中途任何一个失败就停下并非零退出，不会留下一个"看着成功了"的半份目录。
+跑起来是这样：A 先要一份清单（一个文件就一条，目录则递归展开），打印总数和总大小，然后逐个取回，每个文件两行：文件名（带 `[i/n]` 序号）单独一行，只打印一次、不再重画；下面一行是进度（总进度/总速率，`-parallel` 时还有各连接的明细），用回车符（`\r`）原地刷新，不依赖终端支持 ANSI 转义序列。中途任何一个失败就停下并非零退出，不会留下一个"看着成功了"的半份目录。
 
 前提与 `-send` 完全对称：A 的 `websocket.client.uuid` 必须列在 C 的 `receive.allow` 里——就是那份让 C 能接收 A 发来的文件的同一份名单（见上面「`allow` 是双向的」）。
 
@@ -449,8 +453,14 @@ e2e QUIC 流首部对发送方做一次 uuid 挑战-应答（nonce 绑证书指�
 - **SHA-256 校验，摘要放在数据后面**（不是首部）。放后面发送端才能边读边算——写首部的话必须先把整个文件读一遍算摘要，大文件等于白读一遍。收端摘要对不上就删掉并报错：留着一个内容错误、名字正确的文件比没收到更糟。
 - **先写 `.part` 再改名**。中断留下的是一眼看得出没传完的东西，而不是一个看着正常、内容是半截的文件。
 - **`.part` 名字带一段随机 token，不是简单的 `目标名.part`**。踩过的坑：发送端异常退出（比如传到一半 Ctrl+C）时，接收端处理这条流的 goroutine 在察觉连接真断了之前还会继续占着 `.part`——数据阶段故意不设读超时（大文件在慢链路上传很久是正常的），靠 QUIC 自己的空闲超时兜底，这意味着旧连接的清理和新一次重传可能在时间上重叠。如果新旧两次都用 `目标名.part`，新的这次收完文件改名时会撞上旧 goroutine 还占着的文件，Windows 上报 "being used by another process"，POSIX 上则更隐蔽——不报错，但两边同时写同一个 inode 可能悄悄写坏内容。每次传输用自己的 token 单独占一个 `.part` 文件名，这类撞名从根上不会发生。
-- **不覆盖同名文件**，自动改成 `x (1).zip`。覆盖会悄无声息毁掉收方已有的数据，代价远大于多一个带序号的名字；实际存成什么名字会回报给发送端。改名字这一步是"用 `O_CREATE|O_EXCL` 原子认领名字"而不是"先探测存不存在、再单独一步 Rename"——两步分开在两个独立进程之间不是原子的：两个终端并发发同名文件时，双方都可能在探测那一刻看到"不存在"，都选中同一个名字去 Rename。`os.Rename` 对已存在的目标是直接覆盖（Go 在 Windows 上用 `MOVEFILE_REPLACE_EXISTING` 特意抹平了跟 POSIX `rename()` 的差异，两边行为一致），后一个会悄悄吃掉前一个刚落盘、且已经回复过"Saved"的文件——这不是 Windows 特有的问题，Linux/macOS 上同样会撞上。
-- **文件名是对端说了算的，所以要防越界**：拒绝绝对路径、`..`、反斜杠和盘符，拼完之后再确认结果确实落在接收目录内。两道都做——先检查原始名字再规范化，顺序反了的话 `path.Clean` 会把 `..` 直接吃掉，检查永远不触发。
+- **不覆盖同名文件**，自动改成带序号的名字：`x 1.zip`、`x 2.zip`（在文件名主体后加空格+序号，扩展名不变）。覆盖会悄无声息毁掉收方已有的数据，代价远大于多一个带序号的名字；实际存成什么名字会回报给发送端。改名字这一步是"用 `O_CREATE|O_EXCL` 原子认领名字"而不是"先探测存不存在、再单独一步 Rename"——两步分开在两个独立进程之间不是原子的：两个终端并发发同名文件时，双方都可能在探测那一刻看到"不存在"，都选中同一个名字去 Rename。`os.Rename` 对已存在的目标是直接覆盖（Go 在 Windows 上用 `MOVEFILE_REPLACE_EXISTING` 特意抹平了跟 POSIX `rename()` 的差异，两边行为一致），后一个会悄悄吃掉前一个刚落盘、且已经回复过"Saved"的文件——这不是 Windows 特有的问题，Linux/macOS 上同样会撞上。
+- **同名文件与断点续传可以先比内容再让人选（`-conflict`）**。有两种互相独立的情况：
+  - **目标文件名上已有完整文件**：对比 SHA-256，不管**内容一致**还是**内容不同**，提供的选项都一样：改名重传 / 覆盖 / 跳过——要不要覆盖是使用者的明确选择，跟内容是否一致无关（`receive.allow` 里的发送方本来就有写这个目录的权限，不再单设开关；非交互的 `-conflict overwrite` 本来就不比较内容直接覆盖）。「改名重传」指**新传的文件**换个名字保存，已有文件原封不动——提示文案里写的是 `[r]ename incoming and transfer`，点名是新传的这份，免得误会成改的是已有那份。**目标文件名上一定是完整文件**：传输总是先写 `.part`、收全校验后才改成目标名。「覆盖/重命名」与「续传」正交——选了覆盖也会先看有没有可续的 `.part`，能续就接着传，整份校验通过后才替换已有文件（见下条）。
+  - **上次中断留下了 `.part` 临时文件**（`x.zip.<16位十六进制>.part`）：若它恰好是新文件的开头一段（逐字节哈希核对过），可以从断点续传，收完再落到目标名：重命名落点则照常走 `claimName`（被占换名，不覆盖已有文件），覆盖落点则整份校验后直接替换已有文件。**传输中断时已收到的部分会保留在 `.part` 里**（一个字节都没收到才删），供下次续传，不会自动清理，不再需要时手工删除。**分块并行（`-parallel`）的 `.part` 带 `.chunks` 标记、中间可能有空洞，不参与续传**——命令行开始一次分块并行传输时会提示一句「传输中断后不能续传，会从头重来」。它中断后不像单连接 `.part` 那样留着等续传：任意一片出错，发送方本身会在退出前尽力通知接收方放弃这个 `TransferID`（新的一帧 `fileHead{Abort:true}`，走同一条文件传输通道），接收方立即收掉 `.chunks` 临时文件与内存状态；这条通知发不出去也无妨，5 分钟的空闲回收器仍是最终兜底（见 `nat/file.go` 的 `chunkAssemblyIdleTimeout`/`reapChunkAssemblies`）。
+  - 提示时直接回车 = 跳过，大写字母（`R`/`O`/`C`/`S`）= 对之后所有冲突都这样处理。`-conflict` 取值：`ask`（终端里的默认，逐个问）、`rename`（自动改名，标准输入不是终端时的默认，也就是旧行为，不探测、不续传）、`overwrite`、`skip`、`resume`（有可续的 `.part` 就续；目标名上已有一致的完整文件则跳过，内容不同则改名）。
+  - `-send` 与 `-recv` 都支持：`-send` 时在**对端**（多一次 probe 往返，收方回目标名与可续 `.part` 的情况，哈希只在文件不比来件大时才算），`-recv` 时在**本机**（用 pull 的 `hash` 操作向对端要前 N 字节的哈希）。
+  - 覆盖先把新内容收进 `.part`、校验通过后才替换已有文件，中途出错已有文件原封不动；**覆盖与续传正交**——选了覆盖若发现前缀对得上的 `.part` 也会先续传（省掉已收到的那段流量），且覆盖式续传会在替换前再校验整份摘要（对齐 `writeOverwrite`）。续传接管 `.part` 前会校验文件名（必须是该目标名自己的 `.part`）、当前没有别的传输在写它、大小与协商时一致；尾部摘要不对会截回原长度。续传只发一段尾巴，不做 `-parallel` 分块。
+  - 探测请求是新增的帧，老版本收方不认识：10 秒内没有回应就退回「收方自动改名」，并提示一次。
 - **取文件方向多一道符号链接检查**。收文件时创建的是新文件，符号链接无从谈起；取文件不一样——共享目录里放一个指向 `/etc/shadow` 的软链，光靠上面那套字符串检查是拦不住的（拼出来的路径确实在目录内），所以解析完软链之后要再确认一次仍在目录内。共享目录自己经由软链（macOS 的 `/tmp` → `/private/tmp`）是正常配置，两边都解析后再比，不会误判。
 - **`-send` / `-recv` 都是独立进程**，不要求本机已经跑着 anyproxy。收发文件是有明确起止的动作，独立进程的退出码就能表达成败。它会临时多开一条 websocket，不影响常驻那条——直连信令是按"发起请求的那条连接"回的，不是按 email 查的。
 - **常驻的那份配置若只是为了给 `-send`/`-recv` 取凭证，不用额外配置**：`anyproxy` 常驻进程启动时会为每一条 `websocket.client(s)` 判断值不值得发起常驻连接——只要 `subscribe`/`forward`/`direct.rules`/`direct.accept`/`receive.dir` 全是空的，就自动跳过（这条配置仍然完好，只是常驻进程不去连它；运行 `-send`/`-recv` 时照常按这条配置的凭证取用）。这是因为服务端也是同一套判断：空 `subscribe` 又不是转发目标/直连方/接收方的连接会被 `serveWs` 一直拒绝并断开（日志刷 `ignore, subscribe is empty`），常驻进程连上去纯属陪跑。想强制跳过（哪怕配了其中几项）就显式加 `sendRecvOnly: true`。
@@ -467,7 +477,7 @@ e2e QUIC 流首部对发送方做一次 uuid 挑战-应答（nonce 绑证书指�
 
 #### 单个大文件切块并行传输：`-parallel N`
 
-默认每个文件只占一条连接（`direct` 下是一条 QUIC stream，`relay` 下是一次中继会话），这在单条连接吞吐已经打满链路时够用，但受限于单流拥塞窗口爬升、中继流控窗口这些"单条连接"自身的天花板时就不够了。`-parallel N`（默认 1）让**单个**大文件按字节区间切成最多 `N` 块，各开一条独立连接并行传，两条路径（`-via direct`/`-via relay`）和两个方向（`-send`/`-recv`）都支持：
+默认每个文件只占一条连接（`direct`/VPS 盲转发下是一条独立打洞的 QUIC 连接，`relay` 下是一次中继会话），这在单条连接吞吐已经打满链路时够用，但受限于单流拥塞窗口爬升、中继流控窗口这些"单条连接"自身的天花板时就不够了。`-parallel N`（默认 1，硬上限 4——超过的会被截到 4）让**单个**大文件按字节区间切块、开最多 `N` 条连接并行传，两条路径（`-via direct`/VPS、`-via relay`）和两个方向（`-send`/`-recv`）都支持：
 
 ```bash
 anyproxy -send bigfile.zip -to home@example.com -parallel 4
@@ -476,14 +486,17 @@ anyproxy -recv home@example.com:backup/bigfile.zip -to /data/in -parallel 4
 
 - **只切单个文件，不做多文件并发**。批量 `-send`/`-recv` 多个文件时仍然一个接一个传——切块并行的目的是让单个大文件更快用满带宽,不是让多个文件抢同一份带宽（那样反而会拖长每一个文件的耗时）。
 - **文件太小不会被切**：低于 8MiB 的文件永远走单连接路径，`-parallel` 的值被忽略，切块的握手/首部开销在小文件上不划算。
-- **失败语义与不切块时一致**：任意一块传输失败（网络错误、校验不过）就让整份文件报错、`.part` 文件被清理，不会留下一个只传对了几块的半成品，也不会自动重试。
+- **连接数封顶 4 条，不随文件大小往上涨**；但切出来的**块数会比连接数多**（最多 4 倍，同样受块最小体积 4MiB 限制，文件不够大时凑不满这么多块）——块数多于连接数是故意的，见下面"能者多劳"。
+- **能者多劳：谁先干完自己手头那片，就去抢下一片，不会空等**。以前是把块数按连接数死分成固定的 1:1 份额，一条连接传得快、自己那份传完了也只能干等着，慢的那条还在后面墨迹，总耗时被最慢的那条拖累；现在是所有连接从同一份"待传队列"里抢活，块数故意切得比连接数多几倍，就是为了让快的连接能连续多抢几片、把慢连接空出来的产能吃掉。进度行末尾的方括号 `[已传 速率/分片大小, ...]` 里，逗号分隔的每一段对应一条连接（按连接顺序排列，不单独标序号），"已传"是"这条连接迄今为止总共传了多少"，累计的是它抢到的全部片数，不是某一片单独的进度；"/"后面那个数字是它**当前**正在传的这一片有多大——第一片固定是探测片（`probeChunkSize`），测完速度后每条连接各自按 `chunkSizeForRate` 动态决定后续片的大小，这个数字就是用来看某条连接是不是因为测速偏低被分到了明显更小的片、一直追不上别的连接。
+- **失败语义与不切块时一致，但容忍部分连接打不通**：`-via direct`/VPS 下, `N` 条独立连接只要至少打通 1 条就会用打通的那几条继续传（少数候选路径不通是正常现象, 不该因此让整个传输失败）；连接建好之后, 任意一块传输失败（网络错误、校验不过）就让整份文件报错、`.part` 文件被清理, 不会留下半成品、也不会自动重试——而且一旦有一片失败, 别的连接不会再去抢新的一片继续做无谓的传输, 会尽快收尾退出。
 - **`-via relay` 下每一块各自协商一次加密会话**（各自独立的随机 salt、独立派生的 AES-256-GCM 密钥），协议本身早就支持"随时开一条新的加密会话"，不需要为切块单独改握手。
 
-##### `-parallel` 未必总能提速：先搞清楚瓶颈在哪
+##### `-parallel` 是不是真的多开了连接，两条路径不一样
 
-**分块用的是同一条底层连接**——`direct` 下 N 个分块是同一条 QUIC 连接上的 N 条 stream，`relay` 下是同一条 websocket（同一条 TCP 连接）上的 N 个中继会话。QUIC/TCP 的拥塞控制（congestion control）都是按**连接**算的，不是按 stream/会话算的，也就是说这 N 条并发路径共用同一个拥塞窗口、在网络设备眼里是**同一个五元组**（同一对源/目的 IP+端口）。如果瓶颈是运营商按流限速、或者链路本身拥塞丢包，`-parallel` 在这种同连接复用的实现下大概率没用——运营商看到的还是"一条流"，不会因为应用层多开了几条 stream 就分配更多带宽。
+- **`-via direct`/`-via VPS的email`（盲转发打洞）：是真的多条独立 QUIC 连接**。每一块各自走一遍打洞信令、各自的 QUIC 握手，拿到的是完全独立的连接，各自维护自己的拥塞窗口——这正是设计初衷：链路有随机丢包时，单条 QUIC 流的拥塞窗口会被反复摁在低位涨不起来（实测案例：cwnd 长期卡在 5~14KB、丢包率 ~5%，吞吐≈cwnd/RTT），而几条相互独立的连接各自维护自己的窗口，聚合吞吐能接近线性回升，这跟迅雷/多线程下载器靠开多条连接提速是同一个原理。真正打洞时开出的 UDP 映射还是复用同一个本地 socket（不需要额外本地端口），但 QUIC 连接本身、以及 VPS 盲转发那一端的绑定，都是各自独立的。
+- **`-via relay`（经服务端 B 中继）：还是同一条底层连接**。N 个分块是同一条 websocket（同一条 TCP 连接）上的 N 个中继会话，QUIC/TCP 的拥塞控制是按**连接**算的，这 N 条并发路径共用同一个拥塞窗口、在网络设备眼里是**同一个五元组**。如果瓶颈是运营商按流限速、或者链路本身拥塞丢包，`relay` 路径下 `-parallel` 大概率没用；它真正能帮上忙的场景是单条中继会话自身的流控窗口先于网络带宽打满，或者瓶颈其实是 CPU（哈希计算、加解密）而不是网络。想要绕开这条限制、换成真正独立的多连接，请改用 `-via direct` 或 `-via VPS的email`。
 
-`-parallel` 真正能帮上忙的场景，是单条 stream/中继会话自身的流控窗口（不是拥塞窗口）先于网络带宽打满——比如高延迟长距离链路上单流的窗口不够大、或者瓶颈其实是 CPU（哈希计算、加解密）而不是网络。这两种情况开多条并发路径能实打实提速；如果瓶颈是运营商跨网互联质量差或者按流/按账号限速，开再多条也没用。
+##### 先用 `iperf3` 诊断一下瓶颈在哪，尤其是 `-via relay`
 
 **用之前先用 `iperf3` 诊断一下，别凭感觉猜**（假设 A 传得慢，C 是收数据的那台，两台要能相互访问）：
 
@@ -511,9 +524,11 @@ iperf3 -c <C的IP> -P 4 -t 20 -R
 
 | 现象 | 结论 |
 |---|---|
-| 单流慢，多流（`-P 4`）的 `[SUM]` 明显比单流高很多 | 是按流限速/单流窗口撑不满，`-parallel` 值得用 |
-| 单流慢，多流 `[SUM]` 也差不多、丢包率高 | 链路本身拥塞（常见于运营商跨网互联质量问题），`-parallel` 收益有限 |
-| TCP 结果还行，UDP 明显更差 | 运营商可能单独限制了 UDP，这种情况即使改造成多条独立 QUIC 连接也未必顶得上去，可以考虑改用 `-via relay`（走 TCP 的 websocket）绕开 |
+| 单流慢，多流（`-P 4`）的 `[SUM]` 明显比单流高很多 | 是按流限速/单流窗口撑不满，`-parallel` 值得用（`-via direct`/VPS 下尤其明显，因为那边确实是独立连接） |
+| 单流慢，多流 `[SUM]` 也差不多、丢包率高 | 链路本身拥塞（常见于运营商跨网互联质量问题），几条独立流各自摊一份丢包也无法完全绕开，`-parallel` 收益有限，但通常还是比单流略好（参考 `-check` 里 QUIC cwnd/丢包统计一节的实测数据） |
+| TCP 结果还行，UDP 明显更差 | 运营商可能单独限制了 UDP，`-via direct`/VPS 走的是 QUIC/UDP，即使开多条独立连接也未必顶得上去，可以考虑改用 `-via relay`（走 TCP 的 websocket）绕开 |
+
+`-via direct`/VPS 下传输过程中带 `-debug 2` 能看到每条连接自己的 `quic cwnd=... inflight=... sent=...pkt lost=...pkt`，传完还有一行汇总（不需要 `-debug`）；这组数据比 iperf3 更直接——它就是这次传输实际在用的那条连接的真实状况，不是另起一次测速的间接推断。
 
 ### TCP 与 UDP：两种协议在 QUIC 上的承载不同
 
@@ -640,14 +655,14 @@ websocket:
 | `email` | 本订阅端身份，用于服务端/对端定位（HTTP 路径辅助、TCP 路径按它匹配 `server.forward.email`、文件传输 `-to`/`receive.allow` 按它查表）。非空，本身不参与鉴权、也不是安全边界 |
 | `uuid` | 这份配置的身份凭证，只在文件传输(`-send`)的收发双方之间使用，B 完全不感知。**不可在配置文件里配**：启动时自动生成并持久化到配置文件同目录、同名的隐藏文件（`router.yaml` 对应 `.router.uuid`），重启不变；`-c` 指向不同配置文件各自独立、不共用。生成后打在启动日志里，复制给对端配进它的 `receive.allow[].uuid`。见「文件传输」 |
 | `subscribe` | HTTP 头订阅规则数组，每条 `{key, val}`；路径 A 用 |
-| `forward` | 裸 TCP 转发目标规则数组（路径 B），每条 `{port, target}`，见下 |
+| `forward` | 裸 TCP 转发目标规则数组（路径 B），每条 `{tag, target}`，见下 |
 | `direct.accept` | `true` 时起 QUIC 监听并把端点通告给服务端，允许其它订阅方直连自己（路径 C，见下）；监听按需起、空闲释放，平时不占端口 |
-| `direct.rules` | 本机 QUIC 直连入口规则数组（路径 C），每条 `{listen, email, forwardPort, via}`，`listen` 可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，见下 |
+| `direct.rules` | 本机 QUIC 直连入口规则数组（路径 C），每条 `{listen, forward: {email, tag}, via}`，`listen` 可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，见下 |
 | `direct.encrypt` | `true` 时本机作为打洞发起方发出的打洞控制包(PUNCH/PONG)额外加密，防运营商设备按明文特征丢包；默认 `false`，纯 opt-in。按 client 一次性开关，对 `direct.rules[]` 与 `-send`/`-recv` 同时生效，见「打洞控制包加密」 |
 | `direct.portmap` | `true` 时直连候选收集才会去尝试 UPnP/PCP/NAT-PMP 端口映射；默认 `false` 不试——命中率低又要等三个协议的超时，见上「多条路同时打，谁通用谁」 |
 | `direct.punchFirst` | `true` 声明本机在受限运营商 CGNAT 后、主动发起直连时必须先发第一个包（让对端接受方推迟打洞）；默认 `false`。家宽机器连公网/云主机连不上时设它，见 [direct-punch-order.md](direct-punch-order.md) |
 | `direct.relay` | `true` 时本机(一台公网 VPS)允许作为 A↔C 之间的盲转发中继；默认 `false`。**无需为每对 A-C 配任何东西**，目标 C 由发起方用 `direct.rules[].via` 指定，见「经 VPS 盲转发中继」 |
-| `direct.relayAllow` | 可选，收紧 `direct.relay`：只放行这些来源 email(发起方 A)用本机中继；留空=不限制。仅 email 准入名单，不涉及 uuid |
+| `direct.relayEmail` | 可选，收紧 `direct.relay`：只放行这些来源 email(发起方 A)用本机中继；留空=不限制。仅 email 准入名单，不涉及 uuid。精确匹配、大小写敏感。email 由服务端 B 盖章送来，**需要 B 为同版本**：配了本名单却收到空 email（老版本 B）时本机拒绝中继而非放行。注意与 `forward[].allowRelay` 不是一回事，那个是控制某条 tag 能否经 B 中转触发的布尔开关 |
 | `direct.relayPublic` | 可选公网中继地址数组。全部只写 IP 时，每个 binding 使用随机端口并在全部 IP 上通告；全部写 `IP:port` 时使用固定端口（适合固定 DNAT，一个端口一对并发）。两种形态不能混写，见「经 VPS 盲转发中继」 |
 | `direct.plainUdp` | 覆盖命令行 `-direct-plain-udp` 对这一条连接的默认值，三态：不配跟随全局值，显式 `true`/`false` 只影响这一条 |
 | `direct.lanAddrs` | 手工配置本机局域网/内网 IP 数组（不带端口），额外参与打洞/QUIC 拨号竞速的候选，见上「多条路同时打，谁通用谁」；不做网卡自动扫描 |
@@ -713,14 +728,14 @@ websocket:
         - key: X-Env
           val: home
       forward:
-        - port: 2222
+        - tag: ssh
           target: 127.0.0.1:22
     - connect: 198.51.100.10:3002
       user: anotheruser
       pass: anotherpass
       email: office
       forward:
-        - port: 2222          # 入口端口号可以和上一台重复, 互不冲突(各连接独立的转发表)
+        - tag: rdp             # tag 只在各自这条 server 连接内生效, 和上一台重名也不冲突(各连接独立的转发表)
           target: 192.168.1.10:3389
 ```
 
@@ -734,18 +749,19 @@ websocket:
 
 | 字段 | 角色 | 说明 |
 |------|------|------|
-| `listen` | 服务端 | 入口监听地址，如 `:2222`；可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，如 `both://:2222`。TCP 经 websocket 转发，UDP 另起一条 UDP 中继，两条各走各的（见路径 B 的第二条通道） |
+| `listen` | 服务端 | 入口监听地址，如 `:2222`；可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，如 `both://:2222`。TCP 经 websocket 转发，UDP 另起一条 UDP 中继，两条各走各的（见路径 B 的第二条通道）。绑哪个端口纯粹是物理层面的事，不再需要和订阅端任何字段数值相等 |
 | `email` | 服务端 | 把该入口端口的连接转发给此 `email` 的订阅端 |
-| `port` | 订阅端 | 对应服务端入口端口号（如 `2222`），TCP 与 UDP 共用同一张表 |
-| `target` | 订阅端 | 收到该端口来的连接/数据报时 dial 的内网真实目标，如 `127.0.0.1:22` |
+| `tag` | 服务端 | 随每个连接/数据报一起告诉订阅端这是哪条规则；必须与订阅端 `client.forward[].tag` 字符串相等才会被接受，和 `listen` 绑的端口号无关 |
+| `tag` | 订阅端 | 与服务端该条 `forward[].tag` 字符串相等即命中，TCP 与 UDP 共用同一张表 |
+| `target` | 订阅端 | 收到该 tag 来的连接/数据报时 dial 的内网真实目标，如 `127.0.0.1:22` |
 
 `client.direct.rules` 每条（`ClientDirect`，路径 C 的本机直连入口，配在**发起方** A 上）：
 
 | 字段 | 说明 |
 |------|------|
 | `listen` | 本机入口监听地址，如 `:13389`；`:13389` 绑 `[::]` 双栈，IPv4 客户端也能连。可带协议前缀 `tcp://`(默认,可不写)/`udp://`/`both://`，如 `both://:13389`——两种协议在 QUIC 上走不同承载（stream / datagram），见下文「TCP 与 UDP」；`both://` 常用于 RDP |
-| `email` | 直连到这个 email 的订阅方（即 C，须与本条 `server` 连接下的另一订阅方一致） |
-| `forwardPort` | 告诉 C 用它自己 `client.forward[port]` 里的哪条规则；**不是**要 dial 的内网目标端口，也不是上面 `listen` 的端口。故意设计成白名单选号：没有它 A 只凭 `email` 就能让 C 转发到 C 配过的任意内网目标，有了它 C 只认自己 `forward` 里列出的端口，未映射的一律拒绝 |
+| `forward.email` | 直连到这个 email 的订阅方（即 C，须与本条 `server` 连接下的另一订阅方一致） |
+| `forward.tag` | 告诉 C 用它自己 `client.forward[]` 里 `tag` 等于这个值的哪条规则；**不是**要 dial 的内网目标端口，也不是上面 `listen` 的端口——它从来就不是端口号，只是个字符串选择器（此字段以前叫 `forwardPort`，类型是 `uint16`，容易被当成端口看待，现已改名为 `tag`、类型是 `string`）。故意设计成白名单选号：没有它 A 只凭 `email` 就能让 C 转发到 C 配过的任意内网目标，有了它 C 只认自己 `forward` 里列出的 tag，未列出的一律拒绝 |
 | `via` | 可选。填一台公网 VPS 的 email(那台需开 `direct.relay`)，则经它盲转发到 `email`(最终目标 C)，而非直连；留空=直连。适用 A、C 都在受限 CGNAT 后彼此打不通、但各自能连通 VPS 的场景，见「经 VPS 盲转发中继」 |
 
 `client.receive`（`ClientReceive`，接收直连传来的文件，配在**接收方** C 上，需同时开 `direct.accept`）：
@@ -773,6 +789,20 @@ websocket:
 
 失败会断开并退避重连（订阅端自带重连循环）。
 
+## 加密与机密性总览
+
+鉴权解决的是"对方是谁"，不等于"内容传输时是不是密文"——这两件事在 anyproxy 里是分开的，同一次部署里不同内容走的加密策略并不一样，取决于走哪条路径：
+
+| 内容 | 是否加密 | 说明 |
+|---|---|---|
+| 信令连接本身（登录、direct 候选交换、forward 协商等，即上一节「鉴权与握手」传的那些） | 默认明文 | anyproxy 进程本身只讲 `ws`，不内置 TLS；要变成 `wss` 得自己在前面套一层 TLS 网关（nginx/caddy 等反代终结证书），`websocket.client.host` 就是配给这种场景用的 Host 头（见「配置字段」） |
+| `-send`/`-recv` 文件传输内容（见「两条转发路径」） | 端到端加密，与信令连接是否套 TLS 无关 | `-via direct`：QUIC 原生 TLS 1.3 + 自签证书指纹固定，数据不经过服务端；`-via relay`：应用层按 `receive.allow` 里的 `uuid` 派生 AES-256-GCM，服务端只转发密文，看不到明文 |
+| `server.forward` 的 TCP 转发内容（路径 A、路径 B） | 默认明文 | 数据直接搭在信令那条 `ws` 连接上传输，机密性等同上表第一行——不套 TLS 网关，转发的内网流量（如 SSH）过服务端时就是明文 |
+| `server.forward` 的 `both://` UDP 并行通道（`nat/relay_udp.go`） | 不加密 | 服务端↔订阅端是裸包头+裸数据，没有额外加密层，机密性完全靠被转发协议自身（如 RDP 自带 DTLS）；换成别的明文 UDP 协议就是全程裸奔 |
+| 打洞控制包（PUNCH/PONG/WHOAMI/SEEN） | 默认明文，`direct.encrypt: true` 时 AES-256-GCM | 见「打洞控制包加密」 |
+
+结论：**文件传输（`-send`/`-recv`）不管走 `direct` 还是 `relay`，服务端全程都看不到内容**；但登录鉴权信令、以及纯 TCP/UDP 端口转发（`server.forward`）这两类，机密性完全取决于有没有在 `websocket.server.listen` 前面额外套一层 TLS——生产部署如果在意这条链路上的内容不被中间节点看到，建议给这个端口套 TLS 网关，而不是假设 anyproxy 自己已经处理好了。
+
 ## 命令行等价
 
 | 参数 | 配置项 |
@@ -789,7 +819,7 @@ websocket:
 - **`email` 对不上** → 裸 TCP 转发时服务端日志 `no forward ... no subscriber for email ...`。服务端 `server.forward.email` 必须等于某订阅端的 `client.email`。
 - **时钟漂移 > 300s** → 鉴权失败，订阅端会收到 `xtime err: your clock differs from the server by Ns ...`（带实际时差）。保证两端时间同步，或**改用密钥对鉴权**（见上），那套不看时钟。
 - **被服务端 `allowIP` 挡掉** → 订阅端日志 `ws connect err: ... (server replied 403 Forbidden ...)`。注意 IPv6 地址会轮换（RFC 4941 临时地址），白名单建议写前缀网段而不是单个地址。
-- **订阅端只认白名单**：只 dial 自己 `forward` 里写死的 `target`，未映射的 `port` 直接拒绝——服务端入口端口被人乱连也打不进内网。**`forward[].port` 填的是服务端 `forward.listen` 的入口端口号**（比如 `:2224` 就填 `2224`），不是内网真实服务的端口（比如 RDP 的 `3389`）——两者混淆是最常见的配错。这条拒绝的原因会经 `METHOD_CLOSE` 带回服务端，体现在服务端 `nat forward closed ... reason=peer close: no forward target for entry port N` 这一行里，不用再去订阅端本地日志找；老版本 anyproxy 没有这个回传，服务端只看得到症状（`up=19 down=0 dur=0s reason=...connection reset by peer`，客户端发了握手包却什么都没收到，很快自己断开）。
+- **订阅端只认白名单**：只 dial 自己 `forward` 里写死的 `target`，未映射的 `tag` 直接拒绝——服务端入口端口被人乱连也打不进内网。**`forward[].tag` 必须和服务端该条 `forward[].tag` 逐字相等**（比如都写 `ssh`），跟任何端口号无关——服务端 `listen` 绑在 `:2224` 还是别的端口，和订阅端这里要填的字符串没有数值关系，改 `listen` 也不用跟着改订阅端配置；把 tag 误当端口号填（比如照抄 `listen` 里的数字）是最常见的配错。这条拒绝的原因会经 `METHOD_CLOSE` 带回服务端，体现在服务端 `nat forward closed ... reason=peer close: no forward target for entry tag "xxx"` 这一行里，不用再去订阅端本地日志找；老版本 anyproxy 没有这个回传，服务端只看得到症状（`up=19 down=0 dur=0s reason=...connection reset by peer`，客户端发了握手包却什么都没收到，很快自己断开）。
 - **UDP 中继的第一个包会慢一拍**：上行是收到第一个数据报才建的，头一个包要等 B→C→B 一个来回。RDP 会自己重试，不用管；自己写的 UDP 应用如果不重试就要注意。
 - **UDP 中继只在 `listen` 带 `udp://`/`both://` 前缀时才起**：不写前缀默认 `tcp://`，光配 `client.forward` 是不够的，入口那条规则的 `listen` 也得带上协议前缀。
 - **路径 A 的 `CONNECT` 不支持**：HTTP 头订阅路径只处理非 `CONNECT` 的 HTTP 请求。

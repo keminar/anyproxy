@@ -53,17 +53,19 @@ var (
 	gCheckFix        bool
 	gGenKey          bool
 	gGenConf         bool
+	gWol             string
 	gSend            string
 	gSendTo          string
 	gSendVia         string
 	gRecv            string
 	gParallel        int
+	gConflict        string
 	gDirectPlainUDP  bool
 )
 
 func init() {
 	flag.Usage = help.Usage
-	flag.StringVar(&gListenAddrPort, "l", "", "listen address of socks5 and http proxy")
+	flag.StringVar(&gListenAddrPort, "l", "", "listen address of socks5 and http proxy; comma-separated to bind multiple addresses at once (e.g. 192.168.1.5:3000,10.0.0.5:3000)")
 	flag.StringVar(&gProxyServerSpec, "p", "", "Proxy servers to use")
 	flag.StringVar(&gConfigFile, "c", "", "Config file path, default is router.yaml")
 	flag.StringVar(&gWebsocketListen, "ws-listen", "", "Websocket address and port to listen on")
@@ -83,13 +85,23 @@ func init() {
 	// 配置模板生成: 新机器上不知道配置长什么样时, 先生成一份带注释的骨架再改。
 	// 模板按 -mode 裁剪, 写到 -c 指定的路径(默认程序目录 conf/router.yaml, 写 "-" 打到标准输出)。
 	flag.BoolVar(&gGenConf, "genconf", false, "Write a commented config template (tailored to -mode) and exit; -c sets the output path (\"-\" for stdout)")
+	// 网络唤醒(WOL): 广播魔术包唤醒开了 WOL 的机器。不带 -via 时纯本机 UDP 广播,
+	// 与 anyproxy 的隧道/中继能力无关; 带 -via EMAIL 时改成让那个订阅方在它自己的
+	// 局域网里广播——要唤醒的机器本来就没开机, 没法自己接这条命令, 只能请同一个
+	// 局域网里另一台已经开着的机器代劳。固定走服务端中继(不打洞): 魔术包只有 102
+	// 字节, 一来一回就结束, 用不上打洞那一套开销, 见 nat/wol_action.go 顶部说明。
+	// 复用 -send 的 -to/-via 两个 flag, 不单独开两个新名字: -to 在这里是广播地址
+	// (谁执行广播就用谁的), -via 在这里必须是订阅方 email(不认 "direct"/"relay"
+	// 这两个 -send/-recv 专用的关键字), 留空(即保持默认值 "direct")就是本机广播。
+	flag.StringVar(&gWol, "wol", "", "Send Wake-on-LAN magic packets to the given MAC address(es), comma-separated, and exit. Without -via, broadcasts from this machine (see -to for the broadcast address). With -via EMAIL, asks that subscriber (on the target machine's own LAN, since the target itself is powered off and cannot run this command) to broadcast instead -- that subscriber must list this email under its own websocket.client.receive.allow AND set wol: true on that entry (default false; being in receive.allow for file transfer does not by itself permit this) -- always relayed through the server B, no NAT punching")
 
 	flag.StringVar(&gSend, "send", "", "Send a file or directory to another subscriber and exit (extra paths may follow as arguments)")
-	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory")
-	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path), \"relay\" (through the server B, no punching needed), or the email of a public VPS (needs directRelay enabled) to blindly relay the NAT punch through -- for when the two peers cannot punch to each other directly (e.g. both behind CGNAT) but can each reach that VPS; the QUIC/TLS session still ends end-to-end between the two peers, the VPS only forwards opaque UDP packets. All are end-to-end encrypted. See docs/direct-relay-design.md")
+	flag.StringVar(&gSendTo, "to", "", "-send: the receiving subscriber's email, optionally scp-style with a :subdir suffix (e.g. user@example.com:/aaa/) to land files under receive.dir/aaa/. -recv: local directory to save into, default is the current directory. -wol: broadcast target ADDR[:PORT], default 255.255.255.255:9 (limited broadcast, local link only)")
+	flag.StringVar(&gSendVia, "via", nat.ViaDirect, "-send/-recv: \"direct\" (punch through NAT, fails closed if no path), \"relay\" (through the server B, no punching needed), or the email of a public VPS (needs directRelay enabled) to blindly relay the NAT punch through -- for when the two peers cannot punch to each other directly (e.g. both behind CGNAT) but can each reach that VPS; the QUIC/TLS session still ends end-to-end between the two peers, the VPS only forwards opaque UDP packets. All are end-to-end encrypted. See docs/direct-relay-design.md. -wol: the subscriber's email who should broadcast instead of this machine, default (\"direct\") means broadcast locally")
 
 	flag.StringVar(&gRecv, "recv", "", "Fetch a file or directory from another subscriber and exit, scp-style EMAIL:PATH (PATH is relative to that peer's websocket.client.receive.dir, and this machine must already be listed in its receive.allow)")
-	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split")
+	flag.IntVar(&gParallel, "parallel", 1, "-send/-recv: split each large file into up to N chunks and transfer them over N concurrent connections (default 1, today's single-connection behavior); small files are never split. N is capped at 3 regardless of what's passed -- independent connections beyond that stop paying off, start hurting NAT punch reliability, and make the traffic look more like a proxy/download tool. -via direct/VPS: each connection is its own independently NAT-punched QUIC connection with its own congestion window, which is the point -- a single QUIC flow on a lossy path can get stuck with a small window no matter how large the file is, and a few independent flows recover the throughput a lossy path is actually capable of. -via relay: chunks are still concurrent logical sessions but multiplexed over the one already-open connection to the server, so this mainly helps by overlapping round-trips rather than opening more raw connections")
+	flag.StringVar(&gConflict, "conflict", "", "-send/-recv: what to do about a same-name file or a leftover .part from an interrupted transfer. MODE is one of: ask (interactive, default on a terminal), rename (save under a new name, no probing; default when stdin is not a terminal), overwrite, skip, or resume (continue a matching .part automatically; skip if the name already holds an identical file, else save under a new name). Only MODE=ask additionally prompts at the terminal: for a same-name file, [r]ename/[o]verwrite(if identical)/[s]kip; for a matching .part, [c]ontinue/[r]estart/[s]kip -- those letters are answers to that prompt, not values for -conflict itself")
 	flag.BoolVar(&gDirectPlainUDP, "direct-plain-udp", false, "direct (NAT punch) connections: skip quic-go's batched/ECN fast path for the UDP socket, always falling back to plain per-packet I/O. Try this if a direct transfer shows high loss and a congestion window stuck near its floor even on an otherwise healthy link -- on some machines (seen on Windows, likely a NIC driver/virtual adapter quirk) that fast path itself corrupts or delays packets, which quic-go then mistakes for congestion. Unlike -debug, this does not log every packet, so it's fine to leave on")
 
 	flag.BoolVar(&gCheck, "check", false, "Check system tuning (sysctl/ulimit) against recommendations and exit")
@@ -133,6 +145,18 @@ func main() {
 		fmt.Printf("Public key  (server, websocket.server.users[].key): %s\n", pub)
 		return
 	}
+	// 网络唤醒(本机广播): 纯本机 UDP 广播, 不需要配置/凭证, 跑完即退。-via 复用
+	// -send 的 flag, 停在默认值("direct", 即没有显式传别的订阅方 email)时才算本地
+	// 场景; 显式给了 email 时改成让那个订阅方去广播(见下方配置加载之后的分支, 那条
+	// 路要用 websocket.client 的连接与凭证)。
+	if gWol != "" && gSendVia == nat.ViaDirect {
+		macs := splitMacs(gWol)
+		if err := nat.WakeOnLAN(macs, gSendTo); err != nil {
+			log.Fatalln("wol:", err)
+		}
+		fmt.Printf("wol: sent magic packet to %d mac(s)\n", len(macs))
+		return
+	}
 	// 生成配置模板后退出。放在 LoadAllConfig 之前 —— 这条命令存在的前提就是本机
 	// 还没有配置文件, 不能反过来要求先能加载配置。
 	if gGenConf {
@@ -174,7 +198,7 @@ func main() {
 		if err != nil {
 			log.Fatalln("send:", err)
 		}
-		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel); err != nil {
+		if err := nat.SendFiles(cfg, gSendTo, paths, gSendVia, gParallel, gConflict); err != nil {
 			// 打洞失败也走这里: 按约定不做中继回落, 一个字节都不传, 退出码非零。
 			log.Fatalln("send:", err)
 		}
@@ -187,8 +211,23 @@ func main() {
 		if err != nil {
 			log.Fatalln("recv:", err)
 		}
-		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel); err != nil {
+		if err := nat.RecvFiles(cfg, gRecv, gSendTo, gSendVia, gParallel, gConflict); err != nil {
 			log.Fatalln("recv:", err)
+		}
+		return
+	}
+
+	// 网络唤醒(远端广播): -wol 配了非默认 -via(即一个订阅方 email)时, 到这里才
+	// 处理——本地场景(-via 留在默认值 "direct")已经在配置加载之前的分支里跑完
+	// 退出了。固定走服务端中继, gSendVia 这里必须是 email, 不是 "direct"/"relay"
+	// 这两个 -send/-recv 专用的关键字(nat.SendWol 会拒绝 "relay")。
+	if gWol != "" {
+		cfg, err := pickClientConfig("wol")
+		if err != nil {
+			log.Fatalln("wol:", err)
+		}
+		if err := nat.SendWol(cfg, gSendVia, splitMacs(gWol), gSendTo); err != nil {
+			log.Fatalln("wol:", err)
 		}
 		return
 	}
@@ -211,11 +250,14 @@ func main() {
 	// listen 显式设为 off/none/- 时不起代理监听, 仅跑 websocket/tun 等后台服务
 	// (典型: 纯 websocket 裸TCP穿透, 不需要本机代理端口)。
 	listenOff := isListenOff(gListenAddrPort)
+	// listen 支持逗号分隔写多个地址, 用来同时绑定多个内网网段的具体 IP(比监听 0.0.0.0
+	// 更收敛, 又不必受限于只能绑一个 IP)。
+	var listenAddrs []string
 	if listenOff {
 		gListenAddrPort = ""
 	} else {
-		gListenAddrPort = tools.FillPort(gListenAddrPort)
-		config.SetListenPort(gListenAddrPort)
+		listenAddrs = parseListenAddrs(gListenAddrPort)
+		config.SetListenAddrs(listenAddrs)
 	}
 
 	var writer io.Writer
@@ -282,13 +324,14 @@ func main() {
 			autoRoute = *conf.RouterConfig().Tun.AutoRoute
 		}
 		tunCfg := tun.Config{
-			Name:         conf.RouterConfig().Tun.Name,
-			Addr:         conf.RouterConfig().Tun.Addr,
-			MTU:          conf.RouterConfig().Tun.MTU,
-			AutoRoute:    autoRoute,
-			ExcludeProcs: conf.RouterConfig().Tun.ExcludeProcs,
-			InboundPorts: conf.RouterConfig().Tun.InboundPorts,
-			WindivertDir: conf.RouterConfig().Tun.WindivertDir,
+			Name:          conf.RouterConfig().Tun.Name,
+			Addr:          conf.RouterConfig().Tun.Addr,
+			MTU:           conf.RouterConfig().Tun.MTU,
+			AutoRoute:     autoRoute,
+			ExcludeProcs:  conf.RouterConfig().Tun.ExcludeProcs,
+			RedirectPorts: conf.RouterConfig().Tun.RedirectPorts,
+			InboundPorts:  conf.RouterConfig().Tun.InboundPorts,
+			WindivertDir:  conf.RouterConfig().Tun.WindivertDir,
 			// 所有以 IP 指定的上级代理默认并入 bypassIPs(直连例外/排除捕获)，
 			// 避免 anyproxy→上级代理 的连接被自己的 TUN/WinDivert 再抓走成环路
 			BypassIPs: withProxyBypassIPs(conf.RouterConfig().Tun.BypassIPs),
@@ -359,12 +402,25 @@ func main() {
 			// ListenAndServe() 里那段握手, 需要自己补上, 否则旧进程会一直占着端口不退出。
 			notifyOldProcessExit()
 		}
+		grace.NotifyReady()
 		waitForShutdown(tunCancel, &tunWG)
 		return
 	}
-	server := grace.NewServer(gListenAddrPort, handler, network)
-	registerTUNCleanup(server, tunCancel, &tunWG)
-	server.ListenAndServe()
+	// 逗号分隔的每个地址各起一个 grace.Server 并发监听; grace 包本身按地址分别
+	// 记录监听 fd(见 socketPtrOffsetMap), SIGHUP 平滑重启时会把所有 fd 一起交给新进程。
+	var serveWG sync.WaitGroup
+	for _, addr := range listenAddrs {
+		server := grace.NewServer(addr, handler, network)
+		registerTUNCleanup(server, tunCancel, &tunWG)
+		serveWG.Add(1)
+		go func(s *grace.Server) {
+			defer serveWG.Done()
+			if err := s.ListenAndServe(); err != nil {
+				log.Println(s.Addr, "listen err:", err)
+			}
+		}(server)
+	}
+	serveWG.Wait()
 }
 
 // isListenOff 判断监听地址是否被显式关闭(off/none/no/disable/-, 大小写不敏感)。
@@ -375,6 +431,28 @@ func isListenOff(s string) bool {
 		return true
 	}
 	return false
+}
+
+// parseListenAddrs 把 -l/listen 配置解析成实际要监听的地址列表: 支持用逗号分隔写多个
+// 完整地址(如 "192.168.1.5:3000,10.0.0.5:3000"), 用来同时绑定多个内网网段的具体 IP,
+// 既不必监听 0.0.0.0(*) 那么宽, 也不受限于只能绑一个 IP。每个地址单独走 FillPort 补全
+// (只写纯数字端口才会补成 ":端口" 通配地址), 不会跨地址互相补全 host/port。
+func parseListenAddrs(spec string) []string {
+	var addrs []string
+	seen := make(map[string]bool)
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		part = tools.FillPort(part)
+		if seen[part] {
+			continue
+		}
+		seen[part] = true
+		addrs = append(addrs, part)
+	}
+	return addrs
 }
 
 // waitForShutdown 在关闭代理监听时替代 grace server 的阻塞并处理信号:
@@ -389,10 +467,15 @@ func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
 		switch <-sig {
 		case syscall.SIGHUP:
 			log.Println(os.Getpid(), "Received SIGHUP (listen off): starting new process to take over, exiting current process")
-			if err := restartSelf(); err != nil {
+			grace.NotifyReloading()
+			pid, err := restartSelf()
+			if err != nil {
 				log.Println("restart err:", err, "(keeping current process running)")
 				continue // 起新进程失败就不退旧进程, 避免服务中断
 			}
+			// 这条路径不等子进程握手确认(见 restartSelf 上的注释), 拿到 pid 就直接
+			// 迁移 MAINPID: 否则老进程退出后 systemd 会误判服务停止, 清理掉新进程。
+			grace.NotifyMainPID(pid)
 			cancel()
 			wg.Wait()
 			return
@@ -404,10 +487,10 @@ func waitForShutdown(cancel context.CancelFunc, wg *sync.WaitGroup) {
 	}
 }
 
-// restartSelf 用相同参数启动一个新进程(去掉 grace 内部的 -graceful 标志)。
+// restartSelf 用相同参数启动一个新进程(去掉 grace 内部的 -graceful 标志), 返回其 pid。
 // 与 grace.fork 不同, 这里不继承任何监听 fd(listen off 无主监听); 依赖 websocket
-// 服务的绑定重试来接管旧进程释放的端口。
-func restartSelf() error {
+// 服务的绑定重试来接管旧进程释放的端口, 也不等子进程握手确认, 起成功就算数。
+func restartSelf() (int, error) {
 	var args []string
 	for _, a := range os.Args[1:] {
 		if a == "-graceful" {
@@ -419,16 +502,23 @@ func restartSelf() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	go cmd.Wait()
+	return cmd.Process.Pid, nil
 }
 
 // notifyOldProcessExit 在「端口 -> listen off」的 SIGHUP 重启里补上 grace.Server
-// 原本在 ListenAndServe() 里做的握手: 关掉从旧进程继承来但用不上的监听 fd(固定为
-// fd 3, 本项目只有一个 grace 监听, 单监听场景 grace 也是这样假设 offset=0 的),
+// 原本在 ListenAndServe() 里做的握手: 关掉从旧进程继承来但用不上的监听 fd(从 fd 3 起
+// 连续排列, 数量按 grace.InheritedFDCount() 来定, 旧进程配过几个 listen 地址就有几个,
+// 不能只关 fd 3——否则 listen 配了多个地址时会漏关、泄漏 fd),
 // 再给旧进程发 SIGTERM 让它退出、释放端口。不这样做旧进程会一直占着端口不退出。
 func notifyOldProcessExit() {
-	if f := os.NewFile(3, ""); f != nil {
-		f.Close()
+	for i := 0; i < grace.InheritedFDCount(); i++ {
+		if f := os.NewFile(uintptr(3+i), ""); f != nil {
+			f.Close()
+		}
 	}
 	ppid := os.Getppid()
 	if ppid <= 1 { // 安全检查, 避免误杀 init/被收养的孤儿进程
@@ -591,6 +681,15 @@ func genConfig() error {
 		fmt.Printf("  %d. %s\n", i+1, s)
 	}
 	return nil
+}
+
+// splitMacs 把 -wol 的逗号分隔 MAC 列表拆开并去掉两侧空白。
+func splitMacs(s string) []string {
+	macs := strings.Split(s, ",")
+	for i := range macs {
+		macs[i] = strings.TrimSpace(macs[i])
+	}
+	return macs
 }
 
 // pickClientConfig 挑一条 websocket.client 配置给 -send/-recv 用。verb 只影响提示

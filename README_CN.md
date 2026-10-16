@@ -143,6 +143,10 @@ make all
 
 完整目录见 [docs/README.md](docs/README.md)。
 
+## 声明
+
+本程序设计目标是解决合法场景下的连通性问题。**它不是为规避网络监管、访问受限内容而设计的工具，也不擅长用于此类用途**，对此类用途下或被误判为此类用途而产生的后果由使用者自行承担，与本项目及作者无关。
+
 ## License
 
 [MIT](LICENSE) © [keminar](https://github.com/keminar)

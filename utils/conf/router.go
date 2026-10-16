@@ -120,6 +120,11 @@ type Subscribe struct {
 type ServerForward struct {
 	Listen string `yaml:"listen"` //监听地址, 可带协议前缀, 如 ":2222"、"both://:2222"
 	Email  string `yaml:"email"`  //转发给此email的订阅方
+
+	// Tag 与订阅方 client.forward[].tag 配对的标识, 决定这条入口的连接落到订阅方
+	// 哪条转发规则。与 Listen 的物理监听端口彻底解耦: 改 Listen 不需要跟着改订阅方
+	// 配置, 也不必再靠"端口数值凑巧相等"这种隐式约定去配对。
+	Tag string `yaml:"tag"`
 }
 
 // Protocol 从 Listen 的协议前缀解出协议名; 没写前缀返回空串(WantTCP 按 tcp 处理)。
@@ -138,16 +143,38 @@ func (f ServerForward) WantUDP() bool { return protoWantUDP(f.Protocol()) }
 func (f ServerForward) ValidProtocol() bool { return protoValid(f.Protocol()) }
 
 // ClientForward 订阅方(proxy侧)裸TCP端口转发目标。
-// 收到服务端 Port 端口来的连接时, dial 写死的 Target(内网真实目标)。
-// Port 未在本地命中则拒绝(天然白名单)。
+// 收到服务端某条 Tag 一致的入口来的连接时, dial 写死的 Target(内网真实目标)。
+// Tag 未在本地命中则拒绝(天然白名单)。
 type ClientForward struct {
-	Port   uint16 `yaml:"port"`   //对应服务端入口端口
+	Tag    string `yaml:"tag"`    //对应服务端入口的 forward[].tag
 	Target string `yaml:"target"` //写死的dial目标, 如 "127.0.0.1:22"
+
+	// AllowRelay 这条tag是否允许经服务端B的中转(websocket裸TCP转发、UDP relay)触发。
+	// 留空(nil)按true处理, 与改动前的行为一致。
+	//
+	// 同一张 forward 表被两条路径共用: A 走 QUIC 直连(direct_accept.go/direct_udp.go),
+	// 连接建立本身要过身份比对那一关; B 走 websocket/UDP 中转(nat/forward.go、
+	// relay_udp_client.go), 只要是这条连接的对端(即B自己)敢发 CREATE/OPEN 带上某个
+	// tag, C 就会直接 dial, 没有任何"这个 tag 该不该让 B 碰"的判断——B 对具体触发哪个
+	// tag 拥有的权力其实等同于"C 配过的任意内网目标都能被它点名转发", 而部分 forward
+	// 条目的本意只是开给认证过的 A 直连, 不想连 B 都能代为触发。
+	//
+	// 显式配 allowRelay: false 即可把这条 tag 从 B 可见的白名单里摘掉(见
+	// nat/forward.go buildRelayForward), A 的直连路径不受影响, 仍用全量表。
+	AllowRelay *bool `yaml:"allowRelay"`
+}
+
+// RelayRequestAllowed 这条tag是否允许经服务端B的中转路径触发。AllowRelay 留空按true处理。
+func (f ClientForward) RelayRequestAllowed() bool {
+	if f.AllowRelay != nil {
+		return *f.AllowRelay
+	}
+	return true
 }
 
 // ClientDirect 订阅方(A侧)的直连入口规则: 在本机 Listen 起裸TCP监听, 进来的连接不再经
-// 服务端中转, 而是用 QUIC 直接连到 Email 对应的另一个订阅方(C), 由对方按 ForwardPort
-// 查它自己的 client.forward[port] 决定 dial 哪个内网目标。
+// 服务端中转, 而是用 QUIC 直接连到 Forward.Email 对应的另一个订阅方(C), 由对方按
+// Forward.Tag 查它自己的 client.forward[tag] 决定 dial 哪个内网目标。
 //
 // 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
 // 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
@@ -163,20 +190,43 @@ type ClientForward struct {
 // both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
 // UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
 //
-// ForwardPort 不是"拨到内网目标的端口"、也不是这条 Listen 自己的端口——容易被
-// 当成前者, 因为名字里有个 port。它选的是 C 自己 client.forward[] 表里的哪一条
-// 规则, 真正 dial 哪个内网 target 由 C 的配置决定, A 这边填错/乱填只会被 C 拒绝。
-// 这是故意设计成白名单: 没有它, A 只凭 Email 就能让 C 转发到 C 配过的**任意**
-// 内网目标, 相当于把 C 的全部转发表都开放给对面; 有了它, C 只认自己在 forward
-// 里列出的端口号, A 连不认识的目标都摸不到。
+// DirectForwardTarget 直连规则"要去连谁、连他哪条转发规则"这两件事收在一起: 语义上
+// 本就是一体的(单独一个 Email 没法定位到具体转发目标, 单独一个 Tag 也不知道是谁的
+// forward 表), 分开平铺反而让人误以为二者互相独立。
+type DirectForwardTarget struct {
+	Email string `yaml:"email"` //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
+
+	// Tag 不是"拨到内网目标的端口"、也不是这条 Listen 自己的端口——这个字段以前叫
+	// forwardPort, 容易被当成端口号看待, 实际上它选的是 C 自己 client.forward[] 表里
+	// 的哪一条规则(按 tag 配对), 真正 dial 哪个内网 target 由 C 的配置决定, A 这边填
+	// 错/乱填只会被 C 拒绝。这是故意设计成白名单: 没有它, A 只凭 Email 就能让 C 转发到
+	// C 配过的**任意**内网目标, 相当于把 C 的全部转发表都开放给对面; 有了它, C 只认
+	// 自己在 forward 里列出的 tag, A 连不认识的目标都摸不到。
+	Tag string `yaml:"tag"`
+}
+
+// ClientDirect 订阅方(A侧)的直连入口规则。
+//
+// 与 ServerForward 的区别: ServerForward 的入口在服务端(B)上、数据经 websocket 由 B 转发;
+// 这里的入口在订阅方(A)自己机器上、数据走 A<->C 直连, B 只参与交换地址的信令。
+//
+// Listen 可以带协议前缀, 形如 "both://:13389"(等价的还有 "tcp://"/"udp://", 不写
+// 前缀按 tcp): 协议与要监听的地址写在一起, 一眼就能看出这个监听口子是什么协议——
+// 之前 Protocol 是与 Listen 分开的独立字段, 两者的关系只能靠读代码/文档才知道。
+//
+// 两种协议在 QUIC 上的承载不同, 语义才对得上: TCP 走 stream(可靠有序), UDP 走
+// datagram(不可靠无序, RFC 9221)。不能拿 stream 扛 UDP —— 那会给 UDP 强加重传与
+// 保序, 把队头阻塞又请回来。
+//
+// both 常用于 RDP: mstsc 的主通道走 TCP 3389, 而 RDP 8+ 的 Enhanced RDP 会用
+// UDP 3389 走图形通道专门对抗卡顿, 只转发 TCP 等于把它堵死。
 type ClientDirect struct {
-	Listen      string `yaml:"listen"`      //本机入口监听地址, 可带协议前缀, 如 ":13389"、"both://:13389"
-	Email       string `yaml:"email"`       //目标订阅方的 email(须与本条 server 连接下同一个 B 上的另一订阅方一致)
-	ForwardPort uint16 `yaml:"forwardPort"` //选用 C 的 client.forward[] 里哪一条规则(白名单选号, 不是目标端口), 对方未映射该端口即拒绝
+	Listen  string              `yaml:"listen"`  //本机入口监听地址, 可带协议前缀, 如 ":13389"、"both://:13389"
+	Forward DirectForwardTarget `yaml:"forward"` //连去哪个订阅方、用它的哪条 forward 规则(见 DirectForwardTarget)
 
 	// Via 经这个 email 对应的订阅方(一台公网 VPS, 需开 directRelay)做**盲转发中继**到
-	// Email(最终目标 C): A、C 各自和 VPS 打洞, QUIC/TLS 仍在 A<->C 端到端, VPS 只在传输层
-	// 盲转发不透明 UDP 包(看不到明文)。留空=直连 C(现状, 不经任何中继)。
+	// Forward.Email(最终目标 C): A、C 各自和 VPS 打洞, QUIC/TLS 仍在 A<->C 端到端, VPS 只在
+	// 传输层盲转发不透明 UDP 包(看不到明文)。留空=直连 C(现状, 不经任何中继)。
 	//
 	// 适用 A、C 都在受限 CGNAT 后、彼此直连打不通、但各自能连通公网 VPS 的场景。VPS 无需为每对
 	// A-C 配 forward/direct/receive.allow, 只需一个 directRelay 总开关。详见
@@ -229,8 +279,8 @@ func protoValid(p string) bool {
 
 // DirectSettings QUIC 直连(A<->C 不经服务端转发数据)相关的全部配置, 挂在
 // websocket.client.direct 一个块下。把原来十来个平铺的 directXxx 字段(directAccept、
-// directEncrypt、directPortmap、directPunchFirst、directRelay、directRelayAllow、
-// directRelayPublic、directLanAddrs、directPlainUdp)和入口规则数组(原来平铺的
+// directEncrypt、directPortmap、directPunchFirst、directRelay、directRelayAllow(今
+// relayEmail)、directRelayPublic、directLanAddrs、directPlainUdp)和入口规则数组(原来平铺的
 // direct: [...])合到一起, 字段名去掉 direct 前缀(前缀已经在外层 direct: 这个 key 上
 // 体现了, 块内重复没有意义)。
 //
@@ -296,15 +346,26 @@ type DirectSettings struct {
 	// 目标 C 由 A 在请求里用 rules[].via 指定。数据不经服务端 B。详见 docs/direct-relay-design.md。
 	//
 	// 默认 false: 不开就完全不参与中继(收到中继请求直接回错)。开了即对 B 内所有已鉴权订阅方
-	// 开放中继; 用 RelayAllow 可收紧到指定来源 email。
+	// 开放中继; 用 RelayEmail 可收紧到指定来源 email。
 	Relay bool `yaml:"relay"`
 
-	// RelayAllow 收紧 Relay: 只有这里列出的来源 email(即发起中继的 A 的、经 B
+	// RelayEmail 收紧 Relay: 只有这里列出的来源 email(即发起中继的 A 的、经 B
 	// 认证过的 email)才能用本机中继。留空(且 Relay 为 true)= 不限制, B 内任何已鉴权
 	// 订阅方都能用。仅 email 白名单, 不涉及 uuid——中继本身不做身份鉴权(那在 A<->C 的 e2e
 	// QUIC 层, 见 docs/direct-relay-design.md), 这里只是"谁能占用本机中继资源"的准入。
-	// (原 directRelayAllow)
-	RelayAllow []string `yaml:"relayAllow"`
+	//
+	// 按字符串精确匹配, **大小写敏感**, 与 ClientReceive.LookupSender 对 allow[].email
+	// 的口径一致。
+	//
+	// 注意与 ClientForward.AllowRelay 不是一回事: 那个是"某条 forward tag 允不允许经 B
+	// 中转触发"的布尔开关, 两者名字接近但作用域和类型都不同。
+	//
+	// 生效前提: 发起方的 email 由服务端 B 盖章后经 DirectRelayOpen 送到本机(见
+	// nat/direct_msg.go 的 DirectRelayOpen.Email), 老版本 B 不带这个字段。配了本名单
+	// 却收到空 email 时本机会**拒绝**中继而不是放行——准入名单不能因为对端版本旧就
+	// 静默失效(见 nat/direct_relay.go onRelayOpen)。
+	// (原 relayAllow, 只声明未落地)
+	RelayEmail []string `yaml:"relayEmail"`
 
 	// RelayPublic 显式指定本机(中继 VPS)的公网中继地址, 支持两种互斥形态:
 	//   - 只写 IP(如 "203.0.113.10" / "2001:db8::1"): 每个 binding 仍使用随机端口，并把
@@ -353,6 +414,27 @@ type DirectSettings struct {
 	PlainUDP *bool `yaml:"plainUdp"`
 }
 
+// RelayEmailAllowed 该来源 email 是否获准使用本机中继(见 RelayEmail)。名单留空 =
+// 不限制, 与"没配这个字段的老部署行为不变"是同一件事。
+//
+// 精确匹配、大小写敏感, 与 ClientReceive.LookupSender 的口径一致: email 在这里是一
+// 个配置里照抄的标识符, 不做规范化——擅自折叠大小写会让"名单里写的"和"日志里打的"
+// 对不上, 排查时更费劲。
+//
+// 只回答"在不在名单里"。空 email 的处置(配了名单却拿不到身份)由调用方决定, 见
+// nat/direct_relay.go 的 onRelayOpen——那里按 fail-closed 拒绝。
+func (d DirectSettings) RelayEmailAllowed(email string) bool {
+	if len(d.RelayEmail) == 0 {
+		return true
+	}
+	for _, e := range d.RelayEmail {
+		if e == email {
+			return true
+		}
+	}
+	return false
+}
+
 // ClientReceive 订阅方与别人交换文件的目录。不配 Dir 就收发一律拒绝。
 //
 // 与 ClientForward 的区别: forward 是把流量转给本机某个**已有的服务**(sshd、RDP 等),
@@ -395,20 +477,44 @@ type ClientReceive struct {
 type AllowedSender struct {
 	Email string `yaml:"email"`
 	UUID  string `yaml:"uuid"`
+
+	// Wol 默认 false, 为 true 时这个 email 才能用 -wol 让本机代为广播网络唤醒包
+	// (见 nat/wol_action.go)。收发文件与网络唤醒共用同一份名单起步是为了不用为
+	// 同一批人再维护一份名单, 但唤醒不是读写这台机器上的文件, 而是让它去骚扰
+	// 局域网、唤醒别的设备, 性质不同, 所以单独加一道开关, 默认关闭, 需要显式打开
+	// (对称于 ReadOnly 只挡写入方向: 这里是收发文件的名单里再单独放行一个更陌生
+	// 的动作)。
+	Wol bool `yaml:"wol"`
+
+	// Dir 这个 email 上传(-send 过来)时的落地目录, 非空时覆盖同名 ClientReceive.Dir。
+	// 只影响写入方向——取件(-recv)仍然只能看到共享 Dir 下的内容, 不因发送者不同
+	// 而变, 否则"谁能看到别人传上来的东西"会变得难以推理。留空则跟其它人一样落到
+	// 共享 Dir。仍然要求共享 Dir 非空(见 ClientReceive.Dir 的整体开关语义)才会
+	// 生效——每个发送者可以有自己的子目录, 但收发文件这整个功能是否开启, 只由
+	// 共享 Dir 一处决定, 不希望配了这里就绕过那个总开关。
+	Dir string `yaml:"dir"`
 }
 
-// Lookup 按发起方自报的 email(仅作为查找提示, 不是安全判断本身)取它对应配置的 uuid。
-// ok=false 表示这个 email 不在列表里, 调用方应直接拒绝, 不必再做任何后续验证。
-func (r ClientReceive) Lookup(email string) (uuid string, ok bool) {
+// LookupSender 按发起方自报的 email(仅作为查找提示, 不是安全判断本身)取它完整的
+// 一条 allow 配置(uuid、能不能唤醒、落地目录覆盖)。ok=false 表示这个 email 不在
+// 列表里或没配 uuid, 调用方应直接拒绝, 不必再做任何后续验证。
+func (r ClientReceive) LookupSender(email string) (AllowedSender, bool) {
 	if email == "" {
-		return "", false
+		return AllowedSender{}, false
 	}
 	for _, a := range r.Allow {
 		if a.Email == email {
-			return a.UUID, a.UUID != ""
+			return a, a.UUID != ""
 		}
 	}
-	return "", false
+	return AllowedSender{}, false
+}
+
+// Lookup 是 LookupSender 只要 uuid 的简化版, 供只关心身份比对、用不上 Wol/Dir 的
+// 调用点用(见 nat/direct_relay_auth.go)。
+func (r ClientReceive) Lookup(email string) (uuid string, ok bool) {
+	a, ok := r.LookupSender(email)
+	return a.UUID, ok
 }
 
 // ServerUser 服务端多用户鉴权的一条 {user, pass}, 见 WsServer.Users。
@@ -567,6 +673,7 @@ type TcpCopy struct {
 //	bypassIPs                三平台: linux/darwin 加 /32 直连路由；windows 排除捕获(直连)
 //	blockQUIC                三平台
 //	excludeProcs             仅 windows(WinDivert 按进程名排除, 逃 OpenVPN 等同机隧道)
+//	redirectPorts            仅 windows(WinDivert 捕获的出站TCP目标端口, 不配默认[80,443])
 //	inboundPorts             仅 darwin(pf reply-to 放行入站服务回包; linux 自动, windows 无需)
 //	excludeNics/device       仅 linux 且 mode=bypass(物理网卡绕行, 见 Tun 注释)
 type TunOS struct {
@@ -578,6 +685,7 @@ type TunOS struct {
 	BypassPrivate *bool    `yaml:"bypassPrivate"` //仅windows: 不配默认true=私网/LAN/链路本地(含虚拟机/VM网段)一律直连不进引擎; 显式false则私网80/443进引擎按router规则。loopback始终直连
 	BlockQUIC     *bool    `yaml:"blockQUIC"`     //不配置默认true: drop命中hosts(配ip/deny)域名的UDP443, 逼QUIC回退TCP
 	ExcludeProcs  []string `yaml:"excludeProcs"`  //仅windows: 这些进程(exe名, 如openvpn.exe)的出向不重定向
+	RedirectPorts []int    `yaml:"redirectPorts"` //仅windows: WinDivert捕获的出站TCP目标端口; 不配默认[80,443]; 一旦配置则完全覆盖(需要的话把80,443也写进去)。目的地是loopback(127.0.0.1/::1)的连接不受此项影响, 始终直连不会被捕获
 	InboundPorts  []int    `yaml:"inboundPorts"`  //仅darwin: 需pf放行回包的入站TCP端口(如22)
 	WindivertDir  string   `yaml:"windivertDir"`  //仅windows: WinDivert.dll+WinDivert64.sys 所在目录, 空=exe同目录(可用它把驱动放到无空格/中文的干净路径)
 	ExcludeNics   []string `yaml:"excludeNics"`   //仅linux且mode=bypass: 采集直连子网时排除的网卡名(通常填另一进程的TUN网卡名)
@@ -655,7 +763,7 @@ type Router struct {
 	Network   string    `yaml:"network"`   //监听协议
 	Log       Log       `yaml:"log"`       //日志目录
 	Watcher   bool      `yaml:"watcher"`   //是否监听配置文件变化
-	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 必须16位长度
+	Token     string    `yaml:"token"`     //加密值, 和tunnel通信密钥, 两端保持一致即可, 长度不限(内部会自动归一化成16位AES key)
 	TcpCopy   TcpCopy   `yaml:"tcpcopy"`   //进行tcp转发模式
 	Mode      string    `yaml:"mode"`      //运行模式: proxy=客户端(默认); tunnel=服务端tunneld; tun=建TUN网卡全局代理; bypass=仅绑物理网卡绕行; tcpcopy=端口转发。命令行 -mode 优先
 	Tun       Tun       `yaml:"tun"`       //TUN虚拟网卡全局代理(mode=tun); mode=bypass 复用 tun.linux.excludeNics/device

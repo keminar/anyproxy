@@ -7,6 +7,26 @@ import (
 	"github.com/keminar/anyproxy/proto/tcp"
 )
 
+// 读取上限。底层 tcp.Reader 的 buf 只有 4096 字节, 一行读不完就分片返回
+// (isPrefix=true), 由 readLineSlice 循环拼起来 —— 拼的时候不设上限的话, 一个不带换行
+// 符的长流就能把内存吃光: 对端只要一直发不含 \n 的字节, 这边就一直 append。同理
+// ReadHeader 那个循环不限条数时, 几百万个 "X: y\r\n" 也能把 http.Header 撑爆。
+//
+// 两个限额都按"正常流量用不到、异常流量撑不爆"取值, 与 net/http 默认的
+// MaxHeaderBytes(1MB)同量级。超限一律返回错误由调用方断开, 不做截断后继续解析 ——
+// 截断会把半截请求行/头部当成完整的来处理, 那比直接断开更危险。
+const (
+	maxLineBytes    = 1 << 20 // 单行(请求行或单条头部)最大字节数
+	maxHeaderBytes  = 1 << 20 // 头部区所有行加起来的最大字节数
+	maxHeaderCounts = 1000    // 头部最大条数
+)
+
+// ErrLineTooLong 单行超过 maxLineBytes。
+var ErrLineTooLong = ProtocolError("text: line exceeds the maximum length")
+
+// ErrHeaderTooLarge 头部区超过 maxHeaderBytes 或 maxHeaderCounts。
+var ErrHeaderTooLarge = ProtocolError("text: header block is too large")
+
 // A Reader implements convenience methods for reading requests
 // or responses from a text protocol network connection.
 type Reader struct {
@@ -51,6 +71,11 @@ func (r *Reader) readLineSlice(dropBreak bool) ([]byte, error) {
 		// Avoid the copy if the first call produced a full line.
 		if line == nil && !more {
 			return l, nil
+		}
+		// 先判上限再 append: 反过来的话这一次 append 已经把内存吃进去了, 限额就成了
+		// "超了才发现", 拦不住单次分配。
+		if len(line)+len(l) > maxLineBytes {
+			return nil, ErrLineTooLong
 		}
 		line = append(line, l...)
 		if !more {
@@ -155,6 +180,7 @@ func (r *Reader) ReadHeader() (http.Header, error) {
 		return m, ProtocolError("malformed MIME header initial line: " + string(line))
 	}
 	var headerIsEnd bool
+	var headerBytes int
 	lastEnd := make([]byte, 2)
 	for {
 		if headerIsEnd {
@@ -163,6 +189,12 @@ func (r *Reader) ReadHeader() (http.Header, error) {
 		kv, err := r.readLineSlice(false)
 		if len(kv) == 0 {
 			return m, err
+		}
+		// 单行有 maxLineBytes 管着, 但头部条数没有 —— 几百万条合法的短头部同样能把
+		// http.Header 撑爆, 所以总量和条数都要拦。
+		headerBytes += len(kv)
+		if headerBytes > maxHeaderBytes || len(m) >= maxHeaderCounts {
+			return m, ErrHeaderTooLarge
 		}
 		// 发现头结束符，检查上一行是不是也是有换行符
 		if len(kv) == 2 && kv[len(kv)-2] == '\r' && kv[len(kv)-1] == '\n' {

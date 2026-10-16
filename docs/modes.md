@@ -25,7 +25,7 @@ anyproxy 的运行模式由单个 `-mode`（或配置 `mode`）决定，**取值
 ./anyproxy -mode tunnel
 ```
 
-- `token`：与客户端 anyproxy 通信的密钥，两端必须一致且**长度为 16 位**。
+- `token`：与客户端 anyproxy 通信的密钥，两端必须一致，长度不限（内部会自动归一化成 16 位 AES key）。
 - 客户端用 `-p 'tunnel://<tunneld-ip>:3001'` 或 `hosts[].proxy: tunnel://...` 指向它。
 - 可多级串联：anyproxy → tunneld A → tunneld B → Internet。
 

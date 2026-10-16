@@ -98,10 +98,10 @@ func (b *Bridge) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// Open 通知websocket 创建连接。port 仅用于裸TCP路径(ConnTCP), 供订阅方查固定
-// target; HTTP 路径传 0 即可。
-func (b *Bridge) Open(port uint16) {
-	msg := &Message{ID: b.reqID, Type: b.typ, Method: METHOD_CREATE, Port: port}
+// Open 通知websocket 创建连接。tag 仅用于裸TCP路径(ConnTCP), 供订阅方查固定
+// target; HTTP 路径传空串即可。
+func (b *Bridge) Open(tag string) {
+	msg := &Message{ID: b.reqID, Type: b.typ, Method: METHOD_CREATE, Tag: tag}
 	//b.client.send <- msg //注意:不能直接写send会与close有并发安全冲突
 	cmsg := &CMessage{client: b.client, message: msg}
 	b.client.hub.broadcast <- cmsg

@@ -89,7 +89,7 @@ func TestRecvFilesValidatesArgs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := RecvFiles(base, c.recv, t.TempDir(), c.via, 1)
+			err := RecvFiles(base, c.recv, t.TempDir(), c.via, 1, ConflictRename)
 			if err == nil || !strings.Contains(err.Error(), c.wantErrSub) {
 				t.Fatalf("want error containing %q, got %v", c.wantErrSub, err)
 			}
@@ -102,7 +102,7 @@ func TestRecvFilesValidatesArgs(t *testing.T) {
 func TestRecvFilesRefusesInvalidOwnUUID(t *testing.T) {
 	for _, uuid := range []string{"", "not-a-uuid"} {
 		cfg := conf.WsClient{Connect: "127.0.0.1:1", Email: "c@example.com", UUID: uuid}
-		err := RecvFiles(cfg, "a@example.com:x", t.TempDir(), ViaRelay, 1)
+		err := RecvFiles(cfg, "a@example.com:x", t.TempDir(), ViaRelay, 1, ConflictRename)
 		if err == nil || !strings.Contains(err.Error(), "uuid") {
 			t.Fatalf("uuid %q: want a uuid complaint, got %v", uuid, err)
 		}

@@ -35,6 +35,16 @@ const (
 	// (发起方的打洞窗口要盖住接受方开打的那一刻)。成功路径不受影响(健康链路 pong 毫秒级
 	// 就到, 早早返回)。
 	directPunchWait = 3 * time.Second
+	// directPunchSettle 打洞择优的**收敛窗**: 第一条候选回包之后, 再留这么久让其它候选把
+	// 结果报回来, 然后只在"此刻已有结论"的范围里择优拨号, 不再等剩下的候选等满 directPunchWait。
+	//
+	// 为什么必须这样: 候选里只要有一条从头到尾不回包(中继的多个 E 端点里常有不可达的),
+	// "等齐"就意味着明明第一条路十几毫秒就通了, 还要为那条死路把 3s 预算等满 —— 实测这
+	// 3s 是整次连接 5.3s 里最长的一段。收敛窗给"稍慢但更优"的路(同网段/回环候选)留出补
+	// 上的机会, 代价只是这么短的延迟; 窗满仍没结论的候选按 pending 跳过, 其探测继续在
+	// 后台跑完(见 direct_reflect.go 的 punchRun)。取 200ms: 明显大于健康链路的 RTT
+	// (跨省几十毫秒), 又不足以让已经通了的那条路白等太久。
+	directPunchSettle = 200 * time.Millisecond
 	// directPunchFirstDelay 对端(发起方)声明了 directPunchFirst、要求先打时, 接受方
 	// 推迟自己打洞的**兜底**时长。正常情况下接受方是收到发起方经 B 转来的 d_punching
 	// nudge(发起方一开打就发)才打, 那是确定性的、不靠猜延迟; 这个固定延迟只在 nudge
@@ -100,7 +110,7 @@ var directRelayNudgeGaps = []time.Duration{600 * time.Millisecond, 1200 * time.M
 type directPeer struct {
 	tag     string
 	cfg     conf.WsClient
-	forward map[uint16]string // C 侧: 端口->内网目标, 与 websocket 转发路径共用同一张白名单
+	forward map[string]string // C 侧: tag->内网目标, 与 websocket 转发路径共用同一张白名单
 
 	curClient atomic.Value // *Client, 当前活跃的 websocket 连接; 断线期间可能为陈旧值
 
@@ -152,7 +162,7 @@ type directPeer struct {
 	// A 侧(direct[] 入口)
 	mu       sync.Mutex
 	offers   map[uint]chan DirectOffer // 按请求ID等待服务端回 offer
-	sessions map[string]*directSession // listen + email + forwardPort + via -> 复用的 QUIC 连接
+	sessions map[string]*directSession // listen + email + forward.tag + via -> 复用的 QUIC 连接
 	reqInc   uint32                    // 请求ID采番, 与数据面的 ID 空间无关(仅用于匹配 offer)
 
 	// quiet 一次性的前台命令(-send/-recv)置 true: 打洞过程那一串日志(候选、路径选择、
@@ -280,8 +290,11 @@ type directSession struct {
 	refs    atomic.Int64
 	lastUse atomic.Int64 // unix nano
 
-	udpMu      sync.Mutex
-	udpEntries map[uint16]*directUDPEntry // 本地入口端口 -> 入口, 用于把回程 datagram 投递回去
+	// udpMu 保护 boundUDPEntry。一条 directSession 严格 1:1 对应一条 ClientDirect 规则
+	// (route 里连 listen 都算进了 session key, 见 sessionRouteForRule), 所以一条
+	// 连接上最多只会绑一个 UDP 入口, 不需要按 tag/端口索引的 map。
+	udpMu         sync.Mutex
+	boundUDPEntry *directUDPEntry // 用于把回程 datagram 投递回去, 见 bindUDPEntry/udpEntry
 }
 
 // acquire 标记一条会话开始使用。
@@ -319,21 +332,13 @@ func (s *directSession) idleFor() time.Duration {
 	return time.Since(time.Unix(0, s.lastUse.Load()))
 }
 
-// hasActiveUDP 该连接上是否还有活着的 UDP 会话(任一入口的任一用户源地址在自己的
+// hasActiveUDP 该连接上是否还有活着的 UDP 会话(绑定的入口的任一用户源地址在自己的
 // 空闲窗口内有过流量)。
 func (s *directSession) hasActiveUDP() bool {
 	s.udpMu.Lock()
-	entries := make([]*directUDPEntry, 0, len(s.udpEntries))
-	for _, e := range s.udpEntries {
-		entries = append(entries, e)
-	}
+	e := s.boundUDPEntry
 	s.udpMu.Unlock()
-	for _, e := range entries {
-		if e.hasActiveSessions() {
-			return true
-		}
-	}
-	return false
+	return e != nil && e.hasActiveSessions()
 }
 
 // acceptListener 取当前的 QUIC 监听; 未起或已释放时返回 nil。
@@ -368,23 +373,20 @@ func (d *directPeer) closeTransport() {
 	}
 }
 
-// bindUDPEntry 登记某个入口, 使其能收到该连接上对应端口的回程 datagram。
-func (s *directSession) bindUDPEntry(port uint16, e *directUDPEntry) {
+// bindUDPEntry 登记这条连接绑定的入口, 使其能收到回程 datagram。
+func (s *directSession) bindUDPEntry(e *directUDPEntry) {
 	s.udpMu.Lock()
-	if s.udpEntries == nil {
-		s.udpEntries = make(map[uint16]*directUDPEntry)
-	}
-	s.udpEntries[port] = e
+	s.boundUDPEntry = e
 	s.udpMu.Unlock()
 }
 
-func (s *directSession) udpEntry(port uint16) *directUDPEntry {
+func (s *directSession) udpEntry() *directUDPEntry {
 	s.udpMu.Lock()
 	defer s.udpMu.Unlock()
-	return s.udpEntries[port]
+	return s.boundUDPEntry
 }
 
-func newDirectPeer(tag string, cfg conf.WsClient, forward map[uint16]string) *directPeer {
+func newDirectPeer(tag string, cfg conf.WsClient, forward map[string]string) *directPeer {
 	return &directPeer{
 		tag:      tag,
 		cfg:      cfg,
@@ -464,7 +466,7 @@ type directTokenStore struct {
 }
 
 type directTokenEntry struct {
-	port    uint16
+	tag     string
 	expires time.Time
 
 	// relay 为 true 表示这条连接是经 VPS 盲转发来的: VPS 不可信, 光有 token 不够, 进数据面
@@ -478,13 +480,13 @@ func newDirectTokenStore() *directTokenStore {
 	return &directTokenStore{tokens: make(map[string]directTokenEntry)}
 }
 
-func (s *directTokenStore) put(token string, port uint16) {
-	s.putEntry(token, directTokenEntry{port: port})
+func (s *directTokenStore) put(token string, tag string) {
+	s.putEntry(token, directTokenEntry{tag: tag})
 }
 
-// putRelay 登记一条中继连接的凭证: 除端口外还记下"需 uuid 挑战-应答"及发起方 email。
-func (s *directTokenStore) putRelay(token string, port uint16, email string) {
-	s.putEntry(token, directTokenEntry{port: port, relay: true, email: email})
+// putRelay 登记一条中继连接的凭证: 除 tag 外还记下"需 uuid 挑战-应答"及发起方 email。
+func (s *directTokenStore) putRelay(token string, tag string, email string) {
+	s.putEntry(token, directTokenEntry{tag: tag, relay: true, email: email})
 }
 
 func (s *directTokenStore) putEntry(token string, e directTokenEntry) {
@@ -522,9 +524,19 @@ const (
 	directStreamData  = "data"
 	directAuthACK     = byte(1)
 	directCapReadyACK = byte(1)
+	// directRejectACK 数据流被 C 明确拒绝(比如 tag 没有 forward 映射), 不是连接坏了。
+	// 与 directAuthACK 区分开, 好让 A 不把这种配置问题误判成 session 损坏去重建。
+	directRejectACK = byte(2)
 )
 
-// directStreamPull 取件流: 与 directStreamFile 同一套身份校验和端口(directFilePort),
+// directStreamReject 紧跟在 directRejectACK 后面的拒绝原因, 用 writeFrame/readFrame 传输。
+// 只有 head.Ready 的对端(有能力等 ready ACK)才会收到它; 老版本对端读不到这个字节,
+// 反正也不等 ack, 直接看到流关闭。
+type directStreamReject struct {
+	Reason string `json:"reason"`
+}
+
+// directStreamPull 取件流: 与 directStreamFile 同一套身份校验和端口(directFileTag),
 // 只是字节流向相反 —— 发起方在流上说要什么, 对端把文件推回来(见 nat/file_pull.go)。
 const directStreamPull = "pull"
 
@@ -536,7 +548,7 @@ const directStreamPull = "pull"
 type directStreamHead struct {
 	Kind  string `json:"kind"`
 	Token string `json:"token"`
-	Port  uint16 `json:"port"`
+	Tag   string `json:"tag"`
 	Ready bool   `json:"ready,omitempty"` // 请求 C 在落地目标连通后回一个 ready ACK
 }
 

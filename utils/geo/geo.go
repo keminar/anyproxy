@@ -12,6 +12,7 @@
 package geo
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"net/netip"
@@ -125,11 +126,10 @@ type ipMatcher struct {
 	cats map[string][]ipRange // 小写类别 -> 按 start 排序的区间
 }
 
-// siteCat 是解析/合并阶段的临时结构(逐个域名一个 map key), 加载完成后
-// 会被压缩进 compiledSite, 不会常驻内存。
+// siteCat 是解析阶段的临时结构, 加载完成后会被压缩进 compiledSite, 不会常驻内存。
 type siteCat struct {
-	suffix map[string]struct{} // 后缀(根域及其子域)
-	full   map[string]struct{} // 精确
+	suffix domainBuilder // 后缀(根域及其子域)
+	full   domainBuilder // 精确
 }
 
 // domainEntry 是 domainIndex.buf 里一段域名字节的位置。
@@ -190,41 +190,95 @@ func (idx domainIndex) contains(target string) bool {
 	return false
 }
 
-// buildDomainIndex 把一个域名集合编译成排好序的 domainIndex。
-func buildDomainIndex(set map[string]struct{}) domainIndex {
-	if len(set) == 0 {
-		return domainIndex{}
-	}
-	list := make([]string, 0, len(set))
-	size := 0
-	for s := range set {
-		list = append(list, s)
-		size += len(s)
-	}
-	sort.Strings(list)
-	buf := make([]byte, 0, size)
-	entries := make([]domainEntry, 0, len(list))
-	for _, s := range list {
-		off := len(buf)
-		buf = append(buf, s...)
-		entries = append(entries, domainEntry{off: uint32(off), len: uint16(len(s))})
-	}
-	return domainIndex{buf: buf, entries: entries}
+// domainBuilder 增量拼接域名字节到一段连续 buf, 解析阶段直接写入目标存储形态,
+// 不为每个域名单独分配 string/map 项。finish() 前 entries 未排序、可能含重复。
+type domainBuilder struct {
+	buf     []byte
+	entries []domainEntry
 }
 
-// mergeIndex 把 add 合入 old, 返回新的 domainIndex(old 不会被修改)。
-func mergeIndex(old domainIndex, add map[string]struct{}) domainIndex {
-	if len(add) == 0 {
+func (b *domainBuilder) add(s string) {
+	off := uint32(len(b.buf))
+	b.buf = append(b.buf, s...)
+	b.entries = append(b.entries, domainEntry{off: off, len: uint16(len(s))})
+}
+
+// finish 按 buf 中的字节内容排序+去重 entries, 复用同一个 buf(不拷贝), 返回可
+// 直接查询的 domainIndex。去重后 buf 里可能残留少量被跳过的重复域名字节, 不回收
+// (真实规则文件里类别内域名重复本就罕见, 这点浪费可忽略)。
+func (b domainBuilder) finish() domainIndex {
+	if len(b.entries) == 0 {
+		return domainIndex{}
+	}
+	sort.Slice(b.entries, func(i, j int) bool {
+		ei, ej := b.entries[i], b.entries[j]
+		return bytes.Compare(b.buf[ei.off:int(ei.off)+int(ei.len)], b.buf[ej.off:int(ej.off)+int(ej.len)]) < 0
+	})
+	n := 0
+	for i, e := range b.entries {
+		if i > 0 {
+			p := b.entries[n-1]
+			if bytes.Equal(b.buf[e.off:int(e.off)+int(e.len)], b.buf[p.off:int(p.off)+int(p.len)]) {
+				continue
+			}
+		}
+		b.entries[n] = e
+		n++
+	}
+	return domainIndex{buf: b.buf, entries: b.entries[:n]}
+}
+
+// mergeIndex 把 add(未排序/可能重复的解析结果)合入 old, 返回新的 domainIndex
+// (old 不会被修改)。
+func mergeIndex(old domainIndex, add domainBuilder) domainIndex {
+	if len(add.entries) == 0 {
 		return old
 	}
-	set := make(map[string]struct{}, len(old.entries)+len(add))
-	for _, e := range old.entries {
-		set[string(old.buf[e.off:int(e.off)+int(e.len)])] = struct{}{}
+	na := add.finish()
+	if len(old.entries) == 0 {
+		return na
 	}
-	for s := range add {
-		set[s] = struct{}{}
+	buf := make([]byte, 0, len(old.buf)+len(na.buf))
+	entries := make([]domainEntry, 0, len(old.entries)+len(na.entries))
+	i, j := 0, 0
+	for i < len(old.entries) && j < len(na.entries) {
+		oe, ne := old.entries[i], na.entries[j]
+		os := old.buf[oe.off : int(oe.off)+int(oe.len)]
+		ns := na.buf[ne.off : int(ne.off)+int(ne.len)]
+		switch bytes.Compare(os, ns) {
+		case -1:
+			off := uint32(len(buf))
+			buf = append(buf, os...)
+			entries = append(entries, domainEntry{off: off, len: oe.len})
+			i++
+		case 1:
+			off := uint32(len(buf))
+			buf = append(buf, ns...)
+			entries = append(entries, domainEntry{off: off, len: ne.len})
+			j++
+		default:
+			off := uint32(len(buf))
+			buf = append(buf, os...)
+			entries = append(entries, domainEntry{off: off, len: oe.len})
+			i++
+			j++
+		}
 	}
-	return buildDomainIndex(set)
+	for ; i < len(old.entries); i++ {
+		oe := old.entries[i]
+		os := old.buf[oe.off : int(oe.off)+int(oe.len)]
+		off := uint32(len(buf))
+		buf = append(buf, os...)
+		entries = append(entries, domainEntry{off: off, len: oe.len})
+	}
+	for ; j < len(na.entries); j++ {
+		ne := na.entries[j]
+		ns := na.buf[ne.off : int(ne.off)+int(ne.len)]
+		off := uint32(len(buf))
+		buf = append(buf, ns...)
+		entries = append(entries, domainEntry{off: off, len: ne.len})
+	}
+	return domainIndex{buf: buf, entries: entries}
 }
 
 // compiledSite 是最终常驻内存、供 match() 只读查询的结构。
@@ -362,7 +416,7 @@ func datSiteCats(data []byte, cats []string) (map[string]*siteCat, error) {
 		}
 		c := out[code]
 		if c == nil {
-			c = newSiteCat()
+			c = &siteCat{}
 			out[code] = c
 		}
 		eachField(f.data, func(g wireField) {
@@ -374,9 +428,9 @@ func datSiteCats(data []byte, cats []string) (map[string]*siteCat, error) {
 				}
 				switch typ {
 				case 2:
-					c.suffix[val] = struct{}{}
+					c.suffix.add(val)
 				case 3:
-					c.full[val] = struct{}{}
+					c.full.add(val)
 				}
 			}
 		})
@@ -417,7 +471,7 @@ func textIPRanges(data []byte) []ipRange {
 // textSiteCat 解析域名文本列表: full:/domain:/keyword:/regexp: 前缀, 无前缀默认 domain(后缀)。
 // keyword/regexp 丢弃(当国外域名)。
 func textSiteCat(data []byte) *siteCat {
-	c := newSiteCat()
+	c := &siteCat{}
 	forEachLine(data, func(line string) {
 		typ, val := "domain", line
 		if k := strings.IndexByte(line, ':'); k >= 0 {
@@ -429,9 +483,9 @@ func textSiteCat(data []byte) *siteCat {
 		}
 		switch typ {
 		case "full":
-			c.full[val] = struct{}{}
+			c.full.add(val)
 		case "domain":
-			c.suffix[val] = struct{}{}
+			c.suffix.add(val)
 			// keyword / regexp: 丢弃
 		}
 	})
@@ -455,10 +509,6 @@ func forEachLine(data []byte, fn func(line string)) {
 			fn(line)
 		}
 	}
-}
-
-func newSiteCat() *siteCat {
-	return &siteCat{suffix: map[string]struct{}{}, full: map[string]struct{}{}}
 }
 
 func normDomain(s string) string {
@@ -554,7 +604,7 @@ func LoadSiteFile(path string, cats []string) error {
 			for _, c := range cats {
 				k := strings.ToLower(c)
 				sc := all[k]
-				if sc == nil || (len(sc.suffix) == 0 && len(sc.full) == 0) {
+				if sc == nil || (len(sc.suffix.entries) == 0 && len(sc.full.entries) == 0) {
 					return fmt.Errorf("%s 中无 geosite 类别 %q", path, c)
 				}
 				toMerge[k] = sc
@@ -565,7 +615,7 @@ func LoadSiteFile(path string, cats []string) error {
 			return fmt.Errorf("%s 为文本列表, 需恰好一个类别名(cats), 实际 %d 个", path, len(cats))
 		}
 		sc := textSiteCat(data)
-		if len(sc.suffix) == 0 && len(sc.full) == 0 {
+		if len(sc.suffix.entries) == 0 && len(sc.full.entries) == 0 {
 			return fmt.Errorf("%s 未解析出任何域名", path)
 		}
 		toMerge[strings.ToLower(cats[0])] = sc

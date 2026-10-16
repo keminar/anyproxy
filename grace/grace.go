@@ -72,9 +72,14 @@ var (
 	hookableSignals []os.Signal
 )
 
+// socketOrderEnv 通过环境变量(而非命令行 flag)在 fork() 重启时把 fd 继承顺序传给子进程:
+// 它纯粹是进程重启的内部记账, 不是用户需要在命令行上感知/传递的东西, 放进 argv 只会和
+// -l 撞出一份看着重复的地址列表(见 fork() 里的用法)。
+const socketOrderEnv = "ANYPROXY_SOCKETORDER"
+
 func init() {
 	flag.BoolVar(&isChild, "graceful", false, "listen on open fd (after forking)")
-	flag.StringVar(&socketOrder, "socketorder", "", "previous initialization order - used when more than one listener was started")
+	socketOrder = os.Getenv(socketOrderEnv)
 
 	regLock = &sync.Mutex{}
 	runningServers = make(map[string]*Server)
@@ -93,6 +98,21 @@ func init() {
 // "新进程 bind 成功后通知旧进程退出" 的握手, 调用方需要自己补上这一步。
 func IsChild() bool {
 	return isChild
+}
+
+// InheritedFDCount 返回 -graceful 重启时从父进程继承的监听 fd 数量(从 fd 3 起连续排列)。
+// 用于 listen 改成 off 等"这次不再需要任何继承 fd"的场景, 正确关掉全部继承 fd 再通知旧
+// 进程退出, 避免只关 fd 3、其余(listen 配过多个地址时)被漏关而泄漏。
+// -socketorder 只在旧进程有 2 个及以上监听地址时才会传(见 fork()); 不带该参数但确实
+// 是 -graceful 子进程时, 老进程必然只有 1 个监听地址, fd 3 单个。
+func InheritedFDCount() int {
+	if !isChild {
+		return 0
+	}
+	if socketOrder == "" {
+		return 1
+	}
+	return len(strings.Split(socketOrder, ","))
 }
 
 // NewServer returns a new graceServer.

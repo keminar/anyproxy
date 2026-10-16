@@ -16,3 +16,4 @@ tunneld-alpine
 tunnel/logs/
 dev/null
 anyproxy.exe
+dist.tar

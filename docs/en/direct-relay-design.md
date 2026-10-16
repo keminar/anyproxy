@@ -51,6 +51,10 @@ Key choice: **the QUIC/TLS connection is end-to-end A↔C** (A is the client, C 
 
 ## 3. Control plane: signaling flow
 
+> The six-step sequence diagram, the two-phase offer (E is handed to A first so its punching
+> overlaps C's signaling), and a breakdown of one real connection, see
+> [direct-handshake-flow.md](direct-handshake-flow.md).
+
 **A's configuration** (add `via` to `client.direct.rules[]`):
 
 ```yaml
@@ -63,8 +67,9 @@ websocket:
                                        # only sends after that leg's nudge, so there's no ordering problem (see §6)
       rules:
         - listen: "both://:13389"     # mstsc connects here
-          email: home@example.com  # final target C
-          forwardPort: 2224           # which rule in C's forward[] to use
+          forward:
+            email: home@example.com  # final target C
+            tag: rdp                 # which rule in C's forward[] to use (matched by tag)
           via: relay@example.com  # relay through this VPS; empty = direct to C (current behavior)
 ```
 
@@ -84,7 +89,7 @@ websocket:
 
 **Flow** (setup phase, signaling via B; data not via B):
 
-1. `d_request` (A → B, **with `via`**): A wants to relay via `via` (VPS) to C (`email`)'s `forwardPort`, attaching A's own candidates and the current `token`. B sees `via` non-empty → enters relay mode.
+1. `d_request` (A → B, **with `via`**): A wants to relay via `via` (VPS) to C (`email`)'s `forward.tag`, attaching A's own candidates and the current `token`. B sees `via` non-empty → enters relay mode.
 2. `d_relay_open` (B → VPS): tells the VPS to **create a new dedicated UDP socket** for this `token`, ask the reflector to discover its public relay endpoint **E**, and prepare to accept hole-punches from A and C. The VPS reports E back to B with `d_ready`.
 3. B uses two `d_punch` messages to forward candidates to the VPS separately: one with A's candidate, one with C's candidate (first send a normal `d_punch` to C to obtain C's candidate and fingerprint). The VPS only **registers** them: each registered leg parks and waits for that leg's `d_punching` nudge (see below). There is **no** "wait a while, then punch anyway" fallback timer (see §6).
 4. `d_offer` (B → A): fills the endpoint to dial as **E** and attaches **C's certificate fingerprint**. Simultaneously sends `d_punch` to C, with its `PeerAddrs` filled as **E**, making C punch to E (instead of toward A).
@@ -105,7 +110,7 @@ websocket:
     direct:
       accept: true       # still required: so residents can punch-connect up
       relay: true         # new: allow acting as relay; by default open to all authenticated subscribers in B
-      # relayAllow:       # optional: restrict which source emails may use this machine's relay (empty = fully open)
+      # relayEmail:       # optional: restrict which source emails may use this machine's relay (empty = fully open, needs B on the same version)
 ```
 
 **C's configuration** (essentially unchanged; the `forward` whitelist is still the gate):
@@ -121,7 +126,7 @@ websocket:
       # separately per direct-punch-order.md
       accept: true
     forward:
-      - port: 2224
+      - tag: rdp
         target: 192.168.1.10:3389
     receive:                         # C keeps a "which A's are allowed" list (see authentication)
       allow:
@@ -171,6 +176,8 @@ The few packets the VPS itself proactively sends (see `punchLeg`/`primeLeg` in �
 - **Extra benefit of the dedicated socket**: natural isolation — closing one relay pair does not affect other pairs; the address binding also naturally prevents hijacking.
 
 ## 6. Ordering: never get ahead — but the VPS must send when the nudge says so
+
+![Residents punch first, the VPS follows](../direct-relay-punch-order.en.svg)
 
 A relay has two legs, both "resident→cloud". Three constraints must hold at once, or nothing
 works:
@@ -291,8 +298,8 @@ Because the VPS is opaque forwarding and makes no TCP/UDP distinction, the data 
 ## 9. Decisions already made
 
 - **Authentication direction**: one-way — **C verifies A with uuid challenge-response**; A verifies C with **certificate fingerprint** (not uuid). Both ends are authenticated, and the VPS cannot impersonate either.
-- **C-side list**: **reuse the existing `receive.allow`** (email+uuid), do not open a new `relayAllow` (change its comment from "file-transfer only" to "file transfer + relay authentication").
-- **`direct.relay` default**: once enabled, open to "all authenticated subscribers within B"; `direct.relayAllow` optionally tightens.
+- **C-side list**: **reuse the existing `receive.allow`** (email+uuid), do not open a separate C-side list for relaying (change its comment from "file-transfer only" to "file transfer + relay authentication"). This is distinct from the VPS-side `relayEmail` below: the former governs "who may reach C", the latter "who may consume this VPS's relay resources".
+- **`direct.relay` default**: once enabled, open to "all authenticated subscribers within B"; `direct.relayEmail` optionally tightens it to specific source emails. The initiator's email is stamped by B from its own authenticated connection and delivered via `DirectRelayOpen.Email` (not self-reported by A); the VPS checks the list **before** opening the relay socket. If the list is configured but the email arrives empty (an old B that does not send the field), the VPS refuses the relay — an allowlist must not silently lapse just because the peer is on an older version.
 - **Relay target granularity**: one target C per A↔VPS connection.
 - **Naming**: A side `via`, VPS side `direct.relay`.
 - **No separate broker token needed**: uuid challenge-response alone carries it (see §4); optionally kept as a cheap early-reject door.
@@ -318,7 +325,7 @@ Because the VPS is opaque forwarding and makes no TCP/UDP distinction, the data 
 - Ordering: the VPS only sends to a leg after that leg's nudge (no fallback timer, see §6), so
   `direct.punchFirst` is not involved; that
   switch only applies to plain direct connections per [direct-punch-order.md](direct-punch-order.md).
-- Config: [utils/conf/router.go](../utils/conf/router.go) (`ClientDirect.Via`, `DirectSettings.Relay`, optional `DirectSettings.RelayAllow`, `DirectSettings.RelayPublic`, all under `WsClient.Direct`).
+- Config: [utils/conf/router.go](../utils/conf/router.go) (`ClientDirect.Via`, `DirectSettings.Relay`, optional `DirectSettings.RelayEmail`, `DirectSettings.RelayPublic`, all under `WsClient.Direct`).
 
 ## Appendix: Discarded design (VPS two-leg bridge)
 

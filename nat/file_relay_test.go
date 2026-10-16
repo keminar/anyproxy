@@ -244,7 +244,7 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 	a := fileRelayTestClient(t, connect, "a", testPassA, "a@example.com", testUUIDA, conf.ClientReceive{})
 
 	srcDir := t.TempDir()
-	body := make([]byte, 5*chunkMinSize+777) // 不对齐 chunkMinSize, 顺带盖住"最后一块拿余数"
+	body := make([]byte, 5*probeChunkSize+777) // 不对齐 probeChunkSize, 顺带盖住"最后一块拿余数"
 	if _, err := rand.Read(body); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -257,19 +257,18 @@ func TestChunkedFileTransferRelay(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	it := items[0]
-	chunks := planChunks(it.size, 3)
-	if len(chunks) < 2 {
-		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	if !wantParallel(it.size, 3) {
+		t.Fatalf("expected the test file (%d bytes) to be big enough for parallel chunking", it.size)
 	}
 
 	p := newProgress("test", it.size)
 	// 必须停掉它的渲染 goroutine: 漏掉的话它会一直往 stderr 刷进度行到进程结束,
 	// 把后面用例的输出和失败信息冲乱(见 progress.done 的说明)。
 	defer p.done()
-	sendChunk := func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
-		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
+		return sendFileChunkViaRelay(a.client, "c@example.com", it, offset, length, tid, chunkIdx, onProgress)
 	}
-	saved, err := sendParallel(it, chunks, sendChunk, p)
+	saved, err := sendParallel(it, 3, sendChunk, nil, p)
 	if err != nil {
 		t.Fatalf("chunked send via relay: %v", err)
 	}
@@ -622,7 +621,7 @@ func TestSendFilesRejectsBadViaVps(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := SendFiles(c.cfg, c.to, []string{src}, c.via, 1)
+			err := SendFiles(c.cfg, c.to, []string{src}, c.via, 1, ConflictRename)
 			if err == nil || !strings.Contains(err.Error(), c.wantErrSub) {
 				t.Fatalf("want error containing %q, got %v", c.wantErrSub, err)
 			}
@@ -636,7 +635,7 @@ func TestSendFilesRejectsEscapingSubdir(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "x.txt")
 	os.WriteFile(src, []byte("hi"), 0o644)
 	cfg := conf.WsClient{Connect: "127.0.0.1:1", User: "a", Pass: testPassA, Email: "a@example.com"}
-	err := SendFiles(cfg, "c@example.com:../../etc", []string{src}, ViaDirect, 1)
+	err := SendFiles(cfg, "c@example.com:../../etc", []string{src}, ViaDirect, 1, ConflictRename)
 	if err == nil || !strings.Contains(err.Error(), "escapes the receive directory") {
 		t.Fatalf("want a clear escape error, got %v", err)
 	}
@@ -660,7 +659,7 @@ func TestSendFilesToSubdir(t *testing.T) {
 	}
 
 	cfg := conf.WsClient{Connect: connect, User: "a", Pass: testPassA, Email: "a@example.com", UUID: testUUIDA}
-	if err := SendFiles(cfg, "c@example.com:/aaa/", []string{src}, ViaRelay, 1); err != nil {
+	if err := SendFiles(cfg, "c@example.com:/aaa/", []string{src}, ViaRelay, 1, ConflictRename); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -702,7 +701,7 @@ func TestRecvFilesRelayEndToEnd(t *testing.T) {
 	localDir := t.TempDir()
 	cfgA := conf.WsClient{Connect: connect, User: "a", Pass: testPassA,
 		Email: "a@example.com", UUID: testUUIDA}
-	if err := RecvFiles(cfgA, "c@example.com:backup", localDir, ViaRelay, 1); err != nil {
+	if err := RecvFiles(cfgA, "c@example.com:backup", localDir, ViaRelay, 1, ConflictRename); err != nil {
 		t.Fatalf("recv: %v", err)
 	}
 
@@ -738,7 +737,7 @@ func TestFileRelayReadOnlyServesButRefusesWrites(t *testing.T) {
 
 	// 取: 照常。
 	localDir := t.TempDir()
-	if err := RecvFiles(cfgA, "c@example.com:pkg.tar", localDir, ViaRelay, 1); err != nil {
+	if err := RecvFiles(cfgA, "c@example.com:pkg.tar", localDir, ViaRelay, 1, ConflictRename); err != nil {
 		t.Fatalf("a read-only directory must still serve files: %v", err)
 	}
 	if got, _ := os.ReadFile(filepath.Join(localDir, "pkg.tar")); string(got) != "payload" {
@@ -750,7 +749,7 @@ func TestFileRelayReadOnlyServesButRefusesWrites(t *testing.T) {
 	if err := os.WriteFile(src, []byte("nope"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	err := SendFiles(cfgA, "c@example.com", []string{src}, ViaRelay, 1)
+	err := SendFiles(cfgA, "c@example.com", []string{src}, ViaRelay, 1, ConflictRename)
 	if err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("want a read-only refusal, got %v", err)
 	}
@@ -777,7 +776,7 @@ func TestRecvFilesRelayRejectsStranger(t *testing.T) {
 	localDir := t.TempDir()
 	cfgA := conf.WsClient{Connect: connect, User: "a", Pass: testPassA,
 		Email: "a@example.com", UUID: testUUIDStranger}
-	err := RecvFiles(cfgA, "c@example.com:secret.txt", localDir, ViaRelay, 1)
+	err := RecvFiles(cfgA, "c@example.com:secret.txt", localDir, ViaRelay, 1, ConflictRename)
 	if err == nil {
 		t.Fatal("a peer that is not in receive.allow must not be able to fetch anything")
 	}

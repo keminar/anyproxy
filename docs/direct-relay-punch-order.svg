@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="354" viewBox="0 0 680 354" font-family="'PingFang SC','Microsoft YaHei',Arial,sans-serif">
+  <rect x="0" y="0" width="680" height="354" fill="#ffffff"/>
+  <text x="20" y="24" font-size="14" font-weight="bold" fill="#1a1a2e">顺序不变量：居民先打，VPS 只在该腿 nudge 之后才朝它发包（两条腿各自独立走这四步）</text>
+  <defs>
+    <marker id="arrBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrGray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#607d8b"/>
+    </marker>
+    <marker id="arrOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#b85c00"/>
+    </marker>
+  </defs>
+  <rect x="48" y="54" width="250" height="48" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <text x="62" y="70" font-size="12" font-weight="bold" fill="#1565c0" dominant-baseline="central">1 居民先发出第一个打洞包</text>
+  <text x="62" y="87" font-size="11" fill="#1565c0" dominant-baseline="central">朝 E 的每个候选各来一发</text>
+  <text x="316" y="78" font-size="11" fill="#455a64" dominant-baseline="central">居民必须先打：VPS 那层有状态防火墙</text>
+  <text x="316" y="94" font-size="11" fill="#455a64" dominant-baseline="central">只放行它自己先发出过的回程</text>
+  <line x1="173" y1="102" x2="173" y2="112" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <rect x="48" y="114" width="250" height="48" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <text x="62" y="130" font-size="12" font-weight="bold" fill="#1565c0" dominant-baseline="central">2 紧接着经 B 发 d_punching nudge</text>
+  <text x="62" y="147" font-size="11" fill="#1565c0" dominant-baseline="central">afterFirst 回调里同步发出</text>
+  <text x="316" y="138" font-size="11" fill="#455a64" dominant-baseline="central">回调打在 UDP WriteTo 成功返回之后，</text>
+  <text x="316" y="154" font-size="11" fill="#455a64" dominant-baseline="central">是代码顺序，不靠调度上的侥幸</text>
+  <line x1="173" y1="162" x2="173" y2="172" stroke="#b85c00" stroke-width="1.5" marker-end="url(#arrOrange)"/>
+  <rect x="48" y="174" width="250" height="48" rx="8" fill="#fff4e6" stroke="#b85c00" stroke-width="1"/>
+  <text x="62" y="190" font-size="12" font-weight="bold" fill="#b85c00" dominant-baseline="central">3 B 把 nudge 转给 VPS</text>
+  <text x="62" y="207" font-size="11" fill="#b85c00" dominant-baseline="central">腿标签 = B 自己认证过的 email</text>
+  <text x="316" y="198" font-size="11" fill="#455a64" dominant-baseline="central">居民伪造成别的腿没用：B 用 c.Email</text>
+  <text x="316" y="214" font-size="11" fill="#455a64" dominant-baseline="central">覆盖并核对（direct_broker.go）</text>
+  <line x1="173" y1="222" x2="173" y2="232" stroke="#607d8b" stroke-width="1.5" marker-end="url(#arrGray)"/>
+  <rect x="48" y="234" width="250" height="48" rx="8" fill="#f3f5fa" stroke="#607d8b" stroke-width="1"/>
+  <text x="62" y="250" font-size="12" font-weight="bold" fill="#455a64" dominant-baseline="central">4 VPS 才朝这条腿的候选发包</text>
+  <text x="62" y="267" font-size="11" fill="#607d8b" dominant-baseline="central">punchLeg：第一发无条件，之后听到就停</text>
+  <text x="316" y="258" font-size="11" fill="#455a64" dominant-baseline="central">日志 answered after 1 punch(es) = 只发了 1 发</text>
+  <text x="316" y="274" font-size="11" fill="#455a64" dominant-baseline="central">它只负责打开 VPS 自己的回程通道</text>
+  <rect x="48" y="300" width="612" height="34" rx="8" fill="#eef7ef" stroke="#2e7d32" stroke-width="1"/>
+  <text x="60" y="317" font-size="11" fill="#1b5e20" dominant-baseline="central">VPS 永不抢先：它没有兜底定时器；nudge 丢了靠居民重发 3 次（0/+600ms/+1.8s），VPS 按腿幂等</text>
+</svg>

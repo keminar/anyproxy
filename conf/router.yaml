@@ -1,4 +1,5 @@
-# 监听端口IP, 优先级低于启动传参，不监听设置为off
+# 监听端口IP, 优先级低于启动传参，不监听设置为off。可逗号分隔写多个完整地址(各自带端口),
+# 同时绑定多个内网网段的具体 IP, 如 192.168.1.5:3000,10.0.0.5:3000
 listen:
 # 日志目录
 log:
@@ -82,6 +83,14 @@ tun:
 #      - 203.0.113.10
 #    excludeProcs:            # 这些进程的出向一律不重定向(逃 OpenVPN 等同机隧道死循环)
 #      - openvpn.exe
+#    redirectPorts:           # 捕获的出站TCP目标端口; 不配默认[80,443]; 一旦配置则完全覆盖
+#      - 80                   # (需要的端口都要写全, 比如还想抓某远程服务的5000端口)
+#      - 443
+#      - 5000
+#    # 重要: 目的地是 loopback(127.0.0.1/::1)的连接永远不会被 WinDivert 捕获,
+#    # 不受 redirectPorts/bypassPrivate/skipPorts 等任何配置影响(硬编码防环, 见
+#    # docs/windows-windivert-redirect.md)。想代理"本机 localhost:port"的流量,
+#    # 这条路走不通, 只能让发起连接的程序直接配置用 anyproxy 做代理。
 
 # 死循环兜底熔断器(不仅仅应用于全局代理，经过anyproxy的死循环都有效)。
 # 同机 A(mode=tun)+B(mode=bypass, 仅Linux) 部署时, 正常应由 bypass 从路由层根治环路;
@@ -301,8 +310,10 @@ websocket:
       #                  # 专用 UDP socket、探到自己的公网端点、让 A/C 都朝它打洞, 之后在两个来源地址间盲
       #                  # 转发不透明 UDP 包。QUIC/TLS 端到端在 A<->C, 本机看不到明文。关键: 本机**不需要**为
       #                  # 每对 A-C 配 forward/rules/receive.allow, 只要这一个开关; 目标 C 由 A 用 via 指定
-      # relayAllow:      # 可选, 收紧 relay: 只允许这些来源 email(发起中继的 A, 经 B 认证)用本机中继。
+      # relayEmail:      # 可选, 收紧 relay: 只允许这些来源 email(发起中继的 A, 经 B 认证)用本机中继。
       #   - office@example.com # 留空(且 relay=true)=不限制。仅 email 准入名单, 不涉及 uuid(鉴权在 A<->C 的 e2e 层)
+      #                  # 精确匹配、大小写敏感。注意与 forward[].allowRelay 不是一回事(那个是布尔开关)
+      #                  # 需服务端 B 为同版本(email 由 B 盖章送来): 配了本名单却收到空 email 时本机拒绝中继
       # relayPublic:     # 可选。只写 IP 时每个 binding 使用随机端口，并把该端口与全部 IP 组合成候选：
       #   - "192.0.2.10"       # 适合按目标选择不同公网源 IP 的多出口 VPS，不占固定端口槽位
       #   - "198.51.100.10"    # IPv6 同样只写裸地址。若写 IP:port，则切换成下面的固定端口模式：
@@ -339,6 +350,8 @@ websocket:
       #                          # 也能取走 dir 下的任何东西, 只配一个方向要靠上面的 readonly
       #   - email: someone@example.com    # 仅备注/查找用, 不是安全边界
       #     uuid: 3fa85f64-5717-4562-b3fc-2c963f66afa6  # 真正的凭证, 抄对方的 websocket.client.uuid
+      #     wol: false          # true 才允许这个 email 用 -wol 让本机代为广播网络唤醒包, 默认 false
+      #     dir:                # 这个 email 上传时的落地目录, 覆盖上面共享的 dir; 留空则跟其他人一样落到 dir
     # true 时强制这条配置只用来给 -send/-recv 命令行取凭证(以及生成/持久化上面的 uuid),
     # 常驻的 anyproxy 进程不会为它发起连接, 哪怕配了 subscribe/forward/direct/
     # receive 中的几项也照样跳过。
@@ -348,7 +361,7 @@ websocket:
     sendRecvOnly: false
   # 同时订阅多台 server: 配了 clients 就只用 clients(上面单个 client 块被忽略), 每项是完整独立配置,
   # 字段同上面 client 块(connect/host/user/pass/key/email/subscribe/forward/direct(含
-  # accept/rules/encrypt/portmap/punchFirst/relay/relayAllow/relayPublic/lanAddrs/plainUdp)/
+  # accept/rules/encrypt/portmap/punchFirst/relay/relayEmail/relayPublic/lanAddrs/plainUdp)/
   # receive/sendRecvOnly; uuid 不可配, 自动生成)
   # clients:
   #   - connect:

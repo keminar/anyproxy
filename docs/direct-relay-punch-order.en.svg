@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="354" viewBox="0 0 680 354" font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif">
+  <rect x="0" y="0" width="680" height="354" fill="#ffffff"/>
+  <text x="20" y="24" font-size="14" font-weight="bold" fill="#1a1a2e">Ordering invariant: residents punch first, the VPS only sends to a leg after that leg's nudge</text>
+  <defs>
+    <marker id="arrBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#1565c0"/>
+    </marker>
+    <marker id="arrGray" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#607d8b"/>
+    </marker>
+    <marker id="arrOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#b85c00"/>
+    </marker>
+  </defs>
+  <rect x="48" y="54" width="250" height="48" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <text x="62" y="70" font-size="12" font-weight="bold" fill="#1565c0" dominant-baseline="central">1 the resident sends the first punch packet</text>
+  <text x="62" y="87" font-size="11" fill="#1565c0" dominant-baseline="central">one packet per candidate of E</text>
+  <text x="316" y="78" font-size="11" fill="#455a64" dominant-baseline="central">the resident must go first: the VPS's stateful</text>
+  <text x="316" y="94" font-size="11" fill="#455a64" dominant-baseline="central">firewall only allows return traffic it sent out</text>
+  <line x1="173" y1="102" x2="173" y2="112" stroke="#1565c0" stroke-width="1.5" marker-end="url(#arrBlue)"/>
+  <rect x="48" y="114" width="250" height="48" rx="8" fill="#eaf6fb" stroke="#1565c0" stroke-width="1"/>
+  <text x="62" y="130" font-size="12" font-weight="bold" fill="#1565c0" dominant-baseline="central">2 then a d_punching nudge via B</text>
+  <text x="62" y="147" font-size="11" fill="#1565c0" dominant-baseline="central">sent synchronously from the afterFirst callback</text>
+  <text x="316" y="138" font-size="11" fill="#455a64" dominant-baseline="central">that callback runs after the UDP WriteTo</text>
+  <text x="316" y="154" font-size="11" fill="#455a64" dominant-baseline="central">returned: code order, not scheduler luck</text>
+  <line x1="173" y1="162" x2="173" y2="172" stroke="#b85c00" stroke-width="1.5" marker-end="url(#arrOrange)"/>
+  <rect x="48" y="174" width="250" height="48" rx="8" fill="#fff4e6" stroke="#b85c00" stroke-width="1"/>
+  <text x="62" y="190" font-size="12" font-weight="bold" fill="#b85c00" dominant-baseline="central">3 B forwards the nudge to the VPS</text>
+  <text x="62" y="207" font-size="11" fill="#b85c00" dominant-baseline="central">leg label = the email B authenticated</text>
+  <text x="316" y="198" font-size="11" fill="#455a64" dominant-baseline="central">a resident cannot claim to be another leg:</text>
+  <text x="316" y="214" font-size="11" fill="#455a64" dominant-baseline="central">B overwrites/checks it with c.Email</text>
+  <line x1="173" y1="222" x2="173" y2="232" stroke="#607d8b" stroke-width="1.5" marker-end="url(#arrGray)"/>
+  <rect x="48" y="234" width="250" height="48" rx="8" fill="#f3f5fa" stroke="#607d8b" stroke-width="1"/>
+  <text x="62" y="250" font-size="12" font-weight="bold" fill="#455a64" dominant-baseline="central">4 only now does the VPS send toward that leg</text>
+  <text x="62" y="267" font-size="11" fill="#607d8b" dominant-baseline="central">punchLeg: the first packet is unconditional</text>
+  <text x="316" y="258" font-size="11" fill="#455a64" dominant-baseline="central">"answered after 1 punch(es)" = only one sent</text>
+  <text x="316" y="274" font-size="11" fill="#455a64" dominant-baseline="central">its only job: open the VPS's own return path</text>
+  <rect x="48" y="300" width="612" height="34" rx="8" fill="#eef7ef" stroke="#2e7d32" stroke-width="1"/>
+  <text x="60" y="317" font-size="11" fill="#1b5e20" dominant-baseline="central">The VPS never jumps the gun: no fallback timer. A lost nudge is covered by the resident's 3 sends (0/+600ms/+1.8s), which are idempotent per leg.</text>
+</svg>

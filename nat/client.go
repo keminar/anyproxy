@@ -36,7 +36,7 @@ type Client struct {
 	// 以下两个仅订阅方(client)侧使用, 服务端(nat/conn.go 的 serveWs 构造 Client 时)不赋值,
 	// 保持零值即可(服务端连接不会走 localReadPump/dialForCreate)
 	bridge  *BridgeHub        // 替代原全局 LocalBridge, 每条 server 连接一份, 避免多连接间请求ID撞车
-	forward map[uint16]string // 替代原全局 localForward, 每条 server 连接一份, 避免入口端口撞车
+	forward map[string]string // 替代原全局 localForward, 每条 server 连接一份, 避免入口 tag 撞车
 
 	// tag 日志前缀, 区分多条并发连接。服务端(nat/conn.go 的 serveWs)按连接序号生成,
 	// 订阅方(nat/handler.go)用 cfg.Connect, 两套编号各自只在自己进程的日志里有意义。
@@ -242,7 +242,7 @@ func (c *Client) localReadPump() {
 			// 查不到 target 或 dial 失败: 不建 bridge, 回 CLOSE 让服务端拆链。
 			proxConn, derr := dialForCreate(c, msg)
 			if derr != nil {
-				log.Println(trace.ID(msg.ID), c.tag, "nat_local_debug dial error", msg.Type, msg.Port, derr.Error())
+				log.Println(trace.ID(msg.ID), c.tag, "nat_local_debug dial error", msg.Type, msg.Tag, derr.Error())
 				// 把拒绝原因带回给服务端(经 Body, METHOD_CLOSE 平时不用这个字段, 见
 				// nat/message.go): 否则服务端只看得到"连接没数据就断了", 真正的原因
 				// (比如查不到 forward 映射)只留在这台机器自己的本地日志里。

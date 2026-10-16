@@ -78,7 +78,7 @@ func GetOriginalDstAddr(tcpConn *net.TCPConn) (dstIP string, dstPort uint16, new
 		newTCPConn = newConn.(*net.TCPConn)
 
 		// 来源和目标地址是同一个ip，且目标端口和本服务是同一个端口
-		if srcIP == dstIP && dstPort == config.ListenPort {
+		if srcIP == dstIP && config.IsListenPort(dstPort) {
 			err = fmt.Errorf("may be loop call: %s=>%s:%d", srcipport, dstIP, dstPort)
 		}
 		return

@@ -5,11 +5,16 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,8 +95,8 @@ func TestClaimName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if got2 != filepath.Join(dir, "x (1).zip") {
-		t.Fatalf("got %q, want x (1).zip", got2)
+	if want := dupName(p, 1); got2 != want {
+		t.Fatalf("got %q, want %q", got2, want)
 	}
 	os.WriteFile(got2, []byte("old"), 0o644)
 
@@ -99,8 +104,8 @@ func TestClaimName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if got3 != filepath.Join(dir, "x (2).zip") {
-		t.Fatalf("got %q, want x (2).zip", got3)
+	if want := dupName(p, 2); got3 != want {
+		t.Fatalf("got %q, want %q", got3, want)
 	}
 	// 原文件必须原封不动。
 	if b, _ := os.ReadFile(p); string(b) != "old" {
@@ -111,8 +116,25 @@ func TestClaimName(t *testing.T) {
 	// 序号要加在整个文件名后面, 不能拆进版本号中间。
 	vp := filepath.Join(dir, "anyproxy-amd64-v2.1")
 	os.WriteFile(vp, []byte("old"), 0o644)
-	if got, err := claimName(vp); err != nil || got != filepath.Join(dir, "anyproxy-amd64-v2.1 (1)") {
-		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, "anyproxy-amd64-v2.1 (1)")
+	if got, err := claimName(vp); err != nil || got != dupName(vp, 1) {
+		t.Fatalf("claimName(%q) = %q, %v; want %q, nil", vp, got, err, dupName(vp, 1))
+	}
+}
+
+func TestDupName(t *testing.T) {
+	cases := []struct {
+		dest string
+		i    int
+		want string
+	}{
+		{"/d/x.zip", 1, "/d/x 1.zip"},
+		{"/d/x.zip", 2, "/d/x 2.zip"},
+		{"/d/v2.1", 1, "/d/v2.1 1"}, // 数字后缀是版本号, 序号加在末尾
+	}
+	for _, c := range cases {
+		if got := dupName(c.dest, c.i); got != c.want {
+			t.Errorf("dupName(%q, %d) = %q, want %q", c.dest, c.i, got, c.want)
+		}
 	}
 }
 
@@ -316,12 +338,12 @@ func TestFileTransferEndToEnd(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-file"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -382,12 +404,12 @@ func TestFilePullDirectEndToEnd(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-pull"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -458,12 +480,12 @@ func TestFileReceiveReadOnlyServesButRefusesWrites(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-readonly"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -530,12 +552,12 @@ func TestFilePullDirectRejectsStranger(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-pull-stranger"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -577,12 +599,12 @@ func TestDirectQUICStatsCollected(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-stats"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	items, err := collectFiles([]string{srcPath})
@@ -624,12 +646,12 @@ func TestFileRefusedWhenNoReceiveDir(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-noreceive"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -662,12 +684,12 @@ func TestFileRefusedWhenNoReceiveDirLargeFile(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-noreceive-large"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -713,12 +735,12 @@ func TestFileReceiveAllowList(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-allow"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -747,12 +769,12 @@ func TestFileReceiveAllowRequiresMatchingUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-uuid-mismatch"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -779,12 +801,12 @@ func TestFileSendRefusesEmptyUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-empty-uuid"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -808,12 +830,12 @@ func TestFileSendRefusesMalformedOwnUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-malformed-uuid"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	src := filepath.Join(t.TempDir(), "x.txt")
@@ -839,16 +861,16 @@ func TestFileReceiveRefusesMalformedConfiguredUUID(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-malformed-uuid-wire"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
-	stream, err := a.openHeadedStream(sess, directStreamFile, "", directFilePort)
+	stream, err := a.openHeadedStream(sess, directStreamFile, "", directFileTag)
 	if err != nil {
 		t.Fatalf("open stream: %v", err)
 	}
@@ -882,6 +904,27 @@ func TestClientReceiveLookup(t *testing.T) {
 	}
 	if _, ok := r.Lookup(""); ok {
 		t.Error("an empty email should not match")
+	}
+}
+
+// TestClientReceiveLookupSender: LookupSender 要把 Wol/Dir 一并带出来(Lookup 只是
+// 它的 uuid-only 简化版), 且未配置时保持各自的零值(Wol 默认 false, Dir 默认空
+// 即"跟其他人一样落到共享 Dir")。
+func TestClientReceiveLookupSender(t *testing.T) {
+	r := conf.ClientReceive{Allow: []conf.AllowedSender{
+		{Email: "a@x.com", UUID: "ua"},
+		{Email: "b@x.com", UUID: "ub", Wol: true, Dir: "/srv/b"},
+	}}
+	a, ok := r.LookupSender("a@x.com")
+	if !ok || a.UUID != "ua" || a.Wol || a.Dir != "" {
+		t.Errorf("a@x.com should resolve with zero Wol/Dir, got %+v ok=%v", a, ok)
+	}
+	b, ok := r.LookupSender("b@x.com")
+	if !ok || b.UUID != "ub" || !b.Wol || b.Dir != "/srv/b" {
+		t.Errorf("b@x.com should resolve with Wol=true Dir=/srv/b, got %+v ok=%v", b, ok)
+	}
+	if _, ok := r.LookupSender("c@x.com"); ok {
+		t.Error("an unlisted email should not resolve")
 	}
 }
 
@@ -934,6 +977,72 @@ func TestProgressReader(t *testing.T) {
 	}
 }
 
+// TestProgressEraseWidthTracksActualContent 覆盖一个实测踩到的 bug: done() 收尾擦行
+// 曾经固定打印 200 个空格, 内容本身没那么长时, 这么一大串空格会在终端实际宽度处触发
+// 自动换行——结尾的 \r 只能回到"换行后的那一行"行首, 上面多出几行洗不掉的空白, 复制
+// 粘贴出来就是"进度行前面一大截空格、后面跟着结果文字"这种花样(-parallel 4 很容易
+// 撞上, 因为连接明细本身就比单连接长)。修复后擦行的宽度要跟着"这个文件迄今真正
+// 渲染过的最大行宽"走, 不能是一个和内容无关的大常量。
+func TestProgressEraseWidthTracksActualContent(t *testing.T) {
+	p := newProgress("[1/1] test.bin", 100)
+
+	p.update(10)
+	p.render()
+	p.mu.Lock()
+	firstLen := p.lastLineLen
+	p.mu.Unlock()
+	if firstLen == 0 {
+		t.Fatal("lastLineLen should be set after the first render")
+	}
+	if firstLen > 80 {
+		t.Fatalf("lastLineLen = %d after a plain single-connection render, suspiciously wide for this short content", firstLen)
+	}
+
+	// 挂一个分块并行常见的场景: 这一次渲染的连接明细比上一次明显更短(比如某几条
+	// 连接已经传完退出, 只剩一条还在传)。lastLineLen 应该保持在"迄今为止见过的
+	// 最大值", 好让 render()/done() 用它补足空格盖住上一行的残留, 而不是跟着新
+	// 内容一起缩短、留下一截没擦掉的尾巴。
+	p.setConnLine(func() (string, string) {
+		return "[10B  1B/s/5B, 20B  2B/s/5B, 30B  3B/s/5B, 40B  4B/s/5B]", "10B/s"
+	})
+	p.update(20)
+	p.render()
+	p.mu.Lock()
+	widerLen := p.lastLineLen
+	p.mu.Unlock()
+	if widerLen <= firstLen {
+		t.Fatalf("expected the wider connLine render to grow lastLineLen past %d, got %d", firstLen, widerLen)
+	}
+
+	p.setConnLine(func() (string, string) { return "[40B  4B/s/5B]", "4B/s" })
+	p.update(40)
+	p.render()
+	p.mu.Lock()
+	secondLen := p.lastLineLen
+	p.mu.Unlock()
+	if secondLen != widerLen {
+		t.Fatalf("lastLineLen changed from %d to %d after a shorter render, want it to stay at the max ever rendered", widerLen, secondLen)
+	}
+
+	// done() 的擦行必须正好是 lastLineLen 个空格, 不多不少——既不能像改动前那样甩
+	// 出一个和内容无关的大常量, 也不能少到擦不干净。
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	p.done()
+	w.Close()
+	os.Stderr = orig
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	want := "\r" + strings.Repeat(" ", secondLen) + "\r"
+	if buf.String() != want {
+		t.Fatalf("done() erased with %q, want %q", buf.String(), want)
+	}
+}
+
 func TestFileTransferTimeoutsAreSane(t *testing.T) {
 	// 首部有超时(开了流不发首部的对端会占着它), 但数据本身不设总时限 —— 大文件在慢
 	// 链路上传很久是正常的, 真正断掉的连接由 QUIC 的空闲超时兜住。
@@ -966,44 +1075,284 @@ func TestShortSum(t *testing.T) {
 
 // ---------- 单文件分块并行传输 ----------
 
-func TestPlanChunks(t *testing.T) {
-	// want<=1 或文件太小: 不切块, 退回单连接路径。
-	if got := planChunks(10*chunkMinSize, 1); got != nil {
-		t.Fatalf("want=1 should not split, got %v", got)
-	}
-	if got := planChunks(2*chunkMinSize-1, 4); got != nil {
-		t.Fatalf("a file just under 2*chunkMinSize should not split, got %v", got)
-	}
+func TestChunkCursorClaim(t *testing.T) {
+	size := int64(5*probeChunkSize) + 777
+	c := newChunkCursor(size)
 
-	// 正好两倍最小块: 切两块。
-	chunks := planChunks(2*chunkMinSize, 4)
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
-	}
-
-	// want 超过文件能切出的块数时按能切多少切多少, 不会切出小于 chunkMinSize 的块
-	// (最后一块拿余数除外)。
-	size := int64(5*chunkMinSize) + 777
-	chunks = planChunks(size, 8)
-	if len(chunks) != 5 {
-		t.Fatalf("expected 5 chunks (capped by chunkMinSize), got %d: %v", len(chunks), chunks)
-	}
-
-	// 分块必须首尾相接、覆盖整个文件, 不重叠、不漏字节, 最后一块拿余数。
 	var off int64
 	var total int64
-	for i, c := range chunks {
-		if c.offset != off {
-			t.Fatalf("chunk %d starts at %d, want %d", i, c.offset, off)
+	seenIdx := map[int]bool{}
+	for {
+		offset, length, idx, ok := c.claim(probeChunkSize)
+		if !ok {
+			break
 		}
-		if i < len(chunks)-1 && c.length < chunkMinSize {
-			t.Fatalf("chunk %d is smaller than chunkMinSize: %d", i, c.length)
+		if offset != off {
+			t.Fatalf("claim starts at %d, want %d", offset, off)
+		}
+		if seenIdx[idx] {
+			t.Fatalf("idx %d handed out twice", idx)
+		}
+		seenIdx[idx] = true
+		off += length
+		total += length
+	}
+	if total != size {
+		t.Fatalf("claimed %d bytes total, want %d", total, size)
+	}
+	// 耗尽之后继续认领应该一直是 ok=false, 不panic、不越界。
+	if _, _, _, ok := c.claim(probeChunkSize); ok {
+		t.Fatal("claim after exhaustion should return ok=false")
+	}
+
+	// 最后一片必须 clamp 到剩余字节数, 不能超发。
+	c2 := newChunkCursor(10)
+	_, length, _, ok := c2.claim(7)
+	if !ok || length != 7 {
+		t.Fatalf("first claim(7) on a 10-byte file = length %d ok %v, want 7 true", length, ok)
+	}
+	_, length, _, ok = c2.claim(7)
+	if !ok || length != 3 {
+		t.Fatalf("second claim(7) on a 10-byte file should clamp to the remaining 3, got length %d ok %v", length, ok)
+	}
+	if _, _, _, ok := c2.claim(7); ok {
+		t.Fatal("claiming a fully-claimed cursor should return ok=false")
+	}
+
+	// size==0 的文件不应该产生任何一次成功的认领。
+	if _, _, _, ok := newChunkCursor(0).claim(probeChunkSize); ok {
+		t.Fatal("claim on a zero-size file should return ok=false")
+	}
+}
+
+func TestChunkCursorClaimConcurrent(t *testing.T) {
+	const size = 97 * 1024 // 不对齐任何一档分片大小, 顺带盖住"最后一片拿余数"。
+	c := newChunkCursor(size)
+
+	type claim struct{ offset, length int64 }
+	var mu sync.Mutex
+	var results []claim
+	idxSeen := map[int]bool{}
+
+	var wg sync.WaitGroup
+	sizes := []int64{997, 1500, 2048, 4096} // 模拟不同 worker 选了不同的分片大小
+	for _, want := range sizes {
+		wg.Add(1)
+		go func(want int64) {
+			defer wg.Done()
+			for {
+				offset, length, idx, ok := c.claim(want)
+				if !ok {
+					return
+				}
+				mu.Lock()
+				results = append(results, claim{offset, length})
+				idxSeen[idx] = true
+				mu.Unlock()
+			}
+		}(want)
+	}
+	wg.Wait()
+
+	sort.Slice(results, func(i, j int) bool { return results[i].offset < results[j].offset })
+
+	var off, total int64
+	for i, cl := range results {
+		if cl.offset != off {
+			t.Fatalf("claim %d starts at %d, want %d (gap or overlap)", i, cl.offset, off)
+		}
+		off += cl.length
+		total += cl.length
+	}
+	if total != size {
+		t.Fatalf("claimed %d bytes total, want %d", total, size)
+	}
+
+	// idx 唯一性已在收集时用 map 记录, 数量必须等于 claim 总数。
+	if len(idxSeen) != len(results) {
+		t.Fatalf("got %d distinct idx for %d claims (idx handed out to more than one claim)", len(idxSeen), len(results))
+	}
+}
+
+func TestChunkSizeForRate(t *testing.T) {
+	const KB, MB = 1 << 10, 1 << 20
+	cases := []struct {
+		rate float64
+		want int64
+	}{
+		{0, 2 * MB},
+		{50 * KB, 2 * MB},
+		{100 * KB, 3 * MB}, // 下边界落进更快那档
+		{150 * KB, 3 * MB},
+		{200 * KB, 6 * MB},
+		{300 * KB, 6 * MB},
+		{500 * KB, 15 * MB},
+		{800 * KB, 15 * MB},
+		{1 * MB, 30 * MB},
+		{10 * MB, 30 * MB},
+	}
+	for _, c := range cases {
+		if got := chunkSizeForRate(c.rate); got != c.want {
+			t.Errorf("chunkSizeForRate(%v) = %d, want %d", c.rate, got, c.want)
+		}
+	}
+}
+
+func TestWorkerChunkSize(t *testing.T) {
+	if got := workerChunkSize(3<<20, 0); got != chunkSizeMax {
+		t.Fatalf("elapsed<=0 should fall back to chunkSizeMax, got %d", got)
+	}
+	if got := workerChunkSize(3<<20, -time.Second); got != chunkSizeMax {
+		t.Fatalf("negative elapsed should fall back to chunkSizeMax, got %d", got)
+	}
+	// 3MiB 用了 1 秒钟, 吞吐 3MiB/s, 应该落进 >=1MB/s 那档(30MiB)。
+	if got := workerChunkSize(3<<20, time.Second); got != chunkSizeMax {
+		t.Fatalf("workerChunkSize(3MiB, 1s) = %d, want %d", got, chunkSizeMax)
+	}
+}
+
+func TestWantParallel(t *testing.T) {
+	if wantParallel(10*probeChunkSize, 1) {
+		t.Fatal("workers<=1 should never want parallel, regardless of size")
+	}
+	if wantParallel(2*probeChunkSize-1, 4) {
+		t.Fatal("a file just under 2*probeChunkSize should not want parallel")
+	}
+	if !wantParallel(2*probeChunkSize, 4) {
+		t.Fatal("a file exactly 2*probeChunkSize should want parallel (boundary is inclusive)")
+	}
+	if !wantParallel(10*probeChunkSize, 2) {
+		t.Fatal("a clearly large file with workers=2 should want parallel")
+	}
+}
+
+// TestChunkProgressSummaryShowsPieceSize 覆盖 chunkProgress.setPieceSize/summary:
+// 每条连接当前正在传的这一片有多大要出现在进度行里, 这样才看得出是不是某条连接
+// 因为测速偏低被分到了明显更小的分片(见 setPieceSize 的注释)。
+func TestChunkProgressSummaryShowsPieceSize(t *testing.T) {
+	p := newProgress("test", 100)
+	defer p.done()
+	cp := newChunkProgress(2, p)
+
+	cp.setPieceSize(0, 2*1024*1024)
+	cp.setPieceSize(1, 6*1024*1024)
+	cp.update(0, 1000)
+	cp.update(1, 2000)
+
+	line, _ := cp.summary()
+	if !strings.Contains(line, "/"+humanBytes(2*1024*1024)) {
+		t.Fatalf("summary %q missing the first connection's piece size", line)
+	}
+	if !strings.Contains(line, "/"+humanBytes(6*1024*1024)) {
+		t.Fatalf("summary %q missing the second connection's piece size", line)
+	}
+
+	// 换了一片之后展示的应该是新的那个大小, 不是停留在上一片。
+	cp.setPieceSize(0, 3*1024*1024)
+	line, _ = cp.summary()
+	if !strings.Contains(line, "/"+humanBytes(3*1024*1024)) {
+		t.Fatalf("summary %q did not pick up the new piece size", line)
+	}
+	if strings.Contains(line, "/"+humanBytes(2*1024*1024)) {
+		t.Fatalf("summary %q still shows the stale piece size", line)
+	}
+}
+
+func TestRunChunkWorkersCoverage(t *testing.T) {
+	const size = 10 * probeChunkSize
+	const workers = 3
+
+	type claim struct{ offset, length int64 }
+	var mu sync.Mutex
+	var claims []claim
+	firstLength := make([]int64, workers)
+	lastLength := make([]int64, workers)
+	for i := range firstLength {
+		firstLength[i] = -1
+	}
+
+	p := newProgress("test", size)
+	defer p.done()
+	cp := newChunkProgress(workers, p)
+
+	do := func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		mu.Lock()
+		claims = append(claims, claim{offset, length})
+		if firstLength[w] == -1 {
+			firstLength[w] = length
+		}
+		lastLength[w] = length
+		mu.Unlock()
+		onProgress(length)
+		return "", nil
+	}
+
+	if _, err := runChunkWorkers(size, workers, cp, do); err != nil {
+		t.Fatalf("runChunkWorkers: %v", err)
+	}
+
+	sort.Slice(claims, func(i, j int) bool { return claims[i].offset < claims[j].offset })
+	var off, total int64
+	for i, c := range claims {
+		if c.offset != off {
+			t.Fatalf("claim %d starts at %d, want %d (gap or overlap)", i, c.offset, off)
 		}
 		off += c.length
 		total += c.length
 	}
 	if total != size {
-		t.Fatalf("chunks cover %d bytes, want %d", total, size)
+		t.Fatalf("claimed %d bytes total, want %d", total, size)
+	}
+	for w, l := range firstLength {
+		want := int64(probeChunkSize)
+		if l == -1 {
+			continue // 这个 worker 没抢到任何活, 可能发生(见 wantParallel/claim 的边界)
+		}
+		if l > want {
+			t.Errorf("worker %d's first claim was %d bytes, want <= probeChunkSize(%d)", w, l, want)
+		}
+		// runChunkWorkers 应该在每次认领之后把片大小记进 cp(见 setPieceSize), 供
+		// 进度行展示——认领完最后一片, cp 里记的该是那一片的大小, 不是别的。
+		if got := cp.piece[w]; got != lastLength[w] {
+			t.Errorf("worker %d: chunkProgress.piece = %d, want its last claimed length %d", w, got, lastLength[w])
+		}
+	}
+}
+
+func TestRunChunkWorkersErrorStopsOtherWorkers(t *testing.T) {
+	const size = 10 * probeChunkSize
+	const workers = 3
+
+	p := newProgress("test", size)
+	defer p.done()
+	cp := newChunkProgress(workers, p)
+
+	var claimed int64
+	do := func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		atomic.AddInt64(&claimed, length)
+		if offset == 0 {
+			// 认领游标严格按字节顺序发号, 第一个成功认领到的分片永远是 offset==0
+			// 这一片(不论被哪个 worker 抢到), 让它立刻失败, 不需要猜是哪个 worker。
+			return "", errors.New("simulated failure")
+		}
+		// do 是假操作, 瞬间就能把整份文件认领完——真实场景里"其它 worker 别再领
+		// 新的一片"的信号来得及被看到, 是因为真实的一片传输本身要花时间; 这里用
+		// 一点延迟模拟同样的时间窗口, 让失败信号有机会先传播到, 断言才有意义
+		// (否则文件可能在出错的那个 goroutine 设好 firstErr 之前就已经被认领光了)。
+		time.Sleep(5 * time.Millisecond)
+		onProgress(length)
+		return "", nil
+	}
+
+	_, err := runChunkWorkers(size, workers, cp, do)
+	if err == nil {
+		t.Fatal("expected an error to propagate from runChunkWorkers")
+	}
+	// 出错之后不应该把整份文件都认领完——虽然已经在飞的那几片会跑完, 但错误发生后
+	// 不会再有新的认领。跑完的总量必须明显小于文件全长(否则说明其它 worker 没有
+	// 及时停手)。
+	if got := atomic.LoadInt64(&claimed); got >= size {
+		t.Fatalf("claimed %d bytes out of %d after a failure, workers did not stop claiming new work", got, size)
 	}
 }
 
@@ -1013,8 +1362,8 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 	recvDir := t.TempDir()
 	srcDir := t.TempDir()
 
-	// 凑一个不对齐 chunkMinSize 的大小, 顺带盖住"最后一块拿余数"。
-	body := make([]byte, 5*chunkMinSize+777)
+	// 凑一个不对齐 probeChunkSize 的大小, 顺带盖住"最后一块拿余数"。
+	body := make([]byte, 5*probeChunkSize+777)
 	if _, err := rand.Read(body); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -1033,12 +1382,12 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-chunk"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -1047,19 +1396,18 @@ func TestChunkedFileTransferDirect(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	it := items[0]
-	chunks := planChunks(it.size, 3)
-	if len(chunks) < 2 {
-		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
+	if !wantParallel(it.size, 3) {
+		t.Fatalf("expected the test file (%d bytes) to be big enough for parallel chunking", it.size)
 	}
 
 	p := newProgress("test", it.size)
 	// 必须停掉它的渲染 goroutine: 漏掉的话它会一直往 stderr 刷进度行到进程结束,
 	// 把后面用例的输出和失败信息冲乱(见 progress.done 的说明)。
 	defer p.done()
-	sendChunk := func(it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
-		return a.sendFileChunk(sess, it, offset, length, tid, chunkIdx, chunkCount, onProgress)
+	sendChunk := func(worker int, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
+		return a.sendFileChunk(sess, it, offset, length, tid, chunkIdx, onProgress)
 	}
-	saved, err := sendParallel(it, chunks, sendChunk, p)
+	saved, err := sendParallel(it, 3, sendChunk, nil, p)
 	if err != nil {
 		t.Fatalf("chunked send: %v", err)
 	}
@@ -1101,7 +1449,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	recvDir := t.TempDir()
 	srcDir := t.TempDir()
 
-	body := make([]byte, 4*chunkMinSize)
+	body := make([]byte, 4*probeChunkSize)
 	if _, err := rand.Read(body); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
@@ -1120,12 +1468,12 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 		t.Fatalf("transport: %v", err)
 	}
 	const token = "test-token-bad-chunk"
-	c.tokens.put(token, directFilePort)
+	c.tokens.put(token, directFileTag)
 	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	if err := a.authenticateSession(sess, token, directFilePort, false, ""); err != nil {
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 
@@ -1134,7 +1482,19 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 	it := items[0]
-	chunks := planChunks(it.size, 4)
+	cursor := newChunkCursor(it.size)
+	type chunk struct {
+		offset, length int64
+		idx            int
+	}
+	var chunks []chunk
+	for {
+		offset, length, idx, ok := cursor.claim(it.size / 4)
+		if !ok {
+			break
+		}
+		chunks = append(chunks, chunk{offset, length, idx})
+	}
 	if len(chunks) < 2 {
 		t.Fatalf("expected the test file to split into multiple chunks, got %d", len(chunks))
 	}
@@ -1148,7 +1508,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	var firstErr error
 	for i, ch := range chunks {
 		wg.Add(1)
-		go func(i int, ch chunkRange) {
+		go func(i int, ch chunk) {
 			defer wg.Done()
 			stream, err := a.openFileStream(sess)
 			if err != nil {
@@ -1163,7 +1523,7 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 			if i == 1 { // 只破坏中间那一块, 其余块本身都是完整正确的。
 				conn = &corruptOnceConn{fileConn: stream}
 			}
-			if _, err := sendFileOverRange(conn, it, ch.offset, ch.length, tid, i, len(chunks), nil); err != nil {
+			if _, err := sendFileOverRange(conn, it, ch.offset, ch.length, tid, ch.idx, nil); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -1184,5 +1544,216 @@ func TestChunkedFileTransferOneBadChunkFailsWholeFile(t *testing.T) {
 	}
 	if matches, _ := filepath.Glob(dest + ".*" + filePartSuffix); len(matches) != 0 {
 		t.Fatalf("a failed chunked transfer must not leave the .part file behind: %v", matches)
+	}
+}
+
+// TestChunkAssemblyByteCompletion 专门证明分块拼接靠"收到的字节数是否等于整份文件
+// 大小"判断是否收全, 不依赖任何固定片数——三片大小(7/13/5 字节)互不相等、也不是
+// probeChunkSize 的整数倍, 旧的"块数倒计数"模型根本无从谈起, 这正是这次改动要验证
+// 的行为(见 nat/file.go 的 chunkAssembly)。用 sendFileOverRange(客户端)配
+// recvFileOver(服务端)在内存管道上跑, 不需要真实网络。
+func TestChunkAssemblyByteCompletion(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := []byte("abcdefghijklmnopqrstuvwxy") // 25 字节, 切成 7+13+5
+	srcPath := filepath.Join(srcDir, "small.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+	ranges := []struct{ offset, length int64 }{
+		{0, 7}, {7, 13}, {20, 5},
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+	for i, r := range ranges {
+		wg.Add(1)
+		go func(i int, offset, length int64) {
+			defer wg.Done()
+			aSide, cSide := net.Pipe()
+			go func() {
+				defer cSide.Close()
+				recvFileOver(cSide, recvDir, "a@example.com", "test", func(string, ...interface{}) {}, recvOpts{}, nil)
+			}()
+			if _, err := sendFileOverRange(aSide, it, offset, length, tid, i, nil); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+			}
+		}(i, r.offset, r.length)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		t.Fatalf("chunked send: %v", firstErr)
+	}
+
+	got, err := os.ReadFile(filepath.Join(recvDir, "small.bin"))
+	if err != nil {
+		t.Fatalf("read received: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("received %q, want %q", got, body)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "small.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("the .part file was left behind: %v", matches)
+	}
+}
+
+// TestAbortChunkAssemblyOverWire 覆盖 fileHead.Abort(见其注释): 只有一部分分片真的
+// 发出去过, 其余那些从未认领/从未打开过连接的分片永远不会来——光靠字节计数
+// (chunkAssembly.remaining)永远等不到归零, 没有这条显式通知的话只能靠 5 分钟的
+// 空闲回收器兜底(见 reapChunkAssemblies)。发一帧 Abort 应该让接收端立刻收掉
+// .chunks 临时文件与内存状态, 不必等那么久——这正是 -send 用 -parallel 时, 某个
+// worker 出错后 sendParallel 会做的事(见 file_send.go)。
+func TestAbortChunkAssemblyOverWire(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := make([]byte, 4*probeChunkSize)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "abort.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+
+	// 只发第一片(总共本该切成 4 片), 模拟"其余分片永远不会来"——不是靠一个显式
+	// 出错的分片让 remaining 提前扣到零, 是那些分片压根没被认领、没开过连接。
+	aSide, cSide := net.Pipe()
+	go func() {
+		defer cSide.Close()
+		recvFileOver(cSide, recvDir, "a@example.com", "test", func(string, ...interface{}) {}, recvOpts{}, nil)
+	}()
+	quarter := it.size / 4
+	if _, err := sendFileOverRange(aSide, it, 0, quarter, tid, 0, nil); err != nil {
+		t.Fatalf("send first chunk: %v", err)
+	}
+
+	chunkAssemblies.mu.Lock()
+	_, ok := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if !ok {
+		t.Fatal("expected an in-progress assembly after the first chunk")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "abort.bin.*.chunks"+filePartSuffix)); len(matches) != 1 {
+		t.Fatalf("expected one .chunks temp file, got %v", matches)
+	}
+
+	// 发送方这时放弃了(比如另一个 worker 出的错), 告诉接收端别再等了。
+	aSide2, cSide2 := net.Pipe()
+	go func() {
+		defer cSide2.Close()
+		recvFileOver(cSide2, recvDir, "a@example.com", "test", func(string, ...interface{}) {}, recvOpts{}, nil)
+	}()
+	if err := writeFrame(aSide2, fileHead{TransferID: tid, Abort: true}); err != nil {
+		t.Fatalf("send abort: %v", err)
+	}
+	var r fileReply
+	if err := readFrame(aSide2, &r, fileFrameMax); err != nil {
+		t.Fatalf("read abort reply: %v", err)
+	}
+
+	chunkAssemblies.mu.Lock()
+	_, stillThere := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if stillThere {
+		t.Fatal("abort should remove the assembly immediately, not wait for the idle reaper")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "abort.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("abort should delete the .chunks temp file immediately, got %v", matches)
+	}
+}
+
+// TestDirectPeerAbortTransfer 用真实的直连 QUIC 会话覆盖 directPeer.abortTransfer
+// 本身(帧怎么开流/怎么写), 而不是像 TestAbortChunkAssemblyOverWire 那样直接摆一个
+// 手搭的 Abort 帧——两个测试合起来才覆盖了"sendParallel 失败后怎么通知对端"这条
+// 路径从发送方方法到接收端落地的完整链路。
+func TestDirectPeerAbortTransfer(t *testing.T) {
+	recvDir := t.TempDir()
+	srcDir := t.TempDir()
+
+	body := make([]byte, 4*probeChunkSize)
+	if _, err := rand.Read(body); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	srcPath := filepath.Join(srcDir, "abort2.bin")
+	if err := os.WriteFile(srcPath, body, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	c := newAcceptPeer(t, nil)
+	c.cfg.Receive = conf.ClientReceive{Dir: recvDir, Allow: []conf.AllowedSender{{Email: "a@example.com", UUID: testUUIDA}}}
+	a := newDialPeer(t)
+	a.cfg.Email, a.cfg.UUID = "a@example.com", testUUIDA
+
+	tr, err := a.ensureTransport()
+	if err != nil {
+		t.Fatalf("transport: %v", err)
+	}
+	const token = "test-token-abort"
+	c.tokens.put(token, directFileTag)
+	sess, err := a.connectPeer(tr, "c@example.com", peerEndpoint(c), c.fingerprint)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := a.authenticateSession(sess, token, directFileTag, false, ""); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+
+	items, err := collectFiles([]string{srcPath})
+	if err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	it := items[0]
+
+	tid, err := newTransferID()
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+	// 只发第一片, 其余当作发送方已经放弃、永远不会再发。
+	if _, err := a.sendFileChunk(sess, it, 0, it.size/4, tid, 0, nil); err != nil {
+		t.Fatalf("send first chunk: %v", err)
+	}
+	chunkAssemblies.mu.Lock()
+	_, ok := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if !ok {
+		t.Fatal("expected an in-progress assembly after the first chunk")
+	}
+
+	a.abortTransfer(sess, tid)
+
+	chunkAssemblies.mu.Lock()
+	_, stillThere := chunkAssemblies.m[tid]
+	chunkAssemblies.mu.Unlock()
+	if stillThere {
+		t.Fatal("abortTransfer should remove the assembly immediately")
+	}
+	if matches, _ := filepath.Glob(filepath.Join(recvDir, "abort2.bin.*"+filePartSuffix)); len(matches) != 0 {
+		t.Fatalf("abortTransfer should delete the .chunks temp file immediately, got %v", matches)
 	}
 }

@@ -40,8 +40,21 @@ WinDivert 在 Windows 内核网络层注册过滤器，拦截所有 outbound 的
 （以及 UDP/53 DNS、UDP/443 QUIC）。过滤器由 `candidateFilters()` 生成，
 从最优化的到最简的逐级尝试，确保兼容不同 WinDivert 版本。
 
-非 all-ports 模式下，过滤器只捕获目标端口在 `RedirectPorts`（默认 80、443）
+非 all-ports 模式下，过滤器只捕获目标端口在 `RedirectPorts`（默认 80、443，
+可用 `tun.windows.redirectPorts` 配置额外端口，如远程服务的 5000）
 的 TCP 包，以及源端口等于 `ProxyPort` 的回程包（代理→应用的返回流量）。
+
+```yaml
+mode: tun
+tun:
+  windows:
+    redirectPorts: [80, 443, 5000]   # 覆盖默认值，需要的端口都要写全
+```
+
+注意：目的地是 loopback（`127.0.0.1`/`::1`）的连接**始终直连**，不进
+`redirectPorts` 判断——这是防环设计（见下文「两条连接与直连判定」），无法通过
+配置让 WinDivert 拦截发往本机 `localhost:port` 的连接。`redirectPorts` 只对
+「目的地是其它主机/远程服务器」的连接生效。
 
 ### 2. process() 判断与分类
 

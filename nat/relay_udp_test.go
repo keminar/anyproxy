@@ -70,16 +70,23 @@ func relayPair(t *testing.T, target string) (*udpRelay, *udpUplink) {
 	t.Cleanup(func() { relay.conn.Close() })
 	go relay.readLoop()
 
-	// C 侧: forward 白名单的键是 B 的入口端口。
-	up := newUDPUplink("test", relay.conn.LocalAddr().String(), map[uint16]string{relay.port: target})
+	// C 侧: forward 白名单的键改成了 tag, 不再是 B 的入口端口。
+	const tag = "test-tag"
+	up := newUDPUplink("test", relay.conn.LocalAddr().String(), map[string]string{tag: target})
 	t.Cleanup(up.close)
 
 	relay.mu.Lock()
 	relay.upToken = "tok-123"
 	relay.mu.Unlock()
-	if err := up.ensureConn(RelayUDPOpen{Port: relay.port, Token: "tok-123"}); err != nil {
+	if err := up.ensureConn(RelayUDPOpen{Port: relay.port, Tag: tag, Token: "tok-123"}); err != nil {
 		t.Fatalf("uplink: %v", err)
 	}
+	// 生产路径里 onOpen 会先用 tag 解出目标、按物理端口填进 portTarget, 再调用
+	// ensureConn; 这里直接调用 ensureConn 跳过了 onOpen, 所以手工补上同样的效果,
+	// 否则数据面 session() 查 portTarget 会查不到。
+	up.mu.Lock()
+	up.portTarget[relay.port] = target
+	up.mu.Unlock()
 	waitFor(t, time.Second, func() bool { return relay.isUplinkSet() }, "uplink never registered")
 	return relay, up
 }
@@ -285,7 +292,7 @@ func TestRelayUDPReapsIdle(t *testing.T) {
 
 // 端口不在 client.forward 白名单里时要当场回绝, 而不是默默把包丢掉让对面等超时。
 func TestRelayUDPUnmappedPort(t *testing.T) {
-	up := newUDPUplink("test", "127.0.0.1:1", map[uint16]string{3389: "127.0.0.1:3389"})
+	up := newUDPUplink("test", "127.0.0.1:1", map[string]string{"3389": "127.0.0.1:3389"})
 	_, err := up.session(nil, relayUDPHead{session: 1, port: 9999})
 	if err == nil {
 		t.Fatal("an unmapped entry port was accepted")

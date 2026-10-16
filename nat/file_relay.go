@@ -80,6 +80,11 @@ type FileRelayOpen struct {
 // fileRelayOpPull Op 的取值, 空值即默认的"发文件"。
 const fileRelayOpPull = "pull"
 
+// fileRelayOpWol Op 的取值: 请对端广播一次网络唤醒魔术包(见 nat/wol_action.go)。
+// 与发文件/取件共用同一条中继信令(open/ready)和同一份 client.receive.allow, 只是
+// 数据帧从 fileHead/文件字节换成一次 wolRequest/wolReply。
+const fileRelayOpWol = "wol"
+
 // FileRelayReady C 侧检查结果(receive.dir 是否配置、email 是否在 allow 里)。
 type FileRelayReady struct {
 	Err string `json:"err"` // 非空表示 C 拒绝, 原因会一路带回 A
@@ -438,37 +443,51 @@ func onFileRelayOpen(c *Client, msg *Message) {
 		body, _ := json.Marshal(FileRelayReady{Err: errStr})
 		c.hub.broadcast <- &CMessage{client: c, message: &Message{ID: msg.ID, Type: ConnFileRelay, Method: METHOD_FILE_RELAY_READY, Body: body}}
 	}
-	if cfg.Dir == "" {
-		// 同一个目录既是收文件的落地处, 也是可被取走的根, 所以两个方向共用这句判断。
-		reply("peer does not accept files (websocket.client.receive.dir is not set)")
-		return
+	if req.Op != fileRelayOpWol {
+		if cfg.Dir == "" {
+			// 同一个目录既是收文件的落地处, 也是可被取走的根, 所以两个方向共用这句判断。
+			// 唤醒请求不落盘, 不受它限制(见下面 fileRelayOpWol 分支)。
+			reply("peer does not accept files (websocket.client.receive.dir is not set)")
+			return
+		}
+		// 只读只挡写入方向, 取件照常。放在解密之前: 拒绝的理由与身份无关, 没必要先把
+		// 会话建起来再说。
+		if cfg.ReadOnly && req.Op != fileRelayOpPull {
+			reply(readOnlyRefusal)
+			return
+		}
 	}
-	// 只读只挡写入方向, 取件照常。放在解密之前: 拒绝的理由与身份无关, 没必要先把
-	// 会话建起来再说。
-	if cfg.ReadOnly && req.Op != fileRelayOpPull {
-		reply(readOnlyRefusal)
-		return
-	}
-	uuid, ok := cfg.Lookup(req.FromEmail)
+	// 唤醒请求复用同一份 allow 名单当作"谁能让我做点本机之外的事"的权限边界, 但不要求
+	// 配了 receive.dir/readonly——那两个字段管的是文件读写, 与广播一个网络包无关。
+	sender, ok := cfg.LookupSender(req.FromEmail)
 	if !ok {
 		reply(fmt.Sprintf("email %s is not in websocket.client.receive.allow", req.FromEmail))
 		return
 	}
 	// 派生加密密钥前先校验格式: 配置里这条 uuid 要是本来就不合法(手改坏了), 拿它
 	// 派生出的 key 毫无意义, 应该直接拒绝, 而不是让对端在解密阶段莫名其妙地失败。
-	if !conf.IsValidUUID(uuid) {
+	if !conf.IsValidUUID(sender.UUID) {
 		reply(fmt.Sprintf("configured uuid for %s is not a valid uuid", req.FromEmail))
+		return
+	}
+	// 收发文件在 allow 里就默认放行, 网络唤醒是另一件事(骚扰局域网里别的设备, 不是
+	// 读写这台机器上的文件), 单独要求 allow[].wol: true, 默认关闭。
+	if req.Op == fileRelayOpWol && !sender.Wol {
+		reply(fmt.Sprintf("email %s is not allowed to request wol (set websocket.client.receive.allow[].wol: true)", req.FromEmail))
 		return
 	}
 	// senderKey/receiverKey 顺序要跟 sendFileViaRelay 那边反过来: 我是接收方, 写用
 	// receiverKey、读用 senderKey。
-	senderKey, receiverKey, err := deriveRelaySessionKeys(uuid, req.Salt)
+	senderKey, receiverKey, err := deriveRelaySessionKeys(sender.UUID, req.Salt)
 	if err != nil {
 		reply(fmt.Sprintf("bad salt: %v", err))
 		return
 	}
-	reply("")
-
+	// 必须先建好 session 并登记进 fileRelayPipes, 再回 ready。反过来做(A 收到
+	// ready 立刻开写, 而这里还没 Store)会留下一个竞态窗口: 数据经 B 转发到本端读
+	// pump 时 fileRelayPipes.Load 还没命中, 这条消息就被当成"不属于任何会话"漏掉,
+	// 甚至可能挂到旧会话残留的同 id pipe 上, 表现是解密失败
+	// (aead: decrypt/auth failed)。并行分块时 3 个会话同时开, 窗口更容易撞上。
 	s := newFileRelaySession(c, msg.ID)
 	secured, err := newAEADConn(s.pipe, receiverKey, senderKey)
 	if err != nil {
@@ -476,9 +495,14 @@ func onFileRelayOpen(c *Client, msg *Message) {
 		s.close(fmt.Sprintf("server-side decryption setup failed: %v", err))
 		return
 	}
+	reply("")
+
 	remote := fmt.Sprintf("relay:%s", req.FromEmail)
 	if req.Op == fileRelayOpPull {
 		servePull(secured, cfg, req.FromEmail, remote, logf)
+		fileRelayPipes.Delete(fileRelayKey{c, msg.ID})
+	} else if req.Op == fileRelayOpWol {
+		serveWolOver(secured, req.FromEmail, remote, logf)
 		fileRelayPipes.Delete(fileRelayKey{c, msg.ID})
 	} else {
 		// onDone: 收完/出错都立刻用 s.close 把结果广播成一条 METHOD_CLOSE, 不留给
@@ -494,7 +518,7 @@ func onFileRelayOpen(c *Client, msg *Message) {
 		// closeWithError(此时 r.Err 非空)/Close(r.Err 为空即成功), 直接关掉 p.done——
 		// 那正是 waitWindow 的 select 里等着的信号之一, 一到就立刻返回, 不必再等满
 		// 60 秒。成功的一路也顺带把 A 那侧原本从未清理过的 fileRelayPipes 记录收掉。
-		recvFileOver(secured, cfg.Dir, req.FromEmail, remote, logf, func(r fileReply) {
+		recvFileOver(secured, senderDir(cfg, sender), req.FromEmail, remote, logf, recvOpts{}, func(r fileReply) {
 			s.close(r.Err)
 		})
 	}
@@ -571,7 +595,7 @@ func sendFileViaRelay(client *Client, toEmail string, it fileItem, onProgress fu
 // sendFileChunkViaRelay 是 sendFileViaRelay 的分块版, 供单文件并行分块传输用(见
 // file_send.go 的 parallel 参数)。每一块各自调一次 openRelayConn——协议本身早就
 // 支持"随时开一条新的加密会话"(每次都是独立的 salt/密钥), 不需要为分块单独改握手。
-func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, length int64, tid string, chunkIdx, chunkCount int, onProgress func(int64)) (string, error) {
+func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, length int64, tid string, chunkIdx int, onProgress func(int64)) (string, error) {
 	secured, sess, err := openRelayConn(client, toEmail, "")
 	if err != nil {
 		return "", err
@@ -580,5 +604,29 @@ func sendFileChunkViaRelay(client *Client, toEmail string, it fileItem, offset, 
 	if onProgress != nil {
 		sess.pipe.setOnAcked(onProgress)
 	}
-	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, chunkCount, nil)
+	return sendFileOverRange(secured, it, offset, length, tid, chunkIdx, nil)
+}
+
+// probeFileViaRelay 经中继探测收方有没有同名文件(见 file_conflict.go), 每次探测一条新会话。
+func probeFileViaRelay(client *Client, toEmail string, it fileItem, noHash bool, notify func(string)) (*probeResult, error) {
+	secured, _, err := openRelayConn(client, toEmail, "")
+	if err != nil {
+		return nil, err
+	}
+	return probeOver(secured, it, noHash, notify)
+}
+
+// abortTransferViaRelay 是 abortTransfer(nat/file.go)的中继版, 见其注释: 告诉对端放弃
+// tid 标记的这次分块并行传输。同样尽力而为, 开会话/读回应失败都不当错误处理。
+func abortTransferViaRelay(client *Client, toEmail, tid string) {
+	secured, _, err := openRelayConn(client, toEmail, "")
+	if err != nil {
+		return
+	}
+	defer secured.Close()
+	if err := writeFrame(secured, fileHead{TransferID: tid, Abort: true}); err != nil {
+		return
+	}
+	var r fileReply
+	_ = readFrame(secured, &r, fileFrameMax)
 }

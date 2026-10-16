@@ -25,7 +25,7 @@ Paired capture methods:
 ./anyproxy -mode tunnel
 ```
 
-- `token`: the key for communicating with the client anyproxy; both ends must match and the **length must be 16 characters**.
+- `token`: the key for communicating with the client anyproxy; both ends must match. Any length is accepted — it's internally normalized into a 16-byte AES key.
 - The client points to it with `-p 'tunnel://<tunneld-ip>:3001'` or `hosts[].proxy: tunnel://...`.
 - Multi-level chaining is supported: anyproxy → tunneld A → tunneld B → Internet.
 

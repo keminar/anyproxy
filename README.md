@@ -143,6 +143,10 @@ Client proxy settings: point your OS / browser proxy at the anyproxy listen port
 
 Full table of contents see [docs/README.md](docs/en/README.md).
 
+## Disclaimer
+
+This program is built for legitimate connectivity needs. **It is not designed for, and is not well-suited to, circumventing network censorship or accessing restricted content**; any consequences arising from such use, or from being mistaken for such use, are the user's own and not the project's or its author's.
+
 ## License
 
 [MIT](LICENSE) © [keminar](https://github.com/keminar)

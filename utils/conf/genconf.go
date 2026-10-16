@@ -99,7 +99,7 @@ func EnsureLogDir() (dir string, created bool, err error) {
 
 // GenNextSteps 生成后的"接下来干什么", 免得拿到文件还得翻文档。
 func GenNextSteps(mode, path string) []string {
-	steps := []string{fmt.Sprintf("edit %s, at least change token (16 chars) and confirm listen", path)}
+	steps := []string{fmt.Sprintf("edit %s, at least change token (any length, both ends must match) and confirm listen", path)}
 	switch mode {
 	case "proxy":
 		steps = append(steps, "set default.proxy, or pass -p at startup to point at an upstream proxy")
@@ -142,7 +142,7 @@ func genHead(mode string) string {
 
 func genBase(mode string) string {
 	listen := ":3000"
-	listenNote := "# 代理监听地址端口, 优先级低于启动传参 -l。填 off 则不起代理监听, 只跑 websocket/tun 等后台服务"
+	listenNote := "# 代理监听地址端口, 优先级低于启动传参 -l。可逗号分隔写多个完整地址(各自带端口), 同时绑定多个内网网段 IP。填 off 则不起代理监听, 只跑 websocket/tun 等后台服务"
 	if mode == "tunnel" {
 		listen = ":3001"
 		listenNote = "# tunneld 服务端监听地址端口, 客户端用 -p tunnel://<本机IP>:3001 指过来"
@@ -157,7 +157,8 @@ log:
 # 配置文件改动后自动热加载(default/hosts 等即时生效)
 watcher: true
 
-# anyproxy 与 tunneld 之间的通信密钥, 必须 16 位。两端必须一致, 请改掉这个默认值
+# anyproxy 与 tunneld 之间的通信密钥, 长度不限(内部会自动归一化成16位AES key)。
+# 两端必须一致, 请改掉这个默认值
 token: anyproxyproxyany
 
 # 允许连接本机监听端口的客户端 IP(单 IP 或 CIDR), 留空不限制
@@ -388,11 +389,12 @@ func genWebsocketServer() string {
     # 可接入来源 IP 白名单(CIDR/单 IP), 留空不限制; loopback 始终放行
     allowIP:
     #  - 172.17.0.0/16
-    # 端口转发入口: 在本机 listen 收连接, 转给该 email 的订阅方, 由对方按端口查它的 client.forward
+    # 端口转发入口: 在本机 listen 收连接, 转给该 email 的订阅方, 由对方按 tag 查它的 client.forward
     # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
     forward:
     #  - listen: "tcp://:2222"
     #    email: someone@example.com
+    #    tag: ssh   # 与订阅方 client.forward[].tag 配对, 不再靠端口数值凑巧相等
 `
 }
 
@@ -416,20 +418,21 @@ func genWebsocketClient() string {
     subscribe:
     #  - key:
     #    val:
-    # 裸 TCP 落地表: 服务端(或直连)按 port 找到这里, dial 写死的 target; 未列出的 port 一律拒绝
+    # 裸 TCP 落地表: 服务端(或直连)按 tag 找到这里, dial 写死的 target; 未列出的 tag 一律拒绝
     forward:
-    #  - port: 2222
+    #  - tag: ssh
     #    target: 127.0.0.1:22
     # QUIC 直连(数据不经服务端)与盲转发中继相关的全部配置, 都挂在这一个块下
     direct:
       # 允许别的订阅方 QUIC 直连本机, 监听按需起, 平时不占端口
       accept: false
-      # 本机直连入口: 在 listen 收连接, 直接送给 email 对应的订阅方, 由对方按 forwardPort 查它的 forward
+      # 本机直连入口: 在 listen 收连接, 直接送给 forward.email 对应的订阅方, 由对方按 forward.tag 查它的 forward
       # listen 可加协议前缀 tcp://(默认, 可不写) / udp:// / both://, both 适合 RDP(TCP 3389 + UDP 3389)
       rules:
       #  - listen: "both://:13389"
-      #    email: someone@example.com
-      #    forwardPort: 3389  # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个端口就拒绝(白名单), 别人不能靠瞎填端口探到对方的其它转发目标
+      #    forward:
+      #      email: someone@example.com
+      #      tag: rdp         # 选对方 forward[] 里哪条规则, 不是内网目标端口; 对方没配这个 tag 就拒绝(白名单), 别人不能靠瞎填 tag 探到对方的其它转发目标
       #    via: relay-vps     # 可选: 经这个 email 对应的公网 VPS(需开 direct.relay)盲转发中继, 打洞直连打不通时用
       # 直连(QUIC)默认吃 quic-go 对 UDP 的批量收发/ECN 优化; 极少数机器上(常见于某些
       # 网卡驱动/虚拟网卡)这条优化本身会导致丢包、拥塞窗口涨不起来, 症状是直连传输
@@ -443,6 +446,8 @@ func genWebsocketClient() string {
     #  allow:                 # 留空 = 谁都不接受; uuid 抄对方的 .<配置文件同名>.uuid(隐藏文件), 名单双向生效
     #    - email: someone@example.com
     #      uuid:
+    #      wol: false          # true 才允许这个 email 用 -wol 让本机代为广播网络唤醒包, 默认 false
+    #      dir:                # 这个 email 上传时的落地目录, 覆盖上面共享的 dir; 留空则跟其他人一样落到 dir
     # 上面 subscribe/forward/direct/receive 全不配时, 常驻进程会自动跳过
     # 这条配置(只留给 -send/-recv 命令行用), 通常不用管这项; 想强制跳过就设 true
     #sendRecvOnly: false

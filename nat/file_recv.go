@@ -7,7 +7,6 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/keminar/anyproxy/config"
@@ -63,9 +62,13 @@ func splitRecvSpec(recv string) (email, remotePath string, err error) {
 // to 是本地存放目录, 与 -send 的 -to 共用同一个命令行参数、按场景解释成不同的东西:
 // -send 时是"发给谁", -recv 时是"存哪儿"。留空则存到当前目录。
 //
-// parallel 与 SendFiles 同一个参数、同一个阈值判断(见 planChunks): 单个文件够大时
-// 按 e.Size(清单里已经有, 不用额外问一次)切块, 各开一条独立连接并行取。
-func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
+// parallel 与 SendFiles 同一个参数、同一个阈值判断(见 wantParallel): 单个文件够大时
+// 按 e.Size(清单里已经有, 不用额外问一次)分块, 各开一条独立连接并行取, 每条连接
+// 按自己实测的速度动态决定分片大小(见 chunkSizeForRate)。
+//
+// conflict 是本机已有同名文件时的处理方式(见 ParseConflict 与 file_conflict.go): 空串表示
+// 终端里逐个询问、否则自动改名。
+func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int, conflict string) error {
 	if cfg.Connect == "" {
 		return fmt.Errorf("websocket.client.connect is empty, cannot reach the server")
 	}
@@ -82,6 +85,11 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	if from == cfg.Email {
 		return fmt.Errorf("-recv %s is this machine's own email", from)
 	}
+	res, err := newConflictResolver(conflict, conflictIn, os.Stderr)
+	if err != nil {
+		return err
+	}
+	parallel = clampParallel(parallel)
 	actualVia, relayVia := resolveVia(via)
 	if relayVia != "" {
 		if relayVia == cfg.Email {
@@ -119,32 +127,51 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 	defer sender.close()
 
 	// openPull 每次给出一条新的取件通道, 之后的清单/取件循环共用 —— 与 SendFiles 里
-	// 那个 send 函数完全同构, 两条路径的差别只在这一层。
+	// 那个 send 函数完全同构, 两条路径的差别只在这一层。openPullChunk 是分块并行取用
+	// 的版本, 接的是 worker 编号(0 开始, 一个 worker 绑一条连接), 好在 direct 路径下
+	// 挑打开的那几条独立连接之一——不是 chunk 下标, 一个 worker 会陆续处理好几片。
 	var openPull func() (fileConn, error)
+	var openPullChunk func(worker int) (fileConn, error)
+	// workers 是 recvParallel 该开几个抢活的 worker, 含义与 file_send.go 的同名变量
+	// 一致: direct 下是实际打通的独立连接数, relay 下是 parallel 本身当并发上限。
+	var workers int
 	switch actualVia {
 	case ViaDirect:
-		// 一次直连, 所有文件共用 —— 每个文件占一条 stream, 不必反复打洞。打洞/握手的
-		// 过程日志挂在 quiet 后面不显示(见 nat/file_send.go 里同一处改动的说明), 这
-		// 两行独立于那套调试日志之外, 让一次性命令不至于在打洞期间空等无输出。
+		// parallel>1 时这里可能打出最多 parallel 条相互独立的连接(见
+		// ensureParallelSessions), 跟 -send 那边同一个理由: 各自维护自己的拥塞窗口,
+		// 链路有丢包时聚合吞吐能接近线性提升。打洞/握手的过程日志挂在 quiet 后面不
+		// 显示(见 nat/file_send.go 里同一处改动的说明), 这两行独立于那套调试日志
+		// 之外, 让一次性命令不至于在打洞期间空等无输出。
 		if relayVia != "" {
 			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch, blind-relayed through %s)...\n", from, relayVia)
 		} else {
 			fmt.Fprintf(os.Stderr, "connecting to %s via direct (NAT punch)...\n", from)
 		}
 		punchStart := time.Now()
-		rule := conf.ClientDirect{Email: from, ForwardPort: directFilePort, Via: relayVia}
-		sess, err := sender.peer.ensureSession(rule)
+		rule := conf.ClientDirect{Forward: conf.DirectForwardTarget{Email: from, Tag: directFileTag}, Via: relayVia}
+		sessions, err := sender.peer.ensureParallelSessions(rule, parallel)
 		if err != nil {
 			return fmt.Errorf("direct connect to %s failed, nothing was fetched: %w", from, err)
 		}
-		fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
-			from, sess.addr, time.Since(punchStart).Round(time.Millisecond))
-		openPull = func() (fileConn, error) { return sender.peer.openPullStream(sess) }
+		if len(sessions) > 1 {
+			fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s, %d independent connections)\n",
+				from, sessions[0].addr, time.Since(punchStart).Round(time.Millisecond), len(sessions))
+		} else {
+			fmt.Fprintf(os.Stderr, "connected to %s at %s (punch %s)\n",
+				from, sessions[0].addr, time.Since(punchStart).Round(time.Millisecond))
+		}
+		workers = len(sessions)
+		openPull = func() (fileConn, error) { return sender.peer.openPullStream(sessions[0]) }
+		openPullChunk = func(worker int) (fileConn, error) {
+			return sender.peer.openPullStream(sessions[worker])
+		}
 	case ViaRelay:
+		workers = parallel
 		openPull = func() (fileConn, error) {
 			conn, _, err := openRelayConn(sender.client, from, fileRelayOpPull)
 			return conn, err
 		}
+		openPullChunk = func(int) (fileConn, error) { return openPull() }
 	}
 
 	// recvFileOver 内部那行 "saved ..." 在 daemon 场景是唯一的记录, 但这里每个文件
@@ -178,86 +205,108 @@ func RecvFiles(cfg conf.WsClient, recv, to, via string, parallel int) error {
 		len(entries), humanBytes(total), from, via, dir)
 
 	var gotBytes int64
+	skipped := 0
+	// warnedParallelNoResume 只提示一次, 理由同 file_send.go 的同名变量。
+	warnedParallelNoResume := false
 	for i, e := range entries {
 		start := time.Now()
 		prefix := fmt.Sprintf("[%d/%d] %s", i+1, len(entries), e.Name)
+
+		// 同名协商放在进度条之前: 它要向用户提问, 进度条的定时重绘会把提示冲掉。
+		plan := pullPlan{act: ConflictRename}
+		if res.policy != ConflictRename {
+			var perr error
+			plan, perr = res.preparePull(dir, e, func(n int64) (string, error) {
+				hc, err := openPull()
+				if err != nil {
+					return "", err
+				}
+				defer hc.Close()
+				return pullHash(hc, e, n)
+			})
+			if perr != nil {
+				return fmt.Errorf("%s: %w", e.Name, perr)
+			}
+			if plan.act == ConflictSkip {
+				fmt.Fprintf(os.Stderr, "%s -> skipped\n", prefix)
+				skipped++
+				continue
+			}
+		}
 		p := newProgress(prefix, e.Size)
+		resumeAt := plan.resumeAt
 
 		var saved string
 		var err error
-		if chunks := planChunks(e.Size, parallel); chunks != nil {
-			saved, err = recvParallel(openPull, dir, e, from, remote, logf, chunks, p)
+		if plan.resumePart != "" {
+			// 续传(覆盖或重命名都会续)只取一段尾巴, 不做分块并行; 进度从已有的字节数起算。
+			var conn fileConn
+			if conn, err = openPull(); err == nil {
+				saved, err = pullFileAct(conn, dir, e, from, remote, logf, func(n int64) { p.update(resumeAt + n) }, plan)
+				conn.Close()
+			}
+		} else if wantParallel(e.Size, workers) {
+			if !warnedParallelNoResume {
+				warnedParallelNoResume = true
+				fmt.Fprintln(os.Stderr, "note: -parallel transfers write several independent .chunks temp files and cannot be resumed if interrupted; an interrupted file restarts from scratch")
+			}
+			saved, err = recvParallel(openPullChunk, workers, dir, e, from, remote, logf, plan.act, p)
 		} else {
 			var conn fileConn
 			if conn, err = openPull(); err == nil {
-				saved, err = pullFile(conn, dir, e, from, remote, logf, p.update)
+				saved, err = pullFileAct(conn, dir, e, from, remote, logf, p.update, plan)
 				conn.Close()
 			}
 		}
 		p.done()
+		shown := p.wasShown()
 		if err != nil {
 			// 与 -send 一致: 中途出错就停下并报错退出, 不跳过继续取剩下的 —— 半份
 			// 目录静默地"成功"了, 比明确失败坏得多。
 			return fmt.Errorf("%s: %w", e.Name, err)
 		}
 		gotBytes += e.Size
-		fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
-			humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
+		// 见 file_send.go 同一处的注释: 文件名已经在进度行上头单独打印过的话不再
+		// 重复念它, 只续接结果; 没渲染过进度的话照旧带上文件名。
+		if shown {
+			fmt.Fprintf(os.Stderr, "  -> %s  (%s in %s, %s)\n", saved,
+				humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
+		} else {
+			fmt.Fprintf(os.Stderr, "%s -> %s  (%s in %s, %s)\n", prefix, saved,
+				humanBytes(e.Size), time.Since(start).Round(time.Millisecond), rate(e.Size, time.Since(start)))
+		}
 	}
-	fmt.Fprintf(os.Stderr, "done: %d file(s), %s\n", len(entries), humanBytes(gotBytes))
+	fmt.Fprintf(os.Stderr, "done: %d file(s), %s%s\n", len(entries)-skipped, humanBytes(gotBytes), skippedNote(skipped))
 	return nil
 }
 
-// recvParallel 把一个文件按 chunks 描述的区间拆成多条独立连接并行取, 是 pullFile 的
-// 分块版编排。每一块各自调 openPull 要一条新连接——它对 direct/relay 一视同仁, 不用
-// 在这里再分 via。失败语义与 sendParallel 对称: 任意一块出错就让整份文件报错。
-func recvParallel(openPull func() (fileConn, error), dir string, e filePullEntry, from, remote string,
-	logf func(string, ...interface{}), chunks []chunkRange, p *progress) (string, error) {
+// recvParallel 是 sendParallel 的取件方向对应版本: 同一份 runChunkWorkers(见
+// nat/file.go)编排认领/测速/按各自速度选分片大小, 这里只负责生成 transfer id、
+// 把"开一条通道再取一片"接进去。openPull(w) 用 worker 编号 w 要一条通道——direct
+// 路径下 w 挑打开的那几条独立连接之一(见 RecvFiles 的 openPullChunk), relay 路径
+// 忽略 w, 每次都是独立会话。失败语义与 sendParallel 对称: 任意一块出错就让整份
+// 文件报错, 其它 worker 认领下一片之前会先看到错误就地退出。
+func recvParallel(openPull func(worker int) (fileConn, error), workers int, dir string, e filePullEntry, from, remote string,
+	logf func(string, ...interface{}), act string, p *progress) (string, error) {
 	tid, err := newTransferID()
 	if err != nil {
 		return "", fmt.Errorf("generate transfer id: %w", err)
 	}
-	cp := newChunkProgress(len(chunks), p)
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var firstErr error
-	var saved string
-	for i, c := range chunks {
-		wg.Add(1)
-		go func(i int, c chunkRange) {
-			defer wg.Done()
-			conn, err := openPull()
-			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-				return
-			}
-			s, err := pullFileChunk(conn, dir, e, from, remote, logf, tid, i, len(chunks), c.offset, c.length,
-				func(sent int64) { cp.update(i, sent) })
-			conn.Close()
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				return
-			}
-			if s != "" {
-				saved = s
-			}
-		}(i, c)
-	}
-	wg.Wait()
-	if firstErr != nil {
+	// 进度按 worker(连接)算, 不是按 chunk 算, 理由同 sendParallel。
+	cp := newChunkProgress(workers, p)
+	saved, err := runChunkWorkers(e.Size, workers, cp, func(w int, offset, length int64, idx int, onProgress func(int64)) (string, error) {
+		conn, err := openPull(w)
+		if err != nil {
+			return "", err
+		}
+		defer conn.Close()
+		return pullFileChunk(conn, dir, e, from, remote, logf, tid, idx, offset, length, act, onProgress)
+	})
+	if err != nil {
 		// 其它分块可能已经在接收端创建了 assembly；主动取消并清理，
 		// 否则一次性 -recv 进程退出前不会等到后台 reaper 执行。
 		abortChunkAssembly(tid)
-		return "", firstErr
+		return "", err
 	}
 	return saved, nil
 }
